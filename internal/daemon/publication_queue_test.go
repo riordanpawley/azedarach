@@ -1433,13 +1433,15 @@ func TestPublicationStoreRoutesRegisteredProjectIntentAtomically(t *testing.T) {
 	if _, err := registeredStore.PublicationOperations(context.Background(), registeredID, "", false); err != nil {
 		t.Fatal(err)
 	}
-	params := issues.IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "test", Payload: map[string]any{
+	params := issues.IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
 		"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint,
 	}}
 	admission, err := issueClient.CaptureReviewAdmissionPin(context.Background(), issueID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	operation.ReviewEpochEventID = admission.ReviewEpochEventID
+	operation.AcceptedReviewEventID = 0
 	if _, err := issueClient.ClaimOwnershipWithRuntime(context.Background(), registeredID, issueID, issues.OwnershipClaimParams{
 		OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview,
 		ExpectedReviewAdmission: &admission, ReviewSourceOID: operation.SourceRevision,
@@ -1461,7 +1463,8 @@ func TestPublicationStoreRoutesRegisteredProjectIntentAtomically(t *testing.T) {
 func daemonTestPublicationOperation(projectID, operationID, issueID, intent, source string, created time.Time) domain.PublicationOperation {
 	return domain.PublicationOperation{
 		OperationID: operationID, ProjectID: projectID, IssueID: issueID, IntentKey: intent,
-		RequestFingerprint: "fingerprint", ActorID: "reviewer", TargetID: "base", TargetBranch: "main",
+		RequestFingerprint: "fingerprint", ActorID: "reviewer", ActorKind: domain.ReviewerOwnerKindOrchestrator,
+		ReviewEpochEventID: 1, AcceptedReviewEventID: 2, AcceptedPublicationOperationID: operationID, TargetID: "base", TargetBranch: "main",
 		SourceRevision: source, BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "go:test",
 		ValidationCommand: "npm test", EvidenceDigest: "evidence", State: domain.PublicationOperationQueued, CreatedAt: created,
 	}

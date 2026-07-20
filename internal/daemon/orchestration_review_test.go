@@ -1055,7 +1055,7 @@ func TestReviewReturnAcceptsFailedAggregateGateFromCurrentReviewEpochAfterWorker
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 	t.Cleanup(func() { _ = runtime.Close() })
 	now := time.Now().UTC()
-	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: "orchestrator", ReviewEpochEventID: reviewEpochEventID, TTL: time.Minute}, now)
+	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: "orchestrator", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: reviewEpochEventID, PublicationOperationID: "publication-review-gate", AcceptedReviewEventID: 2, AcceptedPublicationOperationID: "publication-review-gate", TTL: time.Minute}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1100,7 +1100,7 @@ func TestReviewReturnRejectsCompletedExitZeroAggregateGateDuringActiveValidation
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 	t.Cleanup(func() { _ = runtime.Close() })
 	now := time.Now().UTC()
-	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "successful-review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: "orchestrator", ReviewEpochEventID: reviewEpochEventID, TTL: time.Minute}, now)
+	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "successful-review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeCapacity, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: "orchestrator", ReviewEpochEventID: reviewEpochEventID, TTL: time.Minute}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1144,7 +1144,7 @@ func TestReviewReturnRejectsActiveValidationAssignmentForWrongActorOrRevision(t 
 			runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 			t.Cleanup(func() { _ = runtime.Close() })
 			now := time.Now().UTC()
-			_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: tc.gateRevision, ReviewerID: tc.gateReviewer, ReviewEpochEventID: epochID, TTL: time.Minute}, now)
+			_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeCapacity, Profile: "cold", Command: "just test", SourceRevision: tc.gateRevision, ReviewerID: tc.gateReviewer, ReviewEpochEventID: epochID, TTL: time.Minute}, now)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1775,15 +1775,15 @@ func TestReviewAcceptTrustsDecisionOverInternalReviewArtifactWithoutTreatingArti
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reopened.Failed) != 0 || len(reopened.Closed) != 1 || reopened.Closed[0] != issueID {
-		t.Fatalf("reopened retry = %+v, want current-state authoritative close", reopened)
+	if got := reopened.Failed[issueID]; !strings.Contains(got, "accepted review epoch no longer matches current admission") || len(reopened.Closed) != 0 {
+		t.Fatalf("reopened retry = %+v, want stale accepted epoch rejection", reopened)
 	}
 	task, err = client.GetWithRuntime(ctx, "project", issueID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task.Status != domain.StatusDone {
-		t.Fatalf("reopened review status = %s, want done after same-key recovery", task.Status)
+	if task.Status != domain.StatusOpen {
+		t.Fatalf("reopened review status = %s, want open after stale acceptance rejection", task.Status)
 	}
 }
 
@@ -1915,7 +1915,7 @@ func TestReviewAcceptSameIntentRecoversAfterCloseFailure(t *testing.T) {
 		Type:          domain.IssueEventReviewCompleted,
 		Source:        "daemon-orchestration",
 		SourceCommand: string(protocol.OrchestrationIntentReviewReturn),
-		Payload:       map[string]any{"actor_id": "orchestrator", "intent_key": "newer-return", "outcome": "returned"},
+		Payload:       map[string]any{"actor_id": "orchestrator", "actor_kind": domain.ReviewerOwnerKindOrchestrator, "intent_key": "newer-return", "outcome": "returned"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1976,7 +1976,21 @@ func TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion(t *t
 	}
 	request := protocol.OrchestrationIntentRequest{Scope: rootedScope, Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-review-batch", ActorID: "orchestrator", IssueIDs: ids, RepoDir: repoDir}
 	authority := daemonOrchestrationAuthority{daemon: d}
-	if err := authority.recordReviewOutcome(ctx, "project", ids[0], request, "accepted", ""); err != nil {
+	admission, err := client.CaptureReviewAdmissionPin(ctx, ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", ids[0], issues.OwnershipClaimParams{
+		OwnerID: request.ActorID, OwnerKind: domain.ReviewerOwnerKindOrchestrator, Purpose: domain.CoordinationLeaseReview,
+		ExpectedReviewAdmission: &admission, ExpectedParentIssueID: rootID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	params := issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
+		Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request), "review_epoch_event_id": admission.ReviewEpochEventID},
+	}
+	if _, err := client.AppendIssueObservationEventWithReviewAdmission(ctx, ids[0], params, admission, rootID, request.ActorID); err != nil {
 		t.Fatal(err)
 	}
 	result, err := authority.Apply(ctx, "project", request)
@@ -2049,8 +2063,8 @@ func TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState(t *tes
 	if task.Status != domain.StatusInReview {
 		t.Fatalf("failed integration task = %+v, want review state preserved", task)
 	}
-	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease != nil {
-		t.Fatalf("failed integration review lease = %+v, want released after durable acceptance", lease)
+	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease == nil || !(domain.ReviewerIdentity{OwnerID: "orchestrator", OwnerKind: domain.ReviewerOwnerKindOrchestrator}).Matches(lease.OwnerID, lease.OwnerKind) {
+		t.Fatalf("failed integration review lease = %+v, want accepted reviewer authority retained", lease)
 	}
 	reviewEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
 	if err != nil {
@@ -2149,7 +2163,7 @@ func TestReviewAcceptRetryRejectsBranchMutationAfterDurableAcceptance(t *testing
 	}
 }
 
-func TestReviewAcceptTerminalCloseRejectsEvidenceMutationAfterLeaseRelease(t *testing.T) {
+func TestReviewAcceptTerminalCloseBlocksEvidenceMutationWhileReviewerLeaseIsFenced(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
@@ -2173,19 +2187,23 @@ func TestReviewAcceptTerminalCloseRejectsEvidenceMutationAfterLeaseRelease(t *te
 	}
 	mutated := mustWorkerEvidencePayload(t)
 	mutated["summary"] = "new evidence after review acceptance"
-	d.reviewLeaseReleasedBeforeClose = func(hookCtx context.Context, _, releasedIssueID string) error {
-		d.reviewLeaseReleasedBeforeClose = nil
-		_, err := client.AppendIssueObservationEvent(hookCtx, releasedIssueID, issues.IssueObservationEventParams{
+	var mutationErr error
+	d.reviewLeaseFencedBeforeClose = func(hookCtx context.Context, _, releasedIssueID string) error {
+		d.reviewLeaseFencedBeforeClose = nil
+		_, mutationErr = client.AppendIssueObservationEvent(hookCtx, releasedIssueID, issues.IssueObservationEventParams{
 			Type: domain.IssueEventEvidenceSubmitted, Source: "late-worker", Payload: mutated,
 		})
-		return err
+		return nil
 	}
 	retried, err := d.orchestrationAuthority().Apply(ctx, "project", request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failure := retried.Failed[issueID]; !strings.Contains(failure, "reviewed evidence changed") || !strings.Contains(failure, "authoritative close") {
-		t.Fatalf("post-release evidence mutation = %+v, want terminal close revalidation failure", retried)
+	if !errors.Is(mutationErr, domain.ErrConflict) {
+		t.Fatalf("fenced evidence mutation error = %v, want conflict", mutationErr)
+	}
+	if failure := retried.Failed[issueID]; !strings.Contains(failure, "authoritative close") || strings.Contains(failure, "reviewed evidence changed") {
+		t.Fatalf("fenced evidence mutation = %+v, want unchanged evidence to reach authoritative close", retried)
 	}
 	task, err := client.GetWithRuntime(ctx, "project", issueID)
 	if err != nil {
@@ -2349,7 +2367,7 @@ func TestReviewReplayAndAcceptShareObservedAtEvidenceOrdering(t *testing.T) {
 	}
 }
 
-func TestReviewAcceptReleasesLeaseBeforeAcceptedInternalReviewClose(t *testing.T) {
+func TestReviewAcceptConsumesReviewerLeaseWithAcceptedInternalReviewClose(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
@@ -2407,8 +2425,8 @@ func TestReviewAcceptReleasesLeaseBeforeAcceptedInternalReviewClose(t *testing.T
 			closeID = event.ID
 		}
 	}
-	if acceptedID == 0 || releaseID <= acceptedID || closeID <= releaseID {
-		t.Fatalf("event order accepted=%d release=%d close=%d, want accepted < review release < close", acceptedID, releaseID, closeID)
+	if acceptedID == 0 || releaseID != 0 || closeID <= acceptedID {
+		t.Fatalf("event order accepted=%d release=%d close=%d, want accepted < atomic lease-consuming close without prior release", acceptedID, releaseID, closeID)
 	}
 
 	replayed, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-internal-review", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir})
@@ -2452,7 +2470,7 @@ func TestReviewAcceptFenceBlocksSecondDaemonReturnBetweenReleaseAndClose(t *test
 	acceptDaemon.git = git.NewClient(runner, slog.Default())
 	acceptDaemon.worktreeAdapter = &worktreeServiceAdapter{manager: git.NewWorktreeManager(runner, repoDir, slog.Default()), logger: slog.Default()}
 	var competing protocol.OrchestrationIntentResult
-	acceptDaemon.reviewLeaseReleasedBeforeClose = func(hookCtx context.Context, projectID, releasedIssueID string) error {
+	acceptDaemon.reviewLeaseFencedBeforeClose = func(hookCtx context.Context, projectID, releasedIssueID string) error {
 		var hookErr error
 		competing, hookErr = returnDaemon.orchestrationAuthority().Apply(hookCtx, projectID, protocol.OrchestrationIntentRequest{
 			Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn,
@@ -2499,14 +2517,21 @@ func TestReviewAcceptResumesDurablyAcceptedIntentWithoutReacquiringLease(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := client.Update(ctx, issueID, domain.StatusOpen); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
 	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "resume-accepted-internal-review", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	reviewEpochEventID := latestReviewEpochEventID(t, ctx, client, issueID)
 	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview}); err != nil {
 		t.Fatal(err)
 	}
 	for _, event := range []issues.IssueObservationEventParams{
 		{Type: domain.IssueEventInvestigationDisposition, Source: "test", Payload: map[string]any{"disposition": "internal_review"}},
 		{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "accepted", "summary": "parent consumed findings"}},
-		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept), Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request)}},
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept), Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": reviewEpochEventID, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request)}},
 	} {
 		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
 			t.Fatal(err)
@@ -2562,18 +2587,25 @@ func TestReviewAcceptResumesDurableEvidenceFenceAfterCloseCrash(t *testing.T) {
 		t.Fatalf("evidence pin = %+v err=%v", evidencePin, err)
 	}
 	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "resume-evidence-fence", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission, ReviewSourceOID: "reviewed-source-oid"}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
 		Payload: map[string]any{
-			"outcome": "accepted", "actor_id": request.ActorID, "intent_key": request.IntentKey,
+			"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": admission.ReviewEpochEventID, "intent_key": request.IntentKey,
 			"request_fingerprint": reviewRequestFingerprint(request), "reviewed_source_oid": "reviewed-source-oid",
 			"reviewed_evidence_source": evidencePin.Source, "reviewed_evidence_event_id": evidencePin.EventID,
-			"reviewed_evidence_digest": evidencePin.Digest,
+			"reviewed_evidence_seq": evidencePin.Seq, "reviewed_evidence_digest": evidencePin.Digest,
 		},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.BeginReviewEvidenceClose(ctx, issueID, evidencePin); err != nil {
+	if _, err := client.BeginReviewEvidenceClose(ctx, issueID, evidencePin, request.ActorID); err != nil {
 		t.Fatal(err)
 	}
 

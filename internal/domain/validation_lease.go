@@ -78,38 +78,42 @@ const (
 )
 
 type ValidationRequest struct {
-	Sequence               int64                    `json:"sequence"`
-	RequestID              string                   `json:"request_id"`
-	ProjectID              string                   `json:"project_id"`
-	IssueID                string                   `json:"issue_id"`
-	IssuePriority          Priority                 `json:"issue_priority"`
-	PriorityBypassCount    int                      `json:"priority_bypass_count"`
-	Class                  ValidationClass          `json:"class"`
-	Scope                  ValidationScope          `json:"scope"`
-	Purpose                ValidationPurpose        `json:"purpose"`
-	Execution              ValidationExecution      `json:"execution"`
-	AuthoritativeRequestID string                   `json:"authoritative_request_id,omitempty"`
-	CompatibilityKey       string                   `json:"compatibility_key"`
-	IsolationMode          string                   `json:"isolation_mode"`
-	EnvironmentFingerprint string                   `json:"environment_fingerprint"`
-	Override               ValidationOverride       `json:"override"`
-	OverrideActor          string                   `json:"override_actor,omitempty"`
-	OverrideReason         string                   `json:"override_reason,omitempty"`
-	Profile                string                   `json:"profile"`
-	Command                string                   `json:"command"`
-	SourceRevision         string                   `json:"source_revision"`
-	ReviewerID             string                   `json:"reviewer_id,omitempty"`
-	ReviewEpochEventID     int64                    `json:"review_epoch_event_id,omitempty"`
-	State                  ValidationRequestState   `json:"state"`
-	QueuedAt               time.Time                `json:"queued_at"`
-	StartedAt              *time.Time               `json:"started_at,omitempty"`
-	HeartbeatAt            *time.Time               `json:"heartbeat_at,omitempty"`
-	ExpiresAt              *time.Time               `json:"expires_at,omitempty"`
-	FinishedAt             *time.Time               `json:"finished_at,omitempty"`
-	Outcome                string                   `json:"outcome,omitempty"`
-	Evidence               ValidationEvidence       `json:"evidence"`
-	QueuePosition          int                      `json:"queue_position,omitempty"`
-	OrderingReason         ValidationOrderingReason `json:"ordering_reason,omitempty"`
+	Sequence                       int64                    `json:"sequence"`
+	RequestID                      string                   `json:"request_id"`
+	ProjectID                      string                   `json:"project_id"`
+	IssueID                        string                   `json:"issue_id"`
+	IssuePriority                  Priority                 `json:"issue_priority"`
+	PriorityBypassCount            int                      `json:"priority_bypass_count"`
+	Class                          ValidationClass          `json:"class"`
+	Scope                          ValidationScope          `json:"scope"`
+	Purpose                        ValidationPurpose        `json:"purpose"`
+	Execution                      ValidationExecution      `json:"execution"`
+	AuthoritativeRequestID         string                   `json:"authoritative_request_id,omitempty"`
+	CompatibilityKey               string                   `json:"compatibility_key"`
+	IsolationMode                  string                   `json:"isolation_mode"`
+	EnvironmentFingerprint         string                   `json:"environment_fingerprint"`
+	Override                       ValidationOverride       `json:"override"`
+	OverrideActor                  string                   `json:"override_actor,omitempty"`
+	OverrideReason                 string                   `json:"override_reason,omitempty"`
+	Profile                        string                   `json:"profile"`
+	Command                        string                   `json:"command"`
+	SourceRevision                 string                   `json:"source_revision"`
+	ReviewerID                     string                   `json:"reviewer_id,omitempty"`
+	ReviewerKind                   string                   `json:"reviewer_kind,omitempty"`
+	ReviewEpochEventID             int64                    `json:"review_epoch_event_id,omitempty"`
+	PublicationOperationID         string                   `json:"publication_operation_id,omitempty"`
+	AcceptedReviewEventID          int64                    `json:"accepted_review_event_id,omitempty"`
+	AcceptedPublicationOperationID string                   `json:"accepted_publication_operation_id,omitempty"`
+	State                          ValidationRequestState   `json:"state"`
+	QueuedAt                       time.Time                `json:"queued_at"`
+	StartedAt                      *time.Time               `json:"started_at,omitempty"`
+	HeartbeatAt                    *time.Time               `json:"heartbeat_at,omitempty"`
+	ExpiresAt                      *time.Time               `json:"expires_at,omitempty"`
+	FinishedAt                     *time.Time               `json:"finished_at,omitempty"`
+	Outcome                        string                   `json:"outcome,omitempty"`
+	Evidence                       ValidationEvidence       `json:"evidence"`
+	QueuePosition                  int                      `json:"queue_position,omitempty"`
+	OrderingReason                 ValidationOrderingReason `json:"ordering_reason,omitempty"`
 }
 
 type ValidationEvidence struct {
@@ -171,26 +175,30 @@ type ValidationSnapshot struct {
 }
 
 type ValidationAcquire struct {
-	RequestID              string
-	LeaseToken             string
-	ProjectID              string
-	IssueID                string
-	IssuePriority          Priority
-	IssuePriorityResolved  bool
-	Class                  ValidationClass
-	Scope                  ValidationScope
-	Purpose                ValidationPurpose
-	IsolationMode          string
-	EnvironmentFingerprint string
-	Override               ValidationOverride
-	OverrideActor          string
-	OverrideReason         string
-	Profile                string
-	Command                string
-	SourceRevision         string
-	ReviewerID             string
-	ReviewEpochEventID     int64
-	TTL                    time.Duration
+	RequestID                      string
+	LeaseToken                     string
+	ProjectID                      string
+	IssueID                        string
+	IssuePriority                  Priority
+	IssuePriorityResolved          bool
+	Class                          ValidationClass
+	Scope                          ValidationScope
+	Purpose                        ValidationPurpose
+	IsolationMode                  string
+	EnvironmentFingerprint         string
+	Override                       ValidationOverride
+	OverrideActor                  string
+	OverrideReason                 string
+	Profile                        string
+	Command                        string
+	SourceRevision                 string
+	ReviewerID                     string
+	ReviewerKind                   string
+	ReviewEpochEventID             int64
+	PublicationOperationID         string
+	AcceptedReviewEventID          int64
+	AcceptedPublicationOperationID string
+	TTL                            time.Duration
 }
 
 func (a ValidationAcquire) Validate() error {
@@ -244,6 +252,11 @@ func (a ValidationAcquire) Validate() error {
 	if a.Purpose == ValidationPurposeReviewEvidence && (strings.TrimSpace(a.ReviewerID) == "" || a.ReviewEpochEventID <= 0) {
 		return fmt.Errorf("review evidence requires reviewer identity and current review epoch")
 	}
+	if a.Purpose == ValidationPurposeReviewEvidence {
+		if _, err := CanonicalReviewerIdentity(a.ReviewerID, a.ReviewerKind); err != nil || strings.TrimSpace(a.PublicationOperationID) == "" || a.AcceptedReviewEventID <= 0 || strings.TrimSpace(a.AcceptedPublicationOperationID) == "" {
+			return fmt.Errorf("review evidence requires typed reviewer and exact accepted publication operation binding")
+		}
+	}
 	if a.Class == ValidationClassSafe && !validSafeValidation(a.Profile, a.Command) {
 		return fmt.Errorf("safe validation requires a bounded non-compiling profile and command")
 	}
@@ -295,9 +308,30 @@ func ValidationRequestCanSatisfy(source ValidationRequest, target ValidationAcqu
 	}
 	if target.Scope == ValidationScopeRepository && target.Purpose == ValidationPurposePushGate {
 		return (source.Scope == ValidationScopeRepository && source.Purpose == ValidationPurposePushGate) ||
-			(source.Scope == ValidationScopeTicket && source.Purpose == ValidationPurposeReviewEvidence && source.ReviewerID != "" && source.ReviewEpochEventID > 0)
+			(source.Scope == ValidationScopeTicket && source.Purpose == ValidationPurposeReviewEvidence && source.HasCompleteReviewAuthority())
 	}
-	return source.Scope == target.Scope && source.Purpose == target.Purpose && source.IssueID == target.IssueID && source.ReviewerID == target.ReviewerID && source.ReviewEpochEventID == target.ReviewEpochEventID
+	if source.Scope != target.Scope || source.Purpose != target.Purpose || source.IssueID != target.IssueID {
+		return false
+	}
+	if target.Purpose != ValidationPurposeReviewEvidence {
+		return source.ReviewerID == target.ReviewerID && source.ReviewerKind == target.ReviewerKind && source.ReviewEpochEventID == target.ReviewEpochEventID && source.PublicationOperationID == target.PublicationOperationID && source.AcceptedReviewEventID == target.AcceptedReviewEventID && source.AcceptedPublicationOperationID == target.AcceptedPublicationOperationID
+	}
+	sourceReviewer, sourceOK := source.reviewAuthority()
+	targetReviewer, targetErr := CanonicalReviewerIdentity(target.ReviewerID, target.ReviewerKind)
+	return sourceOK && targetErr == nil && sourceReviewer == targetReviewer && source.ReviewEpochEventID == target.ReviewEpochEventID && source.PublicationOperationID == target.PublicationOperationID && source.AcceptedReviewEventID == target.AcceptedReviewEventID && source.AcceptedPublicationOperationID == target.AcceptedPublicationOperationID
+}
+
+// HasCompleteReviewAuthority reports whether persisted validation evidence has
+// every typed identity and immutable acceptance binding required to authorize
+// publication. Legacy rows intentionally fail closed.
+func (a ValidationRequest) HasCompleteReviewAuthority() bool {
+	_, ok := a.reviewAuthority()
+	return ok
+}
+
+func (a ValidationRequest) reviewAuthority() (ReviewerIdentity, bool) {
+	reviewer, err := CanonicalReviewerIdentity(a.ReviewerID, a.ReviewerKind)
+	return reviewer, err == nil && a.ReviewEpochEventID > 0 && strings.TrimSpace(a.PublicationOperationID) != "" && a.AcceptedReviewEventID > 0 && strings.TrimSpace(a.AcceptedPublicationOperationID) != ""
 }
 
 func validSafeValidation(profile, command string) bool {

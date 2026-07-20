@@ -277,7 +277,7 @@ type Daemon struct {
 	projectReadRuntimeHydrate            func(context.Context, string, []domain.Task) ([]domain.Task, error)
 	projectReadWorktreeRefresh           func(context.Context, string, *projectReadMaterializer) error
 	projectReadUserProjectionSync        func(context.Context, string, []string) error
-	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
+	reviewLeaseFencedBeforeClose         func(context.Context, string, string) error
 	reviewAcceptanceBeforeCandidateCheck func()
 	reviewCandidateCheck                 func(context.Context, string, protocol.OrchestrationReview) (string, string, error)
 	reviewAdmissionSnapshotLoaded        func()

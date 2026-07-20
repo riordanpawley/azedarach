@@ -150,7 +150,8 @@ func TestTerminalizePublicationWithSuccessorRollsBackPredecessorWhenInsertFails(
 func testPublicationOperation(id, issueID, intent, source string, created time.Time) domain.PublicationOperation {
 	return domain.PublicationOperation{
 		OperationID: id, ProjectID: "project", IssueID: issueID, IntentKey: intent,
-		RequestFingerprint: "fingerprint", ActorID: "reviewer", TargetID: "base", TargetBranch: "main",
+		RequestFingerprint: "fingerprint", ActorID: "reviewer", ActorKind: domain.ReviewerOwnerKindOrchestrator,
+		ReviewEpochEventID: 41, AcceptedReviewEventID: 42, AcceptedPublicationOperationID: id, TargetID: "base", TargetBranch: "main",
 		SourceRevision: source, BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain",
 		ValidationCommand: "npm test",
 		EvidenceSource:    "mailbox", EvidenceEventID: 1, EvidenceSeq: 2, EvidenceDigest: "digest",

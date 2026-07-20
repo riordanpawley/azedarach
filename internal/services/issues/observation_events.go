@@ -18,7 +18,7 @@ import (
 
 const defaultIssueObservationEventLimit = 500
 
-const reviewEvidenceCloseFenceOwnerKind = "review-evidence-close-fence"
+const legacyReviewEvidenceCloseFenceOwnerKind = "review-evidence-close-fence"
 
 // ReviewEvidencePin identifies the exact durable evidence accepted by a
 // reviewer. Terminal close supports only issue-event evidence so the pin can
@@ -36,6 +36,16 @@ type ReviewEvidencePin struct {
 type ReviewAdmissionPin struct {
 	ReviewEpochEventID int64              `json:"review_epoch_event_id"`
 	Evidence           *ReviewEvidencePin `json:"evidence,omitempty"`
+}
+
+// ReviewPublicationAuthority is the complete immutable authorization carried
+// from review acceptance through publication close.
+type ReviewPublicationAuthority struct {
+	Reviewer                       domain.ReviewerIdentity `json:"reviewer"`
+	ReviewEpochEventID             int64                   `json:"review_epoch_event_id"`
+	AcceptedReviewEventID          int64                   `json:"accepted_review_event_id"`
+	PublicationOperationID         string                  `json:"publication_operation_id"`
+	AcceptedPublicationOperationID string                  `json:"accepted_publication_operation_id"`
 }
 
 // CaptureReviewAdmissionPin reads the current review epoch and evidence
@@ -199,22 +209,106 @@ func reviewEvidenceCloseFenceToken(pin ReviewEvidencePin) string {
 	return fmt.Sprintf("review-evidence:%d:%s", pin.EventID, strings.TrimSpace(pin.Digest))
 }
 
-// ReviewEvidenceCloseFenceMatches reports whether lease is the durable fence
-// for this exact accepted evidence epoch. Accepted-intent replay uses it to
-// resume a close after a daemon crash without dropping the write fence.
-func ReviewEvidenceCloseFenceMatches(lease *domain.CoordinationLease, pin ReviewEvidencePin) bool {
-	return lease != nil && lease.Purpose == domain.CoordinationLeaseReview &&
-		lease.OwnerKind == reviewEvidenceCloseFenceOwnerKind && lease.OwnerID == reviewEvidenceCloseFenceToken(pin)
+func reviewAuthorityPayloadInt64(value any) int64 {
+	parsed, _ := strconv.ParseInt(strings.TrimSpace(fmt.Sprint(value)), 10, 64)
+	return parsed
 }
 
-// BeginReviewEvidenceClose installs a durable, cross-process write fence for
+// ReviewEvidenceCloseFenceMatches reports whether lease preserves the accepted
+// reviewer identity or is a legacy synthetic fence for the exact evidence pin.
+// Accepted-intent replay uses the legacy match only to restore reviewer
+// identity after upgrading a close that crashed under the old representation.
+func ReviewEvidenceCloseFenceMatches(lease *domain.CoordinationLease, pin ReviewEvidencePin, reviewerID string) bool {
+	return lease != nil && lease.Purpose == domain.CoordinationLeaseReview &&
+		(strings.EqualFold(strings.TrimSpace(lease.OwnerID), strings.TrimSpace(reviewerID)) ||
+			(lease.OwnerKind == legacyReviewEvidenceCloseFenceOwnerKind && lease.OwnerID == reviewEvidenceCloseFenceToken(pin)))
+}
+
+func validateReviewPublicationAuthority(ctx context.Context, tx *sql.Tx, issueID string, authority ReviewPublicationAuthority) error {
+	reviewer, err := domain.CanonicalReviewerIdentity(authority.Reviewer.OwnerID, authority.Reviewer.OwnerKind)
+	if err != nil || authority.ReviewEpochEventID <= 0 || authority.AcceptedReviewEventID <= 0 || strings.TrimSpace(authority.PublicationOperationID) == "" || strings.TrimSpace(authority.AcceptedPublicationOperationID) == "" {
+		return fmt.Errorf("%w: complete typed publication review authority is required", domain.ErrConflict)
+	}
+	current, err := captureReviewAdmissionPin(ctx, tx, issueID)
+	if err != nil {
+		return err
+	}
+	if current.ReviewEpochEventID != authority.ReviewEpochEventID {
+		return fmt.Errorf("%w: publication review epoch changed", domain.ErrConflict)
+	}
+	var event domain.IssueObservationEvent
+	event, err = scanIssueObservationEvent(tx.QueryRowContext(ctx, `
+		SELECT id,issue_id,event_type,observed_at,source,source_command,operation_id,session_id,worktree_path,payload_json
+		FROM issue_observation_events WHERE id=? AND issue_id=?`, authority.AcceptedReviewEventID, strings.TrimSpace(issueID)))
+	if err != nil {
+		return fmt.Errorf("%w: accepted review event is missing", domain.ErrConflict)
+	}
+	outcome, trusted := domain.TrustedReviewOutcome(event)
+	if !trusted || outcome != domain.ReviewOutcomeAccepted ||
+		!reviewer.Matches(fmt.Sprint(event.Payload["actor_id"]), fmt.Sprint(event.Payload["actor_kind"])) ||
+		reviewAuthorityPayloadInt64(event.Payload["review_epoch_event_id"]) != authority.ReviewEpochEventID ||
+		strings.TrimSpace(fmt.Sprint(event.Payload["publication_operation_id"])) != strings.TrimSpace(authority.AcceptedPublicationOperationID) {
+		return fmt.Errorf("%w: accepted review event authority does not match publication", domain.ErrConflict)
+	}
+	var operationCount int
+	err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_publication_operations
+		WHERE operation_id=? AND issue_id=? AND LOWER(actor_id)=? AND actor_kind=?
+		  AND review_epoch_event_id=? AND accepted_review_event_id=? AND accepted_publication_operation_id=?`,
+		strings.TrimSpace(authority.PublicationOperationID), strings.TrimSpace(issueID), reviewer.OwnerID, reviewer.OwnerKind,
+		authority.ReviewEpochEventID, authority.AcceptedReviewEventID, strings.TrimSpace(authority.AcceptedPublicationOperationID)).Scan(&operationCount)
+	if err != nil || operationCount != 1 {
+		return fmt.Errorf("%w: durable publication operation authority does not match", domain.ErrConflict)
+	}
+	return nil
+}
+
+// BeginReviewPublicationClose revalidates the exact review epoch, accepted
+// event, publication operation, and typed lease before external apply/cleanup.
+func (c *Client) BeginReviewPublicationClose(ctx context.Context, issueID string, authority ReviewPublicationAuthority, pin *ReviewEvidencePin) error {
+	return c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+			if pin != nil {
+				if err := validateTerminalReviewEvidencePin(ctx, tx, issueID, *pin); err != nil {
+					return err
+				}
+			}
+			if err := validateReviewPublicationAuthority(ctx, tx, issueID, authority); err != nil {
+				return err
+			}
+			lease, err := coordinationLeaseForUpdate(ctx, tx, issueID, domain.CoordinationLeaseReview)
+			if err != nil {
+				return err
+			}
+			if lease == nil || lease.IsExpired(time.Now().UTC()) || !authority.Reviewer.Matches(lease.OwnerID, lease.OwnerKind) {
+				return fmt.Errorf("%w: exact typed reviewer lease is required", domain.ErrConflict)
+			}
+			return tx.Commit()
+		})
+	})
+}
+
+// BeginReviewEvidenceClose verifies the durable reviewer-owned write fence for
 // one accepted evidence epoch. Evidence producers cannot supersede the pin
-// while external integration and resource cleanup are in flight.
-func (c *Client) BeginReviewEvidenceClose(ctx context.Context, issueID string, pin ReviewEvidencePin) (string, error) {
+// while external integration and resource cleanup are in flight. Legacy
+// synthetic fences are atomically restored to the accepted reviewer so a
+// daemon restart can recover operations created by older versions.
+func (c *Client) BeginReviewEvidenceClose(ctx context.Context, issueID string, pin ReviewEvidencePin, reviewerID string) (string, error) {
 	issueID = strings.TrimSpace(issueID)
-	token := reviewEvidenceCloseFenceToken(pin)
+	reviewerID = strings.TrimSpace(reviewerID)
 	if strings.TrimSpace(pin.Source) != "issue_event" || pin.EventID <= 0 || pin.Seq != 0 || strings.TrimSpace(pin.Digest) == "" {
 		return "", c.wrapError("begin-review-evidence-close", issueID, errors.New("review evidence pin must identify one durable issue event"))
+	}
+	if reviewerID == "" {
+		return "", c.wrapError("begin-review-evidence-close", issueID, errors.New("accepted reviewer id is required"))
 	}
 	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
@@ -230,20 +324,28 @@ func (c *Client) BeginReviewEvidenceClose(ctx context.Context, issueID string, p
 			if err := validateTerminalReviewEvidencePin(ctx, tx, issueID, pin); err != nil {
 				return c.wrapError("begin-review-evidence-close", issueID, err)
 			}
+			if err := validateAcceptedReviewerOutcome(ctx, tx, issueID, reviewerID, &pin); err != nil {
+				return c.wrapError("begin-review-evidence-close", issueID, err)
+			}
 			lease, err := coordinationLeaseForUpdate(ctx, tx, issueID, domain.CoordinationLeaseReview)
 			if err != nil {
 				return c.wrapError("begin-review-evidence-close", issueID, err)
 			}
-			if lease != nil && (lease.OwnerKind != reviewEvidenceCloseFenceOwnerKind || lease.OwnerID != token) {
-				return c.wrapError("begin-review-evidence-close", issueID, fmt.Errorf("%w: review lease owned by %s", domain.ErrConflict, lease.OwnerID))
+			if lease == nil || lease.IsExpired(time.Now().UTC()) {
+				return c.wrapError("begin-review-evidence-close", issueID, fmt.Errorf("%w: active accepted reviewer lease is required", domain.ErrConflict))
 			}
-			if lease == nil {
-				now := time.Now().UTC().Format(time.RFC3339Nano)
-				if _, err := tx.ExecContext(ctx, `INSERT INTO issue_coordination_leases
-					(issue_id,purpose,owner_id,owner_kind,claimed_at,expires_at)
-					VALUES(?,?,?,?,?,NULL)`, issueID, domain.CoordinationLeaseReview, token, reviewEvidenceCloseFenceOwnerKind, now); err != nil {
+			if strings.EqualFold(strings.TrimSpace(lease.OwnerID), reviewerID) {
+				// The accepted reviewer already is the durable fence. Preserve the
+				// exact lease identity used by validation authorization.
+			} else if lease.OwnerKind == legacyReviewEvidenceCloseFenceOwnerKind && lease.OwnerID == reviewEvidenceCloseFenceToken(pin) {
+				if _, err := tx.ExecContext(ctx, `UPDATE issue_coordination_leases
+					SET owner_id=?,owner_kind=?
+					WHERE issue_id=? AND purpose=? AND owner_id=? AND owner_kind=?`, reviewerID, "orchestrator",
+					issueID, domain.CoordinationLeaseReview, lease.OwnerID, legacyReviewEvidenceCloseFenceOwnerKind); err != nil {
 					return c.wrapError("begin-review-evidence-close", issueID, err)
 				}
+			} else {
+				return c.wrapError("begin-review-evidence-close", issueID, fmt.Errorf("%w: review lease owned by %s", domain.ErrConflict, lease.OwnerID))
 			}
 			if err := tx.Commit(); err != nil {
 				return c.wrapError("begin-review-evidence-close", issueID, err)
@@ -254,30 +356,53 @@ func (c *Client) BeginReviewEvidenceClose(ctx context.Context, issueID string, p
 	if err != nil {
 		return "", err
 	}
-	return token, nil
+	return reviewerID, nil
 }
 
-// ReleaseReviewEvidenceClose removes a matching fence after a failed close.
-// A successful fenced terminal write consumes the fence atomically instead.
-func (c *Client) ReleaseReviewEvidenceClose(ctx context.Context, issueID, token string) error {
-	issueID, token = strings.TrimSpace(issueID), strings.TrimSpace(token)
-	if issueID == "" || token == "" {
+func validateAcceptedReviewerOutcome(ctx context.Context, tx *sql.Tx, issueID, reviewerID string, pin *ReviewEvidencePin) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE issue_id=? AND event_type IN (?,?)
+		ORDER BY id DESC
+	`, strings.TrimSpace(issueID), domain.IssueEventReviewCompleted, domain.IssueEventIssueStatusChanged)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		event, err := scanIssueObservationEvent(rows)
+		if err != nil {
+			return err
+		}
+		if domain.IsReviewRequestTransition(event) {
+			break
+		}
+		outcome, trusted := domain.TrustedReviewOutcome(event)
+		if !trusted {
+			continue
+		}
+		if outcome == domain.ReviewOutcomeIntegrationFailed {
+			continue
+		}
+		if outcome != domain.ReviewOutcomeAccepted {
+			return fmt.Errorf("%w: current review outcome is %s", domain.ErrConflict, outcome)
+		}
+		if !strings.EqualFold(strings.TrimSpace(fmt.Sprint(event.Payload["actor_id"])), strings.TrimSpace(reviewerID)) {
+			return fmt.Errorf("%w: accepted review actor does not match reviewer lease", domain.ErrConflict)
+		}
+		if pin != nil && (strings.TrimSpace(fmt.Sprint(event.Payload["reviewed_evidence_source"])) != strings.TrimSpace(pin.Source) ||
+			strings.TrimSpace(fmt.Sprint(event.Payload["reviewed_evidence_event_id"])) != strconv.FormatInt(pin.EventID, 10) ||
+			strings.TrimSpace(fmt.Sprint(event.Payload["reviewed_evidence_seq"])) != strconv.FormatInt(pin.Seq, 10) ||
+			strings.TrimSpace(fmt.Sprint(event.Payload["reviewed_evidence_digest"])) != strings.TrimSpace(pin.Digest)) {
+			return fmt.Errorf("%w: accepted review evidence does not match close fence", domain.ErrConflict)
+		}
 		return nil
 	}
-	return c.retrySQLiteBusy(ctx, func() error {
-		return c.withMutationLock(ctx, func(ctx context.Context) error {
-			db, err := c.dbHandle()
-			if err != nil {
-				return err
-			}
-			_, err = db.ExecContext(ctx, `DELETE FROM issue_coordination_leases
-				WHERE issue_id=? AND purpose=? AND owner_id=? AND owner_kind=?`, issueID, domain.CoordinationLeaseReview, token, reviewEvidenceCloseFenceOwnerKind)
-			if err != nil {
-				return c.wrapError("release-review-evidence-close", issueID, err)
-			}
-			return nil
-		})
-	})
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: current review epoch has no matching accepted reviewer outcome", domain.ErrConflict)
 }
 
 type IssueObservationEventParams struct {
@@ -860,7 +985,10 @@ func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID
 	if params.Type != domain.IssueEventReviewCompleted || strings.TrimSpace(fmt.Sprint(params.Payload["outcome"])) != string(domain.ReviewOutcomeAccepted) {
 		return AcceptedReviewPublicationCommit{}, c.wrapError("append-accepted-review-publication", issueID, errors.New("accepted review publication requires accepted review.completed event"))
 	}
-	if err := operation.ValidateIntent(); err != nil {
+	if strings.TrimSpace(operation.AcceptedPublicationOperationID) == "" {
+		operation.AcceptedPublicationOperationID = strings.TrimSpace(operation.OperationID)
+	}
+	if err := operation.ValidatePreparedIntent(); err != nil {
 		return AcceptedReviewPublicationCommit{}, c.wrapError("append-accepted-review-publication", issueID, err)
 	}
 	coalesceKey = strings.TrimSpace(coalesceKey)
@@ -894,8 +1022,12 @@ func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID
 				if err != nil {
 					return c.wrapError("append-accepted-review-publication", issueID, err)
 				}
-				if lease == nil || lease.IsExpired(time.Now().UTC()) || !strings.EqualFold(strings.TrimSpace(lease.OwnerID), strings.TrimSpace(reviewerID)) {
+				reviewer, identityErr := domain.CanonicalReviewerIdentity(reviewerID, domain.ReviewerOwnerKindOrchestrator)
+				if identityErr != nil || lease == nil || lease.IsExpired(time.Now().UTC()) || !reviewer.Matches(lease.OwnerID, lease.OwnerKind) {
 					return c.wrapError("append-accepted-review-publication", issueID, fmt.Errorf("%w: matching active review lease is required", domain.ErrConflict))
+				}
+				if !reviewer.Matches(operation.ActorID, operation.ActorKind) || operation.ReviewEpochEventID != expected.ReviewEpochEventID {
+					return c.wrapError("append-accepted-review-publication", issueID, fmt.Errorf("%w: publication authority does not match review admission", domain.ErrConflict))
 				}
 			}
 			now := operation.CreatedAt.UTC()
@@ -903,12 +1035,12 @@ func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID
 				now = time.Now().UTC()
 			}
 			_, err = tx.ExecContext(ctx, `INSERT INTO daemon_publication_operations(
-				operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,target_id,target_branch,
+				operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,actor_kind,review_epoch_event_id,accepted_review_event_id,accepted_publication_operation_id,target_id,target_branch,
 				source_revision,base_revision,candidate_revision,policy_version,environment_fingerprint,validation_command,
 				evidence_source,evidence_event_id,evidence_seq,evidence_digest,coalesce_key,state,created_at,updated_at
-			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`,
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`,
 				operation.OperationID, operation.ProjectID, operation.IssueID, operation.IntentKey, operation.RequestFingerprint,
-				operation.ActorID, operation.TargetID, operation.TargetBranch, operation.SourceRevision, operation.BaseRevision,
+				operation.ActorID, operation.ActorKind, operation.ReviewEpochEventID, operation.AcceptedReviewEventID, operation.AcceptedPublicationOperationID, operation.TargetID, operation.TargetBranch, operation.SourceRevision, operation.BaseRevision,
 				operation.CandidateRevision, operation.PolicyVersion, operation.EnvironmentFingerprint, operation.ValidationCommand,
 				operation.EvidenceSource, operation.EvidenceEventID, operation.EvidenceSeq, operation.EvidenceDigest, coalesceKey,
 				string(domain.PublicationOperationQueued), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
@@ -921,12 +1053,12 @@ func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID
 			// continuation rather than a row that does not exist.
 			err = tx.QueryRowContext(ctx, `SELECT operation_id FROM daemon_publication_operations
 				WHERE project_id=? AND (coalesce_key=? OR (issue_id=? AND intent_key=?))
-				  AND issue_id=? AND request_fingerprint=? AND target_id=? AND target_branch=?
+				  AND issue_id=? AND request_fingerprint=? AND actor_id=? AND actor_kind=? AND review_epoch_event_id=? AND accepted_publication_operation_id=? AND target_id=? AND target_branch=?
 				  AND source_revision=? AND base_revision=? AND policy_version=?
 				  AND environment_fingerprint=? AND validation_command=? AND evidence_digest=?
 				ORDER BY created_at,operation_id LIMIT 1`,
 				operation.ProjectID, coalesceKey, operation.IssueID, operation.IntentKey,
-				operation.IssueID, operation.RequestFingerprint, operation.TargetID, operation.TargetBranch,
+				operation.IssueID, operation.RequestFingerprint, operation.ActorID, operation.ActorKind, operation.ReviewEpochEventID, operation.AcceptedPublicationOperationID, operation.TargetID, operation.TargetBranch,
 				operation.SourceRevision, operation.BaseRevision, operation.PolicyVersion,
 				operation.EnvironmentFingerprint, operation.ValidationCommand, operation.EvidenceDigest,
 			).Scan(&publicationOperationID)
@@ -939,15 +1071,38 @@ func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID
 			if params.Payload == nil {
 				params.Payload = make(map[string]any)
 			}
+			params.Payload["actor_id"] = operation.ActorID
+			params.Payload["actor_kind"] = operation.ActorKind
+			params.Payload["review_epoch_event_id"] = operation.ReviewEpochEventID
 			params.Payload["publication_operation_id"] = publicationOperationID
 			intentKey := strings.TrimSpace(fmt.Sprint(params.Payload["intent_key"]))
 			fingerprint := strings.TrimSpace(fmt.Sprint(params.Payload["request_fingerprint"]))
-			err = tx.QueryRowContext(ctx, `SELECT id FROM issue_observation_events WHERE issue_id=? AND event_type=? AND json_extract(payload_json,'$.outcome')=? AND json_extract(payload_json,'$.intent_key')=? AND json_extract(payload_json,'$.request_fingerprint')=? ORDER BY id DESC LIMIT 1`, issueID, string(domain.IssueEventReviewCompleted), string(domain.ReviewOutcomeAccepted), intentKey, fingerprint).Scan(&eventID)
+			err = tx.QueryRowContext(ctx, `SELECT id FROM issue_observation_events
+				WHERE issue_id=? AND event_type=? AND source='daemon-orchestration' AND source_command='review-accept'
+				  AND json_extract(payload_json,'$.outcome')=? AND json_extract(payload_json,'$.intent_key')=?
+				  AND json_extract(payload_json,'$.request_fingerprint')=?
+				  AND LOWER(TRIM(json_extract(payload_json,'$.actor_id')))=LOWER(?)
+				  AND json_extract(payload_json,'$.actor_kind')=?
+				  AND CAST(json_extract(payload_json,'$.review_epoch_event_id') AS INTEGER)=?
+				  AND json_extract(payload_json,'$.publication_operation_id')=?
+				ORDER BY id DESC LIMIT 1`, issueID, string(domain.IssueEventReviewCompleted), string(domain.ReviewOutcomeAccepted), intentKey, fingerprint,
+				operation.ActorID, operation.ActorKind, operation.ReviewEpochEventID, publicationOperationID).Scan(&eventID)
 			if errors.Is(err, sql.ErrNoRows) {
 				eventID, err = c.insertIssueObservationEvent(ctx, tx, issueID, params)
 			}
 			if err != nil {
 				return c.wrapError("append-accepted-review-publication", issueID, err)
+			}
+			result, err := tx.ExecContext(ctx, `UPDATE daemon_publication_operations
+				SET accepted_review_event_id=?
+				WHERE operation_id=? AND actor_id=? AND actor_kind=? AND review_epoch_event_id=?
+				  AND (accepted_review_event_id=0 OR accepted_review_event_id=?)`,
+				eventID, publicationOperationID, operation.ActorID, operation.ActorKind, operation.ReviewEpochEventID, eventID)
+			if err != nil {
+				return c.wrapError("append-accepted-review-publication", issueID, err)
+			}
+			if changed, _ := result.RowsAffected(); changed != 1 {
+				return c.wrapError("append-accepted-review-publication", issueID, fmt.Errorf("%w: publication operation acceptance binding changed", domain.ErrConflict))
 			}
 			if err := tx.Commit(); err != nil {
 				return c.wrapError("append-accepted-review-publication", issueID, err)
@@ -1745,7 +1900,7 @@ func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssu
 				ORDER BY claimed_at DESC
 				LIMIT 1
 			`, issueID, domain.CoordinationLeaseReview, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&ownerKind)
-			if leaseErr == nil && ownerKind == reviewEvidenceCloseFenceOwnerKind {
+			if leaseErr == nil && ownerKind == legacyReviewEvidenceCloseFenceOwnerKind {
 				return 0, fmt.Errorf("%w: accepted review evidence is fenced for authoritative close", domain.ErrConflict)
 			}
 			return 0, fmt.Errorf("%w: active review admission lease fences evidence replacement", domain.ErrConflict)

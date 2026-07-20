@@ -178,6 +178,12 @@ type candidateValidationObserverKey struct{}
 type candidateValidationCommandKey struct{}
 type candidateValidationAdmissionKey struct{}
 type candidateValidationTicketKey struct{}
+type candidateValidationReviewAuthorityKey struct{}
+
+type CandidateValidationReviewAuthority struct {
+	ReviewerID, ReviewerKind, PublicationOperationID, AcceptedPublicationOperationID string
+	ReviewEpochEventID, AcceptedReviewEventID                                        int64
+}
 
 type CandidateValidationObserver func(CandidateValidationAttempt)
 
@@ -215,6 +221,13 @@ func WithCandidateValidationTicket(ctx context.Context, ticketID naming.TicketID
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, candidateValidationTicketKey{}, ticketID)
+}
+
+func WithCandidateValidationReviewAuthority(ctx context.Context, authority CandidateValidationReviewAuthority) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, candidateValidationReviewAuthorityKey{}, authority)
 }
 
 func WithCandidateValidationAdmission(ctx context.Context, admission CandidateValidationAdmission) context.Context {

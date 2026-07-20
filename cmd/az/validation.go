@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,13 +40,18 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 		command := flags.String("command", "", "command description")
 		revision := flags.String("revision", "", "source revision")
 		reviewer := flags.String("reviewer", validationReviewerID(), "reviewer identity for a review-assigned aggregate gate")
+		reviewerKind := flags.String("reviewer-kind", os.Getenv("AZEDARACH_REVIEWER_KIND"), "typed reviewer owner kind")
+		reviewEpoch := flags.Int64("review-epoch-event-id", envInt64("AZEDARACH_REVIEW_EPOCH_EVENT_ID"), "exact review request epoch event id")
+		publicationOperation := flags.String("publication-operation-id", os.Getenv("AZEDARACH_PUBLICATION_OPERATION_ID"), "exact accepted publication operation id")
+		acceptedReviewEvent := flags.Int64("accepted-review-event-id", envInt64("AZEDARACH_ACCEPTED_REVIEW_EVENT_ID"), "exact accepted review event id")
+		acceptedPublicationOperation := flags.String("accepted-publication-operation-id", os.Getenv("AZEDARACH_ACCEPTED_PUBLICATION_OPERATION_ID"), "publication operation named by the accepted review event")
 		ttl := flags.Int("ttl", 30, "heartbeat expiry seconds")
 		wait := flags.Bool("wait", false, "wait until active")
 		jsonOutput := flags.Bool("json", false, "emit JSON")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		request := protocol.ValidationAcquireRequest{RequestID: *requestID, LeaseToken: *leaseToken, IssueID: *issueID, Class: domain.ValidationClass(*class), Scope: domain.ValidationScope(*scope), Purpose: domain.ValidationPurpose(*purpose), IsolationMode: *isolation, EnvironmentFingerprint: *fingerprint, Override: domain.ValidationOverride(*override), OverrideActor: *overrideActor, OverrideReason: *overrideReason, Profile: *profile, Command: *command, SourceRevision: *revision, ReviewerID: *reviewer, TTLSeconds: *ttl}
+		request := protocol.ValidationAcquireRequest{RequestID: *requestID, LeaseToken: *leaseToken, IssueID: *issueID, Class: domain.ValidationClass(*class), Scope: domain.ValidationScope(*scope), Purpose: domain.ValidationPurpose(*purpose), IsolationMode: *isolation, EnvironmentFingerprint: *fingerprint, Override: domain.ValidationOverride(*override), OverrideActor: *overrideActor, OverrideReason: *overrideReason, Profile: *profile, Command: *command, SourceRevision: *revision, ReviewerID: *reviewer, ReviewerKind: *reviewerKind, ReviewEpochEventID: *reviewEpoch, PublicationOperationID: *publicationOperation, AcceptedReviewEventID: *acceptedReviewEvent, AcceptedPublicationOperationID: *acceptedPublicationOperation, TTLSeconds: *ttl}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			for {
 				result, err := deps.DaemonClient.ValidationAcquire(context.Background(), request)
@@ -197,12 +203,17 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 }
 
 func validationReviewerID() string {
-	for _, name := range []string{"AZEDARACH_AUDIT_ACTOR", "USER", "LOGNAME"} {
+	for _, name := range []string{"AZEDARACH_REVIEWER_ID", "AZEDARACH_AUDIT_ACTOR", "USER", "LOGNAME"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			return value
 		}
 	}
 	return ""
+}
+
+func envInt64(name string) int64 {
+	value, _ := strconv.ParseInt(strings.TrimSpace(os.Getenv(name)), 10, 64)
+	return value
 }
 
 func printValidationValue(value any, asJSON bool) error {

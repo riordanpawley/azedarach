@@ -3304,9 +3304,10 @@ func (c *Client) CloseWithRuntimeReviewEvidence(ctx context.Context, projectID, 
 	return c.GetWithRuntime(ctx, projectID, id)
 }
 
-// CloseWithRuntimeReviewEvidenceFence consumes the matching durable evidence
-// fence in the same transaction as final pin validation and terminal state.
-func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projectID, id string, status domain.Status, pin ReviewEvidencePin, fenceToken string) (domain.Task, error) {
+// CloseWithRuntimeReviewLease consumes the accepted reviewer's durable lease
+// in the same transaction as terminal state for accepted reviews that do not
+// carry worker evidence (for example accepted internal-review investigations).
+func (c *Client) CloseWithRuntimeReviewLease(ctx context.Context, projectID, id string, status domain.Status, reviewerID string) (domain.Task, error) {
 	nextState, err := issueStateFromStatus(status)
 	if err != nil {
 		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
@@ -3314,8 +3315,37 @@ func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projec
 	if nextState.Workflow() != domain.IssueWorkflowClosed {
 		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
 	}
-	fenceToken = strings.TrimSpace(fenceToken)
-	if strings.TrimSpace(pin.Source) != "issue_event" || pin.EventID <= 0 || pin.Seq != 0 || strings.TrimSpace(pin.Digest) == "" || fenceToken == "" {
+	reviewerID = strings.TrimSpace(reviewerID)
+	if reviewerID == "" {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), errors.New("accepted reviewer id is required"))
+	}
+	if err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
+				if err := validateAcceptedReviewerOutcome(ctx, tx, id, reviewerID, nil); err != nil {
+					return err
+				}
+				return consumeAcceptedReviewerLease(ctx, tx, id, reviewerID)
+			})
+		})
+	}); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
+}
+
+// CloseWithRuntimeReviewEvidenceFence consumes the matching durable evidence
+// fence in the same transaction as final pin validation and terminal state.
+func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projectID, id string, status domain.Status, pin ReviewEvidencePin, reviewerID string) (domain.Task, error) {
+	nextState, err := issueStateFromStatus(status)
+	if err != nil {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
+	}
+	if nextState.Workflow() != domain.IssueWorkflowClosed {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
+	}
+	reviewerID = strings.TrimSpace(reviewerID)
+	if strings.TrimSpace(pin.Source) != "issue_event" || pin.EventID <= 0 || pin.Seq != 0 || strings.TrimSpace(pin.Digest) == "" || reviewerID == "" {
 		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), errors.New("review evidence close requires one durable issue-event pin and fence"))
 	}
 	if err := c.retrySQLiteBusy(ctx, func() error {
@@ -3324,17 +3354,48 @@ func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projec
 				if err := validateTerminalReviewEvidencePin(ctx, tx, id, pin); err != nil {
 					return err
 				}
+				if err := validateAcceptedReviewerOutcome(ctx, tx, id, reviewerID, &pin); err != nil {
+					return err
+				}
+				return consumeAcceptedReviewerLease(ctx, tx, id, reviewerID)
+			})
+		})
+	}); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
+}
+
+// CloseWithRuntimeReviewPublicationAuthority atomically revalidates and
+// consumes the exact typed review/publication authority with terminal state.
+func (c *Client) CloseWithRuntimeReviewPublicationAuthority(ctx context.Context, projectID, id string, status domain.Status, authority ReviewPublicationAuthority, pin *ReviewEvidencePin) (domain.Task, error) {
+	nextState, err := issueStateFromStatus(status)
+	if err != nil {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
+	}
+	if nextState.Workflow() != domain.IssueWorkflowClosed {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
+	}
+	if err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
+				if pin != nil {
+					if err := validateTerminalReviewEvidencePin(ctx, tx, id, *pin); err != nil {
+						return err
+					}
+				}
+				if err := validateReviewPublicationAuthority(ctx, tx, id, authority); err != nil {
+					return err
+				}
 				result, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases
-					WHERE issue_id=? AND purpose=? AND owner_id=? AND owner_kind=?`, strings.TrimSpace(id), domain.CoordinationLeaseReview, fenceToken, reviewEvidenceCloseFenceOwnerKind)
+					WHERE issue_id=? AND purpose=? AND LOWER(owner_id)=? AND owner_kind=?`,
+					strings.TrimSpace(id), domain.CoordinationLeaseReview, strings.ToLower(strings.TrimSpace(authority.Reviewer.OwnerID)), authority.Reviewer.OwnerKind)
 				if err != nil {
 					return err
 				}
-				removed, err := result.RowsAffected()
-				if err != nil {
-					return err
-				}
+				removed, _ := result.RowsAffected()
 				if removed != 1 {
-					return fmt.Errorf("%w: accepted review evidence close fence is missing or changed", domain.ErrConflict)
+					return fmt.Errorf("%w: exact typed reviewer lease is missing or changed", domain.ErrConflict)
 				}
 				return nil
 			})
@@ -3343,6 +3404,22 @@ func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projec
 		return domain.Task{}, err
 	}
 	return c.GetWithRuntime(ctx, projectID, id)
+}
+
+func consumeAcceptedReviewerLease(ctx context.Context, tx *sql.Tx, issueID, reviewerID string) error {
+	result, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases
+		WHERE issue_id=? AND purpose=? AND LOWER(owner_id)=LOWER(?)`, strings.TrimSpace(issueID), domain.CoordinationLeaseReview, strings.TrimSpace(reviewerID))
+	if err != nil {
+		return err
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if removed != 1 {
+		return fmt.Errorf("%w: accepted reviewer lease is missing or changed", domain.ErrConflict)
+	}
+	return nil
 }
 
 func validateTerminalReviewEvidencePin(ctx context.Context, tx *sql.Tx, issueID string, pin ReviewEvidencePin) error {

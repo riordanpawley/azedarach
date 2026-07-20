@@ -236,6 +236,12 @@ func (d *Daemon) enqueueAcceptedReviewPublication(ctx context.Context, projectID
 }
 
 func (d *Daemon) acceptAndEnqueueReviewPublication(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, pin acceptedReviewPin, inspection protocol.OrchestrationReview) (domain.PublicationOperation, error) {
+	reviewer, err := domain.CanonicalReviewerIdentity(request.ActorID, domain.ReviewerOwnerKindOrchestrator)
+	if err != nil {
+		return domain.PublicationOperation{}, err
+	}
+	pin.Reviewer = reviewer
+	pin.ReviewEpochEventID = inspection.ReviewEpochEventID
 	operation, err := d.prepareAcceptedReviewPublication(ctx, projectID, request, issueID, pin)
 	if err != nil {
 		return domain.PublicationOperation{}, err
@@ -258,7 +264,7 @@ func (d *Daemon) acceptAndEnqueueReviewPublication(ctx context.Context, projectI
 		return domain.PublicationOperation{}, fmt.Errorf("initialize publication queue projection: %w", err)
 	}
 	payload := map[string]any{
-		"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": request.ActorID,
+		"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": reviewer.OwnerID, "actor_kind": reviewer.OwnerKind,
 		"intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request), "findings": request.Findings,
 		"reviewed_source_oid": pin.SourceOID, "reviewed_evidence_source": pin.EvidenceSource,
 		"reviewed_evidence_event_id": pin.EvidenceEventID, "reviewed_evidence_seq": pin.EvidenceSeq,
@@ -275,6 +281,7 @@ func (d *Daemon) acceptAndEnqueueReviewPublication(ctx context.Context, projectI
 		return domain.PublicationOperation{}, err
 	}
 	operation.OperationID = receipt.PublicationOperationID
+	operation.AcceptedReviewEventID = receipt.EventID
 	read := func(_ string, readCtx context.Context, projectID, operationID string) (domain.PublicationOperation, bool, error) {
 		return store.PublicationOperation(readCtx, operationID)
 	}
@@ -320,10 +327,18 @@ func (d *Daemon) prepareAcceptedReviewPublication(ctx context.Context, projectID
 		return domain.PublicationOperation{}, fmt.Errorf("publication capability absent: configure gate.command for exact synthetic-candidate validation")
 	}
 	policyVersion := publicationPolicyVersion(projectCfg, gateCommand)
+	reviewer := pin.Reviewer
+	if reviewer.OwnerID == "" {
+		reviewer, err = domain.CanonicalReviewerIdentity(request.ActorID, domain.ReviewerOwnerKindOrchestrator)
+		if err != nil {
+			return domain.PublicationOperation{}, err
+		}
+	}
 	operation := domain.PublicationOperation{
 		OperationID: publicationOperationIdentity(projectID, issueID, request.IntentKey), ProjectID: projectID,
 		IssueID: issueID, IntentKey: request.IntentKey, RequestFingerprint: reviewRequestFingerprint(request),
-		ActorID: request.ActorID, TargetID: "base", TargetBranch: target.Branch,
+		ActorID: reviewer.OwnerID, ActorKind: reviewer.OwnerKind, ReviewEpochEventID: pin.ReviewEpochEventID, AcceptedReviewEventID: pin.AcceptedReviewEventID,
+		AcceptedPublicationOperationID: publicationOperationIdentity(projectID, issueID, request.IntentKey), TargetID: "base", TargetBranch: target.Branch,
 		SourceRevision: pin.SourceOID, BaseRevision: strings.TrimSpace(baseRevision), PolicyVersion: policyVersion,
 		EnvironmentFingerprint: publicationEnvironmentFingerprint(projectCfg), ValidationCommand: gateCommand, EvidenceSource: pin.EvidenceSource, EvidenceEventID: pin.EvidenceEventID,
 		EvidenceSeq: pin.EvidenceSeq, EvidenceDigest: pin.EvidenceDigest, State: domain.PublicationOperationQueued,
@@ -546,6 +561,26 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	}
 	stopClaimHeartbeat := d.startPublicationClaimHeartbeat(store, operationID, claimToken, claimTTL)
 	defer stopClaimHeartbeat()
+	var authorityErr error
+	if d.publicationIdentityCheck == nil && d.publicationClose == nil {
+		issueClient := d.issueClientForProject(operation.ProjectID)
+		if issueClient == nil {
+			authorityErr = fmt.Errorf("issue store unavailable")
+		} else {
+			authority := issues.ReviewPublicationAuthority{
+				Reviewer:                       domain.ReviewerIdentity{OwnerID: operation.ActorID, OwnerKind: operation.ActorKind},
+				ReviewEpochEventID:             operation.ReviewEpochEventID,
+				AcceptedReviewEventID:          operation.AcceptedReviewEventID,
+				PublicationOperationID:         operation.OperationID,
+				AcceptedPublicationOperationID: operation.AcceptedPublicationOperationID,
+			}
+			var authorityEvidence *issues.ReviewEvidencePin
+			if strings.TrimSpace(operation.EvidenceDigest) != "" {
+				authorityEvidence = &issues.ReviewEvidencePin{Source: operation.EvidenceSource, EventID: operation.EvidenceEventID, Seq: operation.EvidenceSeq, Digest: operation.EvidenceDigest}
+			}
+			authorityErr = issueClient.BeginReviewPublicationClose(ctx, operation.IssueID, authority, authorityEvidence)
+		}
+	}
 	ticketID, ticketIdentityErr := naming.ParseTicketID(operation.IssueID)
 	identityCheck := d.publicationIdentityCheck
 	appliedRecovery := false
@@ -558,11 +593,16 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 			identityCheck = d.validatePublicationOperationIdentity
 		}
 	}
-	if identityCheck != nil || ticketIdentityErr != nil {
-		identityErr := ticketIdentityErr
+	if identityCheck != nil || ticketIdentityErr != nil || authorityErr != nil {
+		identityErr := authorityErr
 		if identityErr != nil {
-			identityErr = fmt.Errorf("bind accepted-review publication ticket identity: %w", identityErr)
+			identityErr = fmt.Errorf("verify exact publication review authority before validation: %w", identityErr)
 		} else {
+			identityErr = ticketIdentityErr
+		}
+		if ticketIdentityErr != nil && authorityErr == nil {
+			identityErr = fmt.Errorf("bind accepted-review publication ticket identity: %w", identityErr)
+		} else if identityErr == nil {
 			identityErr = identityCheck(ctx, operation)
 		}
 		if identityErr != nil {
@@ -611,13 +651,18 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	})
 	ctx = git.WithCandidateValidationCommand(ctx, operation.ValidationCommand)
 	ctx = git.WithCandidateValidationTicket(ctx, ticketID)
+	ctx = git.WithCandidateValidationReviewAuthority(ctx, git.CandidateValidationReviewAuthority{
+		ReviewerID: operation.ActorID, ReviewerKind: operation.ActorKind,
+		ReviewEpochEventID: operation.ReviewEpochEventID, PublicationOperationID: operation.OperationID,
+		AcceptedReviewEventID: operation.AcceptedReviewEventID, AcceptedPublicationOperationID: operation.AcceptedPublicationOperationID,
+	})
 	ctx = git.WithCandidateValidationAdmission(ctx, d.publicationCandidateAdmission(operation.ProjectID, operationID, claimToken, claimTTL))
 
 	request := protocol.OrchestrationIntentRequest{
 		Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: operation.IntentKey, ActorID: operation.ActorID,
 		IssueIDs: []string{operation.IssueID}, RepoDir: d.resolveRepoDirForProjectExact(operation.ProjectID),
 	}
-	pin := acceptedReviewPin{SourceOID: operation.SourceRevision, EvidenceSource: operation.EvidenceSource, EvidenceEventID: operation.EvidenceEventID, EvidenceSeq: operation.EvidenceSeq, EvidenceDigest: operation.EvidenceDigest}
+	pin := acceptedReviewPin{Reviewer: domain.ReviewerIdentity{OwnerID: operation.ActorID, OwnerKind: operation.ActorKind}, ReviewEpochEventID: operation.ReviewEpochEventID, AcceptedReviewEventID: operation.AcceptedReviewEventID, AcceptedPublicationOperationID: operation.AcceptedPublicationOperationID, SourceOID: operation.SourceRevision, EvidenceSource: operation.EvidenceSource, EvidenceEventID: operation.EvidenceEventID, EvidenceSeq: operation.EvidenceSeq, EvidenceDigest: operation.EvidenceDigest}
 	result := protocol.OrchestrationIntentResult{Scope: request.Scope, Kind: request.Kind, IntentKey: request.IntentKey, Requested: []string{operation.IssueID}}
 	operation, err = d.renewPublicationClaim(context.Background(), store, operationID, claimToken, claimTTL)
 	if err != nil {

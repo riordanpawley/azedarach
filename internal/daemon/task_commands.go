@@ -134,18 +134,24 @@ type taskClosePreflightRequest struct {
 }
 
 type taskCloseRequest struct {
-	TaskID                    string                                     `json:"task_id"`
-	ForceWorktree             bool                                       `json:"force_worktree,omitempty"`
-	IgnoreAhead               bool                                       `json:"ignore_ahead,omitempty"`
-	IntegrateBeforeClose      bool                                       `json:"integrate_before_close,omitempty"`
-	CloseCleanChildren        bool                                       `json:"close_clean_children,omitempty"`
-	AllowActiveSession        bool                                       `json:"allow_active_session,omitempty"`
-	CloseOutcome              string                                     `json:"closed_outcome,omitempty"`
-	ExpectedSourceOID         string                                     `json:"expected_source_oid,omitempty"`
-	ExpectedBaseOID           string                                     `json:"expected_base_oid,omitempty"`
-	ExpectedReviewEvidence    *issues.ReviewEvidencePin                  `json:"expected_review_evidence,omitempty"`
-	HistoricalAuthorization   *domain.HistoricalPublicationAuthorization `json:"historical_authorization,omitempty"`
-	PromoteBacklogBeforeClose bool                                       `json:"-"`
+	TaskID                                 string                                     `json:"task_id"`
+	ForceWorktree                          bool                                       `json:"force_worktree,omitempty"`
+	IgnoreAhead                            bool                                       `json:"ignore_ahead,omitempty"`
+	IntegrateBeforeClose                   bool                                       `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren                     bool                                       `json:"close_clean_children,omitempty"`
+	AllowActiveSession                     bool                                       `json:"allow_active_session,omitempty"`
+	CloseOutcome                           string                                     `json:"closed_outcome,omitempty"`
+	ExpectedSourceOID                      string                                     `json:"expected_source_oid,omitempty"`
+	ExpectedBaseOID                        string                                     `json:"expected_base_oid,omitempty"`
+	ExpectedReviewEvidence                 *issues.ReviewEvidencePin                  `json:"expected_review_evidence,omitempty"`
+	ExpectedReviewerID                     string                                     `json:"expected_reviewer_id,omitempty"`
+	ExpectedReviewerKind                   string                                     `json:"expected_reviewer_kind,omitempty"`
+	ExpectedReviewEpochEventID             int64                                      `json:"expected_review_epoch_event_id,omitempty"`
+	ExpectedAcceptedReviewEventID          int64                                      `json:"expected_accepted_review_event_id,omitempty"`
+	ExpectedPublicationOperationID         string                                     `json:"expected_publication_operation_id,omitempty"`
+	ExpectedAcceptedPublicationOperationID string                                     `json:"expected_accepted_publication_operation_id,omitempty"`
+	HistoricalAuthorization                *domain.HistoricalPublicationAuthorization `json:"historical_authorization,omitempty"`
+	PromoteBacklogBeforeClose              bool                                       `json:"-"`
 }
 
 type taskCloseExpectedBaseStaleError struct {
@@ -2200,18 +2206,22 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		return result, fmt.Errorf("context risk is high for issue %s: record root_cause, invariant, regression_validation, or a structured risk note before closeout", taskID)
 	}
 	reviewEvidenceFence := ""
-	if cmd.ExpectedReviewEvidence != nil {
-		reviewEvidenceFence, err = issueClient.BeginReviewEvidenceClose(ctx, taskID, *cmd.ExpectedReviewEvidence)
+	reviewAuthority := issues.ReviewPublicationAuthority{
+		Reviewer:                       domain.ReviewerIdentity{OwnerID: cmd.ExpectedReviewerID, OwnerKind: cmd.ExpectedReviewerKind},
+		ReviewEpochEventID:             cmd.ExpectedReviewEpochEventID,
+		AcceptedReviewEventID:          cmd.ExpectedAcceptedReviewEventID,
+		PublicationOperationID:         cmd.ExpectedPublicationOperationID,
+		AcceptedPublicationOperationID: cmd.ExpectedAcceptedPublicationOperationID,
+	}
+	if strings.TrimSpace(cmd.ExpectedPublicationOperationID) != "" {
+		if err = issueClient.BeginReviewPublicationClose(ctx, taskID, reviewAuthority, cmd.ExpectedReviewEvidence); err != nil {
+			return result, fmt.Errorf("publication review close authority for issue %s: %w", taskID, err)
+		}
+	} else if cmd.ExpectedReviewEvidence != nil {
+		reviewEvidenceFence, err = issueClient.BeginReviewEvidenceClose(ctx, taskID, *cmd.ExpectedReviewEvidence, cmd.ExpectedReviewerID)
 		if err != nil {
 			return result, fmt.Errorf("reviewed evidence close fence for issue %s: %w", taskID, err)
 		}
-		defer func() {
-			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			defer cancel()
-			if releaseErr := issueClient.ReleaseReviewEvidenceClose(releaseCtx, taskID, reviewEvidenceFence); releaseErr != nil && d.cfg.Logger != nil {
-				d.cfg.Logger.Error("release review evidence close fence", "project_id", projectID, "task_id", taskID, "error", releaseErr)
-			}
-		}()
 	}
 	recordPhase := func(name string, startedAt time.Time, skipped bool) {
 		result.Phases = append(result.Phases, taskClosePhaseTiming{
@@ -2337,8 +2347,12 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 
 	phaseStartedAt = time.Now()
 	var task domain.Task
-	if cmd.ExpectedReviewEvidence != nil {
+	if strings.TrimSpace(cmd.ExpectedPublicationOperationID) != "" {
+		task, err = issueClient.CloseWithRuntimeReviewPublicationAuthority(ctx, projectID, taskID, closeStatus, reviewAuthority, cmd.ExpectedReviewEvidence)
+	} else if cmd.ExpectedReviewEvidence != nil {
 		task, err = issueClient.CloseWithRuntimeReviewEvidenceFence(ctx, projectID, taskID, closeStatus, *cmd.ExpectedReviewEvidence, reviewEvidenceFence)
+	} else if strings.TrimSpace(cmd.ExpectedReviewerID) != "" {
+		task, err = issueClient.CloseWithRuntimeReviewLease(ctx, projectID, taskID, closeStatus, cmd.ExpectedReviewerID)
 	} else {
 		task, err = issueClient.CloseWithRuntime(ctx, projectID, taskID, closeStatus)
 	}
