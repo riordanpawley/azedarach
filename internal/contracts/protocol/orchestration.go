@@ -324,11 +324,48 @@ func ValidateReturnedReviewPass(reviewPass OrchestrationReviewPass) error {
 	if len(reviewPass.AffectedInvariants) == 0 {
 		return fmt.Errorf("review pass requires at least one canonical affected invariant")
 	}
+	seenLayers := make(map[string]struct{}, len(reviewPass.ReusedLayers))
+	for _, layer := range reviewPass.ReusedLayers {
+		key := strings.ToLower(strings.TrimSpace(layer))
+		if key == "" {
+			return fmt.Errorf("review pass reused layers must not contain an empty value")
+		}
+		if _, exists := seenLayers[key]; exists {
+			return fmt.Errorf("review pass reused layers must not contain duplicate %q", layer)
+		}
+		seenLayers[key] = struct{}{}
+	}
+	seenCells := make(map[string]struct{}, len(reviewPass.Matrix.CoveredCells)+len(reviewPass.Matrix.SkippedCells))
+	for _, cell := range reviewPass.Matrix.CoveredCells {
+		key := strings.ToLower(strings.TrimSpace(cell))
+		if key == "" {
+			return fmt.Errorf("review pass covered matrix cells must not contain an empty value")
+		}
+		if _, exists := seenCells[key]; exists {
+			return fmt.Errorf("review pass matrix cells must not contain duplicate %q", cell)
+		}
+		seenCells[key] = struct{}{}
+	}
+	for _, skipped := range reviewPass.Matrix.SkippedCells {
+		key := strings.ToLower(strings.TrimSpace(skipped.Cell))
+		if key == "" || strings.TrimSpace(skipped.Reason) == "" {
+			return fmt.Errorf("review pass skipped matrix cells require cell and reason")
+		}
+		if _, exists := seenCells[key]; exists {
+			return fmt.Errorf("review pass matrix cells must not contain duplicate %q", skipped.Cell)
+		}
+		seenCells[key] = struct{}{}
+	}
+	seenInvariants := make(map[string]struct{}, len(reviewPass.AffectedInvariants))
 	for _, invariant := range reviewPass.AffectedInvariants {
 		value := strings.TrimSpace(invariant)
 		if value == "" || !KnownDaemonInvariant(value) {
 			return fmt.Errorf("review pass affected invariant %q is not canonical", invariant)
 		}
+		if _, exists := seenInvariants[value]; exists {
+			return fmt.Errorf("review pass affected invariants must not contain duplicate %q", invariant)
+		}
+		seenInvariants[value] = struct{}{}
 	}
 	return nil
 }

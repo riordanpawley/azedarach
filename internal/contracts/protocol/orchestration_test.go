@@ -114,6 +114,19 @@ func TestValidateReturnedReviewPassRejectsIncompleteProtocolPayloads(t *testing.
 		{name: "omitted reused layers", mutate: func(pass *OrchestrationReviewPass) { pass.ReusedLayers = nil }},
 		{name: "empty matrix type", mutate: func(pass *OrchestrationReviewPass) { pass.Matrix.Type = "" }},
 		{name: "empty matrix coverage", mutate: func(pass *OrchestrationReviewPass) { pass.Matrix.CoveredCells = nil }},
+		{name: "blank covered cell", mutate: func(pass *OrchestrationReviewPass) { pass.Matrix.CoveredCells = []string{" "} }},
+		{name: "duplicate matrix cell", mutate: func(pass *OrchestrationReviewPass) {
+			pass.Matrix.SkippedCells = []domain.WorkerEvidenceReviewSkippedMatrix{{Cell: "AUTHORIZATION", Reason: "covered"}}
+		}},
+		{name: "skipped cell without reason", mutate: func(pass *OrchestrationReviewPass) {
+			pass.Matrix.CoveredCells = nil
+			pass.Matrix.SkippedCells = []domain.WorkerEvidenceReviewSkippedMatrix{{Cell: "recovery"}}
+		}},
+		{name: "blank reused layer", mutate: func(pass *OrchestrationReviewPass) { pass.ReusedLayers = []string{" "} }},
+		{name: "duplicate reused layer", mutate: func(pass *OrchestrationReviewPass) { pass.ReusedLayers = []string{"migration", "MIGRATION"} }},
+		{name: "duplicate invariant", mutate: func(pass *OrchestrationReviewPass) {
+			pass.AffectedInvariants = []string{"orchestration.project_review", "orchestration.project_review"}
+		}},
 		{name: "missing judgment", mutate: func(pass *OrchestrationReviewPass) { pass.BroaderInvalidation = nil }},
 	}
 	for _, tt := range tests {
