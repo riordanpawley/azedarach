@@ -491,6 +491,8 @@ if ($production_install_overlapped && $exit_code == 0) {
     $exit_code = 74;
 }
 
+my $post_acquire_error = '';
+eval {
 merge_whole_gate_evidence($evidence_file, \@evidence_identity, $fatal_evidence_file, \@fatal_evidence_identity, {
     held => JSON::PP::true, request_id => $request_id, class => $class,
     scope => $scope, purpose => $purpose, execution => 'executed',
@@ -530,12 +532,48 @@ if ($exit_code != 0 && $failure_publisher ne '') {
         if $publish_status != 0;
     adopt_trusted_file_identity($evidence_file, \@evidence_identity);
 }
-write_publication_evidence($evidence_file, $publication_evidence_path) if $publication_evidence_path ne '';
+# Publication evidence must be valid while it still has the publisher-adopted
+# identity. Do not copy malformed or identity-swapped bytes into trusted output.
+decode_json(read_trusted_file($evidence_file, \@evidence_identity) || '{}');
+if (my $ready = delete($ENV{AZEDARACH_VALIDATION_TEST_POST_PUBLISH_READY_FILE})) {
+    open my $ready_fh, '>', $ready or die "create post-publisher test marker: $!\n";
+    close $ready_fh or die "close post-publisher test marker: $!\n";
+    my $release = delete($ENV{AZEDARACH_VALIDATION_TEST_POST_PUBLISH_RELEASE_FILE}) || '';
+    sleep 0.01 until $release ne '' && -e $release;
+}
+write_publication_evidence($evidence_file, \@evidence_identity, $publication_evidence_path)
+    if $publication_evidence_path ne '';
+1;
+} or $post_acquire_error = $@ || 'validation evidence finalization failed';
+if ($post_acquire_error ne '') {
+    warn "validation evidence finalization failed: $post_acquire_error";
+    $exit_code = 70 if $exit_code == 0;
+    my $detail = bounded_outcome_detail($post_acquire_error);
+    eval {
+        replace_trusted_evidence($evidence_file, \@evidence_identity, {
+            held => JSON::PP::true,
+            request_id => $request_id,
+            source_revision => $revision,
+            issue_id => $candidate_issue_id,
+            present => JSON::PP::true,
+            payload_exit_code => $payload_exit_code,
+            fatal_phase => 'evidence_finalization',
+            fatal_detail => $detail,
+        });
+        1;
+    } or warn "replace failed validation evidence: " . ($@ || 'unknown error');
+}
 my $terminal = $interrupted ? 'cancelled' : ($exit_code == 0 ? 'completed' : 'failed');
 kill 'TERM', $heartbeat;
 waitpid($heartbeat, 0);
 my $outcome = "exit $exit_code";
-my $fatal_evidence = read_trusted_json_file($evidence_file, \@evidence_identity);
+my $fatal_evidence = eval { read_trusted_json_file($evidence_file, \@evidence_identity) } || {};
+if ($@) {
+    my $detail = bounded_outcome_detail($@);
+    $outcome .= " phase=evidence_finalization detail=$detail";
+    $terminal = 'failed';
+    $exit_code = 70 if $exit_code == 0;
+}
 if (($fatal_evidence->{fatal_phase} || '') ne '') {
     my $payload_phase = bounded_outcome_detail($fatal_evidence->{fatal_phase});
     my $payload_detail = bounded_outcome_detail($fatal_evidence->{fatal_detail} || 'validation payload configuration failed');
@@ -551,7 +589,16 @@ if (($fatal_evidence->{fatal_phase} || '') ne '') {
 }
 my @finish = ($control_az, 'validation', 'finish', '--request', $request_id, '--state', $terminal, '--outcome', $outcome);
 if (-s $evidence_file) {
-    push @finish, '--evidence-json', read_trusted_file($evidence_file, \@evidence_identity);
+    my $finish_evidence = eval { read_trusted_file($evidence_file, \@evidence_identity) };
+    if (defined $finish_evidence) {
+        push @finish, '--evidence-json', $finish_evidence;
+    } else {
+        warn "omit unreadable validation finish evidence: " . ($@ || 'unknown error');
+        $terminal = 'failed';
+        $exit_code = 70 if $exit_code == 0;
+        @finish = ($control_az, 'validation', 'finish', '--request', $request_id,
+            '--state', $terminal, '--outcome', "$outcome phase=evidence_finalization detail=trusted_read_failed");
+    }
 }
 my $finish_failed = !eval { control_capture(@finish); 1 };
 warn "validation finish failed for $request_id\n" if $finish_failed;
@@ -582,22 +629,30 @@ sub read_json_file {
 }
 
 sub write_publication_evidence {
-    my ($source, $target) = @_;
+    my ($source, $identity, $target) = @_;
     die "publication evidence path must be absolute\n" unless File::Spec->file_name_is_absolute($target);
     my $parent = dirname($target);
     my @parent_stat = lstat($parent);
     die "publication evidence parent is unsafe\n" unless @parent_stat && -d _ && !-l _;
     die "publication evidence target is a symlink\n" if -l $target;
-    open my $in, '<', $source or die "open publication evidence source: $!\n";
-    local $/;
-    my $contents = <$in> // '';
-    close $in;
+    my $contents = read_trusted_file($source, $identity);
     my $temporary = "$target.tmp.$$";
     sysopen(my $out, $temporary, O_WRONLY | O_CREAT | O_EXCL, 0600)
         or die "create publication evidence atomically: $!\n";
     print {$out} $contents;
     close $out or die "close publication evidence: $!\n";
     rename($temporary, $target) or die "commit publication evidence: $!\n";
+}
+
+sub replace_trusted_evidence {
+    my ($path, $identity, $evidence) = @_;
+    my $parent = dirname($path);
+    my ($fh, $temporary) = tempfile('azedarach-validation-recovery-XXXXXX', DIR => $parent, UNLINK => 0);
+    chmod 0600, $temporary or die "secure recovered validation evidence: $!\n";
+    print {$fh} JSON::PP->new->canonical->encode($evidence);
+    close $fh or die "close recovered validation evidence: $!\n";
+    rename($temporary, $path) or die "commit recovered validation evidence: $!\n";
+    adopt_trusted_file_identity($path, $identity);
 }
 
 sub bounded_outcome_detail {
