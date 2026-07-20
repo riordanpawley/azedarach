@@ -1073,6 +1073,158 @@ func TestPublicationEvidenceAuthorityMigrationRollsBackAtomically(t *testing.T) 
 	}
 }
 
+func TestPublicationRootAuthorityMigrationBackfillsRetryFamilyAndReopens(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 10)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createPublicationRootAuthorityEventTable(t, db)
+	insert := `INSERT INTO daemon_publication_operations(
+		operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,reviewer_kind,review_epoch_event_id,accepted_review_event_id,patch_evidence_id,target_id,target_branch,
+		source_revision,base_revision,policy_version,environment_fingerprint,validation_command,evidence_source,evidence_event_id,evidence_seq,evidence_digest,coalesce_key,state,created_at,updated_at
+	) VALUES(?,?,?,?,?,'reviewer','orchestrator',41,42,'patch','base','main','source',?,'policy','environment','go test ./...','mailbox',1,2,'digest',?,'failed',?,?)`
+	rootCreated := time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	retryCreated := time.Date(2026, 7, 19, 0, 1, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	if _, err = db.Exec(insert, "root", "project", "issue", "intent", "fingerprint", "old-base", "root-candidate", rootCreated, rootCreated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(insert, "retry", "project", "issue", "intent:publication-retry:1", "fingerprint", "new-base", "retry-candidate", retryCreated, retryCreated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO issue_observation_events(id,issue_id,event_type,observed_at,source,source_command,payload_json)
+		VALUES(42,'issue','review.completed',?,'daemon-orchestration','review-accept',?)`, rootCreated,
+		`{"outcome":"accepted","actor_id":"reviewer","actor_kind":"orchestrator","review_epoch_event_id":41,"publication_operation_id":"root"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewAtPath(dbPath, slog.Default())
+	for _, operationID := range []string{"root", "retry"} {
+		operation, found, readErr := store.PublicationOperation(context.Background(), operationID)
+		if readErr != nil || !found || operation.AcceptedPublicationOperationID != "root" {
+			t.Fatalf("backfilled %s = (%+v,%t,%v)", operationID, operation, found, readErr)
+		}
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := NewAtPath(dbPath, slog.Default())
+	defer reopened.Close()
+	if operation, found, readErr := reopened.PublicationOperation(context.Background(), "retry"); readErr != nil || !found || operation.AcceptedPublicationOperationID != "root" {
+		t.Fatalf("reopened retry = (%+v,%t,%v)", operation, found, readErr)
+	}
+}
+
+func TestPublicationRootAuthorityMigrationRejectsUntrustedBackfill(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 10)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createPublicationRootAuthorityEventTable(t, db)
+	created := time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	insert := `INSERT INTO daemon_publication_operations(
+		operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,reviewer_kind,review_epoch_event_id,accepted_review_event_id,patch_evidence_id,target_id,target_branch,
+		source_revision,base_revision,policy_version,environment_fingerprint,validation_command,evidence_source,evidence_event_id,evidence_seq,evidence_digest,coalesce_key,state,created_at,updated_at
+	) VALUES(?,?,?,?,?,'reviewer','orchestrator',41,42,'patch','base','main','source','base','policy','environment','go test ./...','mailbox',1,2,'digest',?,'failed',?,?)`
+	if _, err = db.Exec(insert, "root", "project", "issue", "intent", "fingerprint", "root-candidate", created, created); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(insert, "retry", "project", "issue", "intent:publication-retry:1", "fingerprint", "retry-candidate", created, created); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO issue_observation_events(id,issue_id,event_type,observed_at,source,source_command,payload_json)
+		VALUES(42,'issue','review.completed',?,'agent','review-accept',?)`, created,
+		`{"outcome":"accepted","actor_id":"reviewer","actor_kind":"orchestrator","review_epoch_event_id":41,"publication_operation_id":"root"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewAtPath(dbPath, slog.Default())
+	defer store.Close()
+	for _, operationID := range []string{"root", "retry"} {
+		operation, found, readErr := store.PublicationOperation(context.Background(), operationID)
+		if readErr != nil || !found || operation.AcceptedPublicationOperationID != operationID {
+			t.Fatalf("fail-closed backfill %s = (%+v,%t,%v)", operationID, operation, found, readErr)
+		}
+	}
+}
+
+func createPublicationRootAuthorityEventTable(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(`CREATE TABLE issue_observation_events(
+		id INTEGER PRIMARY KEY, issue_id TEXT NOT NULL, event_type TEXT NOT NULL,
+		observed_at TEXT NOT NULL, source TEXT NOT NULL, source_command TEXT NOT NULL,
+		payload_json TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublicationRootAuthorityMigrationRollsBackAtomically(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 10)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TRIGGER reject_publication_root_authority_ledger BEFORE INSERT ON schema_migrations WHEN NEW.id='daemon_operations_0011_publication_root_authority' BEGIN SELECT RAISE(ABORT, 'injected publication root authority ledger failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	failed := NewAtPath(dbPath, slog.Default())
+	if _, err = failed.PublicationOperations(context.Background(), "project", "", false); err == nil || !strings.Contains(err.Error(), "injected publication root authority ledger failure") {
+		t.Fatalf("migration error = %v", err)
+	}
+	_ = failed.Close()
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var columns, ledgerRows int
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_publication_operations') WHERE name='accepted_publication_operation_id'`).Scan(&columns); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='daemon_operations_0011_publication_root_authority'`).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if columns != 0 || ledgerRows != 0 {
+		t.Fatalf("failed root authority migration residue columns=%d ledger=%d", columns, ledgerRows)
+	}
+}
+
+func TestPublicationRootAuthorityMigrationRejectsAppliedSchemaDrift(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 11)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`ALTER TABLE daemon_publication_operations RENAME COLUMN accepted_publication_operation_id TO accepted_publication_operation_id_drift`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	drifted := NewAtPath(dbPath, slog.Default())
+	defer drifted.Close()
+	if _, err = drifted.PublicationOperations(context.Background(), "project", "", false); err == nil || !strings.Contains(err.Error(), "differs from immutable artifact") {
+		t.Fatalf("schema drift error = %v", err)
+	}
+}
+
 func seedOperationsMigrations(t *testing.T, dbPath string, count int) {
 	t.Helper()
 	db, err := sql.Open("sqlite", dbPath)

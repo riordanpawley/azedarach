@@ -253,9 +253,9 @@ func validateReviewPublicationAuthority(ctx context.Context, tx *sql.Tx, issueID
 	var operationCount int
 	err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_publication_operations
 		WHERE operation_id=? AND issue_id=? AND LOWER(actor_id)=? AND reviewer_kind=?
-		  AND review_epoch_event_id=? AND accepted_review_event_id=?`,
+		  AND review_epoch_event_id=? AND accepted_review_event_id=? AND accepted_publication_operation_id=?`,
 		strings.TrimSpace(authority.PublicationOperationID), strings.TrimSpace(issueID), reviewer.OwnerID, reviewer.OwnerKind,
-		authority.ReviewEpochEventID, authority.AcceptedReviewEventID).Scan(&operationCount)
+		authority.ReviewEpochEventID, authority.AcceptedReviewEventID, strings.TrimSpace(authority.AcceptedPublicationOperationID)).Scan(&operationCount)
 	if err != nil || operationCount != 1 {
 		return fmt.Errorf("%w: durable publication operation authority does not match", domain.ErrConflict)
 	}
@@ -1119,18 +1119,19 @@ func (c *Client) TerminalizeAcceptedReviewPublication(ctx context.Context, dispo
 			}
 			defer func() { _ = tx.Rollback() }()
 			var state string
-			var actor, reviewerKind, intentKey, fingerprint, patchEvidenceID string
+			var actor, reviewerKind, intentKey, fingerprint, patchEvidenceID, acceptedPublicationOperationID string
 			var epochID, acceptedID int64
-			err = tx.QueryRowContext(ctx, `SELECT state,actor_id,reviewer_kind,intent_key,request_fingerprint,review_epoch_event_id,accepted_review_event_id,patch_evidence_id FROM daemon_publication_operations WHERE operation_id=? AND project_id=? AND issue_id=?`, op.OperationID, op.ProjectID, op.IssueID).Scan(&state, &actor, &reviewerKind, &intentKey, &fingerprint, &epochID, &acceptedID, &patchEvidenceID)
+			err = tx.QueryRowContext(ctx, `SELECT state,actor_id,reviewer_kind,intent_key,request_fingerprint,review_epoch_event_id,accepted_review_event_id,patch_evidence_id,accepted_publication_operation_id FROM daemon_publication_operations WHERE operation_id=? AND project_id=? AND issue_id=?`, op.OperationID, op.ProjectID, op.IssueID).Scan(&state, &actor, &reviewerKind, &intentKey, &fingerprint, &epochID, &acceptedID, &patchEvidenceID, &acceptedPublicationOperationID)
 			if err != nil {
 				return fmt.Errorf("read terminal publication authority: %w", err)
 			}
-			if !strings.EqualFold(actor, op.ActorID) || reviewerKind != op.ReviewerKind || intentKey != op.IntentKey || fingerprint != op.RequestFingerprint || epochID != op.ReviewEpochEventID || acceptedID != op.AcceptedReviewEventID || patchEvidenceID != op.PatchEvidenceID {
+			if !strings.EqualFold(actor, op.ActorID) || reviewerKind != op.ReviewerKind || intentKey != op.IntentKey || fingerprint != op.RequestFingerprint || epochID != op.ReviewEpochEventID || acceptedID != op.AcceptedReviewEventID || patchEvidenceID != op.PatchEvidenceID || acceptedPublicationOperationID != op.AcceptedPublicationOperationID {
 				return errors.New("terminal publication authority changed concurrently")
 			}
-			payload := map[string]any{"outcome": string(domain.ReviewOutcomeIntegrationFailed), "actor_id": op.ActorID, "actor_kind": op.ReviewerKind, "reviewer_kind": op.ReviewerKind, "intent_key": op.IntentKey, "request_fingerprint": op.RequestFingerprint, "publication_operation_id": op.OperationID, "accepted_review_event_id": op.AcceptedReviewEventID, "review_epoch_event_id": op.ReviewEpochEventID, "patch_evidence_id": op.PatchEvidenceID, "publication_state": string(disposition.State), "failure": strings.TrimSpace(disposition.FailureDetail)}
+			rootIntentKey := strings.Split(op.IntentKey, ":publication-retry:")[0]
+			payload := map[string]any{"outcome": string(domain.ReviewOutcomeIntegrationFailed), "actor_id": op.ActorID, "actor_kind": op.ReviewerKind, "reviewer_kind": op.ReviewerKind, "intent_key": rootIntentKey, "request_fingerprint": op.RequestFingerprint, "publication_operation_id": op.AcceptedPublicationOperationID, "accepted_review_event_id": op.AcceptedReviewEventID, "review_epoch_event_id": op.ReviewEpochEventID, "patch_evidence_id": op.PatchEvidenceID, "publication_state": string(disposition.State), "failure": strings.TrimSpace(disposition.FailureDetail)}
 			var existing int64
-			err = tx.QueryRowContext(ctx, `SELECT id FROM issue_observation_events WHERE issue_id=? AND event_type=? AND json_extract(payload_json,'$.outcome')=? AND json_extract(payload_json,'$.publication_operation_id')=? AND LOWER(json_extract(payload_json,'$.actor_id'))=LOWER(?) AND json_extract(payload_json,'$.reviewer_kind')=? AND json_extract(payload_json,'$.intent_key')=? AND json_extract(payload_json,'$.request_fingerprint')=? AND CAST(json_extract(payload_json,'$.accepted_review_event_id') AS INTEGER)=? AND CAST(json_extract(payload_json,'$.review_epoch_event_id') AS INTEGER)=? AND json_extract(payload_json,'$.patch_evidence_id')=? ORDER BY id DESC LIMIT 1`, op.IssueID, string(domain.IssueEventReviewCompleted), string(domain.ReviewOutcomeIntegrationFailed), op.OperationID, op.ActorID, op.ReviewerKind, op.IntentKey, op.RequestFingerprint, op.AcceptedReviewEventID, op.ReviewEpochEventID, op.PatchEvidenceID).Scan(&existing)
+			err = tx.QueryRowContext(ctx, `SELECT id FROM issue_observation_events WHERE issue_id=? AND event_type=? AND json_extract(payload_json,'$.outcome')=? AND json_extract(payload_json,'$.publication_operation_id')=? AND LOWER(json_extract(payload_json,'$.actor_id'))=LOWER(?) AND json_extract(payload_json,'$.reviewer_kind')=? AND json_extract(payload_json,'$.intent_key')=? AND json_extract(payload_json,'$.request_fingerprint')=? AND CAST(json_extract(payload_json,'$.accepted_review_event_id') AS INTEGER)=? AND CAST(json_extract(payload_json,'$.review_epoch_event_id') AS INTEGER)=? AND json_extract(payload_json,'$.patch_evidence_id')=? ORDER BY id DESC LIMIT 1`, op.IssueID, string(domain.IssueEventReviewCompleted), string(domain.ReviewOutcomeIntegrationFailed), op.AcceptedPublicationOperationID, op.ActorID, op.ReviewerKind, rootIntentKey, op.RequestFingerprint, op.AcceptedReviewEventID, op.ReviewEpochEventID, op.PatchEvidenceID).Scan(&existing)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
@@ -1199,6 +1200,9 @@ func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID
 	}
 	if strings.TrimSpace(operation.PatchEvidenceID) == "" {
 		operation.PatchEvidenceID = strings.TrimSpace(operation.OperationID)
+	}
+	if strings.TrimSpace(operation.AcceptedPublicationOperationID) == "" {
+		operation.AcceptedPublicationOperationID = strings.TrimSpace(operation.OperationID)
 	}
 	if err := operation.ValidatePreparedIntent(); err != nil {
 		return AcceptedReviewPublicationCommit{}, c.wrapError("append-accepted-review-publication", issueID, err)
@@ -1281,12 +1285,12 @@ func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID
 				now = time.Now().UTC()
 			}
 			_, err = tx.ExecContext(ctx, `INSERT INTO daemon_publication_operations(
-				operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,reviewer_kind,review_epoch_event_id,accepted_review_event_id,patch_evidence_id,target_id,target_branch,
+				operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,reviewer_kind,review_epoch_event_id,accepted_review_event_id,patch_evidence_id,accepted_publication_operation_id,target_id,target_branch,
 				source_revision,base_revision,candidate_revision,policy_version,environment_fingerprint,validation_command,
 				evidence_source,evidence_event_id,evidence_seq,evidence_digest,coalesce_key,state,created_at,updated_at
-			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`,
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`,
 				operation.OperationID, operation.ProjectID, operation.IssueID, operation.IntentKey, operation.RequestFingerprint,
-				operation.ActorID, operation.ReviewerKind, operation.ReviewEpochEventID, 0, operation.PatchEvidenceID,
+				operation.ActorID, operation.ReviewerKind, operation.ReviewEpochEventID, 0, operation.PatchEvidenceID, operation.AcceptedPublicationOperationID,
 				operation.TargetID, operation.TargetBranch, operation.SourceRevision, operation.BaseRevision,
 				operation.CandidateRevision, operation.PolicyVersion, operation.EnvironmentFingerprint, operation.ValidationCommand,
 				operation.EvidenceSource, operation.EvidenceEventID, operation.EvidenceSeq, operation.EvidenceDigest, coalesceKey,
@@ -1300,12 +1304,12 @@ func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID
 			// continuation rather than a row that does not exist.
 			err = tx.QueryRowContext(ctx, `SELECT operation_id,accepted_review_event_id FROM daemon_publication_operations
 				WHERE project_id=? AND (coalesce_key=? OR (issue_id=? AND intent_key=?))
-				  AND issue_id=? AND request_fingerprint=? AND LOWER(actor_id)=LOWER(?) AND reviewer_kind=? AND review_epoch_event_id=? AND patch_evidence_id=? AND target_id=? AND target_branch=?
+				  AND issue_id=? AND request_fingerprint=? AND LOWER(actor_id)=LOWER(?) AND reviewer_kind=? AND review_epoch_event_id=? AND patch_evidence_id=? AND accepted_publication_operation_id=? AND target_id=? AND target_branch=?
 				  AND source_revision=? AND base_revision=? AND policy_version=?
 				  AND environment_fingerprint=? AND validation_command=? AND evidence_digest=?
 				ORDER BY created_at,operation_id LIMIT 1`,
 				operation.ProjectID, coalesceKey, operation.IssueID, operation.IntentKey,
-				operation.IssueID, operation.RequestFingerprint, operation.ActorID, operation.ReviewerKind, operation.ReviewEpochEventID, operation.PatchEvidenceID, operation.TargetID, operation.TargetBranch,
+				operation.IssueID, operation.RequestFingerprint, operation.ActorID, operation.ReviewerKind, operation.ReviewEpochEventID, operation.PatchEvidenceID, operation.AcceptedPublicationOperationID, operation.TargetID, operation.TargetBranch,
 				operation.SourceRevision, operation.BaseRevision, operation.PolicyVersion,
 				operation.EnvironmentFingerprint, operation.ValidationCommand, operation.EvidenceDigest,
 			).Scan(&publicationOperationID, &eventID)
