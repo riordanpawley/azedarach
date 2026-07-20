@@ -658,7 +658,7 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	publication := domain.PublicationOperation{
 		OperationID: "publication-close-exact", ProjectID: projectID, IssueID: issueID, IntentKey: "review-accept",
 		RequestFingerprint: "fingerprint", ActorID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator,
-		ReviewEpochEventID: 1, AcceptedReviewEventID: 2, PatchEvidenceID: "publication-close-exact", TargetID: "base", TargetBranch: "main",
+		ReviewEpochEventID: 1, AcceptedReviewEventID: 2, PatchEvidenceID: "publication-close-exact", AcceptedPublicationOperationID: "publication-close-exact", TargetID: "base", TargetBranch: "main",
 		SourceRevision: sourceOID, BaseRevision: baseOID, PolicyVersion: "portable-v1", EnvironmentFingerprint: "node-consumer",
 		ValidationCommand: "npm run verify-publication", State: domain.PublicationOperationQueued, CreatedAt: started,
 	}
