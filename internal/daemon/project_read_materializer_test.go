@@ -2156,7 +2156,7 @@ func TestProjectReadMaterializerRunAnnouncesCanonicalAdvanceBeforeRuntimeEnrichm
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	issueID, err := writer.Create(ctx, issues.CreateTaskParams{Title: "cross daemon lifecycle", Type: domain.TypeTask, Status: domain.StatusInReview})
+	issueID, err := writer.Create(ctx, issues.CreateTaskParams{Title: "cross daemon lifecycle", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2179,7 +2179,7 @@ func TestProjectReadMaterializerRunAnnouncesCanonicalAdvanceBeforeRuntimeEnrichm
 		defer close(done)
 		materializer.run(ctx, func(metadata protocol.MaterializedSnapshotMetadata) { advanced <- metadata })
 	}()
-	if _, err := writer.CloseWithRuntime(ctx, "project", issueID, domain.StatusDone); err != nil {
+	if err := writer.Update(ctx, issueID, domain.StatusInProgress); err != nil {
 		t.Fatal(err)
 	}
 	<-hydrateEntered
@@ -2192,8 +2192,8 @@ func TestProjectReadMaterializerRunAnnouncesCanonicalAdvanceBeforeRuntimeEnrichm
 		t.Fatal("canonical delta was not announced before runtime enrichment began")
 	}
 	tasks, _ := materializer.snapshot()
-	if len(tasks) != 1 || tasks[0].Status != domain.StatusDone {
-		t.Fatalf("cross-daemon snapshot = %+v, want committed closed lifecycle", tasks)
+	if len(tasks) != 1 || tasks[0].Status != domain.StatusInProgress {
+		t.Fatalf("cross-daemon snapshot = %+v, want committed active lifecycle", tasks)
 	}
 	close(releaseHydrate)
 	cancel()
