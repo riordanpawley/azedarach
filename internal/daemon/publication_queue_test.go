@@ -1546,6 +1546,20 @@ func TestPublicationValidationIdentityIsOrderStableAndConsumerNeutral(t *testing
 	}
 }
 
+func TestPublicationValidationStagesRequireExactPinnedDAGCapability(t *testing.T) {
+	cfg := &appconfig.Config{Gate: appconfig.GateConfig{Stages: []appconfig.GateStageConfig{{ID: "dogfood-only", Command: "consumer-tool verify"}}}}
+	if stages := publicationValidationStagesForOperation(cfg, "true"); len(stages) != 0 {
+		t.Fatalf("foreign consumer command inherited ambient stage DAG: %+v", stages)
+	}
+	if stages := publicationValidationStagesForOperation(cfg, "stage-dag:stale"); len(stages) != 0 {
+		t.Fatalf("stale stage identity inherited changed DAG: %+v", stages)
+	}
+	identity := publicationValidationIdentity(cfg)
+	if stages := publicationValidationStagesForOperation(cfg, identity); len(stages) != 1 || stages[0].ID != "dogfood-only" {
+		t.Fatalf("exact pinned stage capability = %+v, want configured DAG", stages)
+	}
+}
+
 func daemonTestPublicationOperation(projectID, operationID, issueID, intent, source string, created time.Time) domain.PublicationOperation {
 	return domain.PublicationOperation{
 		OperationID: operationID, ProjectID: projectID, IssueID: issueID, IntentKey: intent,

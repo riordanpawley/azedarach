@@ -649,8 +649,7 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	ctx = git.WithCandidateValidationCommand(ctx, operation.ValidationCommand)
 	if projectCfg, configErr := appconfig.LoadConfig(d.resolveRepoDirForProjectExact(operation.ProjectID)); configErr != nil {
 		return nil, fmt.Errorf("load publication validation stages: %w", configErr)
-	} else if len(projectCfg.Gate.Stages) > 0 {
-		stages := publicationValidationStages(projectCfg)
+	} else if stages := publicationValidationStagesForOperation(projectCfg, operation.ValidationCommand); len(stages) > 0 {
 		ctx = git.WithCandidateValidationDAG(ctx, stages)
 		artifactPaths := append([]string(nil), d.runtimeConfigForProject(operation.ProjectID).GateFailureArtifactPaths...)
 		for _, stage := range stages {
@@ -740,6 +739,14 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	d.ensurePublicationTargetContinuation(store, current)
 	_ = daemonops.ReportProgress(ctx, daemonops.Progress{Phase: "merged", Message: "exact candidate merged and accepted issue closed", Current: 100, Total: 100, Unit: "percent", Percent: 100})
 	return json.Marshal(current)
+}
+
+func publicationValidationStagesForOperation(cfg *appconfig.Config, operationIdentity string) []git.CandidateValidationStage {
+	operationIdentity = strings.TrimSpace(operationIdentity)
+	if !strings.HasPrefix(operationIdentity, "stage-dag:") || operationIdentity != publicationValidationIdentity(cfg) {
+		return nil
+	}
+	return publicationValidationStages(cfg)
 }
 
 func (d *Daemon) terminalizeAcceptedReviewPublication(ctx context.Context, current domain.PublicationOperation, claimToken string, state domain.PublicationOperationState, failureKind, failureDetail, failureArtifact string, finished time.Time) (domain.PublicationOperation, error) {
