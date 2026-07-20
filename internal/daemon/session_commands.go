@@ -5185,7 +5185,7 @@ func (d *Daemon) buildCodexResumeCommand(projectID, issueID string, yolo bool, i
 	tool := strings.TrimSpace(projectCfg.CLITool)
 	if projectCfg.CodexAppServer {
 		resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
-		return codexAppServerSupervisedCommand(tool, resume, resume)
+		return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), resume, resume)
 	}
 
 	parts := []string{
@@ -6171,7 +6171,7 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 		command := promptAssignment + "; " + strings.Join(parts, " ")
 		if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
 			resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
-			return codexAppServerSupervisedCommand(tool, command, resume)
+			return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, resume)
 		}
 		if strings.EqualFold(tool, "codex") {
 			return codexFloopFailOpenProbe(tool) + "; " + command
@@ -6182,7 +6182,7 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 	command := strings.Join(parts, " ")
 	if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
 		resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
-		return codexAppServerSupervisedCommand(tool, command, resume)
+		return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, resume)
 	}
 	if strings.EqualFold(tool, "codex") {
 		return codexFloopFailOpenProbe(tool) + "; " + command
@@ -6225,8 +6225,13 @@ func codexFloopFailOpenProbe(tool string) string {
 		codexFloopFailOpenConfigVariable + "='-c " + codexFloopFailOpenConfig + "'; fi"
 }
 
-func codexAppServerSupervisedCommand(tool, firstCommand, resumeCommand string) string {
-	startDaemon := tool + " " + codexFloopFailOpenConfigExpansion + " app-server daemon start >/dev/null"
+func codexAppServerSupervisedCommand(tool, stableDir, firstCommand, resumeCommand string) string {
+	stableDir = filepath.Clean(stableDir)
+	managedDaemon := func(action string) string {
+		return "(cd " + singleQuoteForShell(stableDir) + " && " + tool + " " + codexFloopFailOpenConfigExpansion + " app-server daemon " + action + " >/dev/null)"
+	}
+	startDaemon := managedDaemon("start")
+	restartDaemon := managedDaemon("restart")
 	steps := []string{
 		"__az_codex_remote_started=$(date +%s)",
 		"if [ \"$__az_codex_remote_first\" -eq 1 ]; then __az_codex_remote_first=0; " + firstCommand + "; else " + resumeCommand + "; fi",
@@ -6235,7 +6240,7 @@ func codexAppServerSupervisedCommand(tool, firstCommand, resumeCommand string) s
 		"__az_codex_remote_elapsed=$(($(date +%s)-__az_codex_remote_started))",
 		"if [ \"$__az_codex_remote_elapsed\" -lt 5 ]; then __az_codex_remote_failures=$((__az_codex_remote_failures+1)); else __az_codex_remote_failures=1; fi",
 		"[ \"$__az_codex_remote_failures\" -ge 3 ] && exit \"$__az_codex_remote_status\"",
-		startDaemon + " || exit $?",
+		restartDaemon + " || exit $?",
 		"sleep 1",
 	}
 	return codexFloopFailOpenProbe(tool) + "; " + startDaemon + " || exit $?; __az_codex_remote_first=1; __az_codex_remote_failures=0; while :; do " + strings.Join(steps, "; ") + "; done"

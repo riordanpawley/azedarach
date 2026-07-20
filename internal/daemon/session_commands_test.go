@@ -421,12 +421,16 @@ func TestCodexAppServerLaunchUsesStockRemoteTUIAndSupervisedResume(t *testing.T)
 		t.Fatalf("launch command still uses removed custom client: %s", command)
 	}
 
-	supervisor := codexAppServerSupervisedCommand("codex", "codex --remote unix://", "codex resume --remote unix:// --last")
+	stableDir := filepath.Join(t.TempDir(), "stable daemon cwd")
+	if err := os.MkdirAll(stableDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	supervisor := codexAppServerSupervisedCommand("codex", stableDir, "codex --remote unix://", "codex resume --remote unix:// --last")
 	if out, err := exec.Command("sh", "-n", "-c", supervisor).CombinedOutput(); err != nil {
 		t.Fatalf("supervisor shell syntax: %v\n%s\n%s", err, out, supervisor)
 	}
 	trace := filepath.Join(t.TempDir(), "trace")
-	fakeCodex := `codex() { printf '%s\n' "$*" >> "$TRACE"; case "$*" in "mcp get --json floop") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon start") return 0 ;; "--remote unix://") return 1 ;; "resume --remote unix:// --last") return 0 ;; *) return 2 ;; esac; }; `
+	fakeCodex := `codex() { printf '%s|%s\n' "$*" "$PWD" >> "$TRACE"; case "$*" in "mcp get --json floop") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon start") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon restart") return 0 ;; "--remote unix://") return 1 ;; "resume --remote unix:// --last") return 0 ;; *) return 2 ;; esac; }; `
 	cmd := exec.Command("sh", "-c", fakeCodex+supervisor)
 	cmd.Env = append(os.Environ(), "TRACE="+trace)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -439,6 +443,14 @@ func TestCodexAppServerLaunchUsesStockRemoteTUIAndSupervisedResume(t *testing.T)
 	got := string(data)
 	if !strings.Contains(got, "--remote unix://") || !strings.Contains(got, "resume --remote unix:// --last") {
 		t.Fatalf("supervisor trace = %q", got)
+	}
+	for _, action := range []string{"app-server daemon start", "app-server daemon restart"} {
+		if !strings.Contains(got, action+"|"+stableDir) {
+			t.Fatalf("supervisor trace = %q, want %s from stable cwd %q", got, action, stableDir)
+		}
+	}
+	if strings.Contains(supervisor, "kill ") {
+		t.Fatalf("supervisor directly terminates processes instead of preserving native daemon ownership: %s", supervisor)
 	}
 }
 
