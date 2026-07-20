@@ -2400,12 +2400,16 @@ func TestIntegratedAcceptedReviewRecoveryProofIsActorAndEpochFenced(t *testing.T
 		},
 	}
 	d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
+	d.reviewLeaseFencedBeforeClose = func(context.Context, string, string) error {
+		d.reviewLeaseFencedBeforeClose = nil
+		return errors.New("injected post-accept close crash")
+	}
 	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "recover-integrated", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
 	first, err := d.orchestrationAuthority().Apply(ctx, "project", request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(first.Failed[issueID], "authoritative close") {
+	if !strings.Contains(first.Failed[issueID], "injected post-accept close crash") {
 		t.Fatalf("first acceptance = %+v, want accepted-close retry state", first)
 	}
 	authority := daemonOrchestrationAuthority{daemon: d}
@@ -2836,7 +2840,7 @@ func TestReviewAcceptResumesDurablyAcceptedIntentWithoutReacquiringLease(t *test
 	for _, event := range []issues.IssueObservationEventParams{
 		{Type: domain.IssueEventInvestigationDisposition, Source: "test", Payload: map[string]any{"disposition": "internal_review"}},
 		{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "accepted", "summary": "parent consumed findings"}},
-		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept), Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": reviewEpochEventID, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request)}},
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept), Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": reviewEpochEventID, "reviewed_source_oid": "", "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request)}},
 	} {
 		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
 			t.Fatal(err)
