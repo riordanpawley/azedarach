@@ -329,22 +329,37 @@ func TestInvariantReadDoesNotDuplicatePendingRuntimeRecovery(t *testing.T) {
 	reader.replaceBootstrap(byID, byID, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
 	failed := reader.beginAuthoritativeReadRefreshForIssues(authoritativeReadRefreshRuntime, []string{"stale"})
 	reader.finishAuthoritativeReadRefresh(failed, context.DeadlineExceeded)
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	stale := domain.Task{ID: "stale", Title: "deleted authoritative issue", Status: domain.StatusCancelled, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
+	state := userstore.ProjectDeltaState{ProjectID: "project", Cursor: 1, Hash: "one", Initialized: true, Projector: issueProjectionProjector()}
+	if err := store.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: "project", Name: "Project", Path: "/project", DBPath: "/project/db", Tasks: []domain.Task{live, stale}, Delta: &state}); err != nil {
+		t.Fatal(err)
+	}
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var calls atomic.Int32
 	d := &Daemon{
-		cfg: Config{}, materializers: map[string]*projectReadMaterializer{"project": reader}, materializersStarted: true,
-		projectReadUserProjectionSync: func(syncCtx context.Context, _ string, _ []string) error {
-			if calls.Add(1) == 1 {
-				close(entered)
-				select {
-				case <-release:
-				case <-syncCtx.Done():
-					return syncCtx.Err()
-				}
+		cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"project": reader}, materializersStarted: true,
+		projectReadUserProjectionSync: func(syncCtx context.Context, projectID string, issueIDs []string) error {
+			if calls.Add(1) != 1 {
+				return fmt.Errorf("duplicate projection recovery")
 			}
-			return nil
+			close(entered)
+			select {
+			case <-release:
+			case <-syncCtx.Done():
+				return syncCtx.Err()
+			}
+			changes := make([]userstore.ProjectDeltaChange, 0, len(issueIDs))
+			for _, issueID := range issueIDs {
+				changes = append(changes, userstore.ProjectDeltaChange{IssueID: issueID, Delete: true})
+			}
+			return store.ApplyProjectMaterializedIssues(syncCtx, projectID, changes)
 		},
 	}
 	first := make(chan error, 1)
@@ -353,20 +368,37 @@ func TestInvariantReadDoesNotDuplicatePendingRuntimeRecovery(t *testing.T) {
 		first <- err
 	}()
 	<-entered
-	second := make(chan error, 1)
-	go func() {
-		_, _, err := d.convergedProjectReadSnapshotForInvariant(ctx, "project")
-		second <- err
-	}()
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("projection sync calls during pending recovery = %d, want 1", got)
+	if issueIDs := reader.authoritativeRuntimeFailedIssueIDs(); len(issueIDs) != 0 {
+		t.Fatalf("retry decision during owned recovery = %v, want pending key excluded", issueIDs)
 	}
 	close(release)
 	if err := <-first; err != nil {
 		t.Fatalf("first recovery: %v", err)
 	}
+	decisionReached := make(chan []string, 1)
+	secondCtx := withAuthoritativeRuntimeRecoveryDecisionHookForTest(ctx, func(issueIDs []string) {
+		decisionReached <- issueIDs
+	})
+	second := make(chan error, 1)
+	go func() {
+		_, _, err := d.convergedProjectReadSnapshotForInvariant(secondCtx, "project")
+		second <- err
+	}()
+	if issueIDs := <-decisionReached; len(issueIDs) != 0 {
+		t.Fatalf("second recovery decision after serialized delete = %v, want no failed keys", issueIDs)
+	}
 	if err := <-second; err != nil {
 		t.Fatalf("serialized invariant read: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("projection recovery calls = %d, want 1", got)
+	}
+	snapshot, err := store.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].ID.String() != liveID {
+		t.Fatalf("root projection after pending recovery = %+v", snapshot.Projects)
 	}
 	tasks, metadata, err := d.convergedProjectReadSnapshotForInvariant(ctx, "project")
 	if err != nil || metadata.Health != "healthy" || len(tasks) != 1 || tasks[0].ID.String() != liveID {
@@ -430,7 +462,7 @@ func TestTaskLifecycleRecoversAbsentProjectionAfterCanceledRuntimeRefresh(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := d.handleTaskUpdateStatus(ctx, protocol.RequestEnvelope{
+	resp, err := d.command(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion, RequestID: "req-recover-lifecycle", Kind: protocol.EnvelopeKindCommand,
 		Command: "task.update_status", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body,
 	})

@@ -55,6 +55,7 @@ func isProjectReadUnavailableError(err error) bool {
 }
 
 type suppressSynchronousProjectReadRuntimeRefreshKey struct{}
+type authoritativeRuntimeRecoveryDecisionHookKey struct{}
 
 func withProjectReadUpdateWaitHookForTest(ctx context.Context, hook func(string, string)) context.Context {
 	return withContextOperationLockWaitHookForTest(ctx, hook)
@@ -66,6 +67,10 @@ func withProjectReadUpdateQueuedHookForTest(ctx context.Context, hook func(strin
 
 func withProjectReadCanonicalQueuedHookForTest(ctx context.Context, hook func(string)) context.Context {
 	return withContextOperationLockQueuedHookForTest(ctx, hook)
+}
+
+func withAuthoritativeRuntimeRecoveryDecisionHookForTest(ctx context.Context, hook func([]string)) context.Context {
+	return context.WithValue(ctx, authoritativeRuntimeRecoveryDecisionHookKey{}, hook)
 }
 
 func withoutSynchronousProjectReadRuntimeRefresh(ctx context.Context) context.Context {
@@ -1642,6 +1647,9 @@ func (d *Daemon) convergedProjectReadSnapshotMode(ctx context.Context, projectID
 		// own bounded lifetime because it converges daemon-owned projection state,
 		// while still propagating a real retry failure strictly to this caller.
 		retryIssueIDs := materializer.authoritativeRuntimeFailedIssueIDs()
+		if hook, ok := ctx.Value(authoritativeRuntimeRecoveryDecisionHookKey{}).(func([]string)); ok && hook != nil {
+			hook(append([]string(nil), retryIssueIDs...))
+		}
 		if len(retryIssueIDs) > 0 {
 			recoveryCtx, cancelRecovery := context.WithTimeout(context.WithoutCancel(ctx), authoritativeRuntimeRecoveryLimit)
 			err := d.refreshActiveProjectReadRuntimeForIssues(recoveryCtx, projectID, materializer, retryIssueIDs)
