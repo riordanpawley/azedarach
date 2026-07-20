@@ -124,6 +124,16 @@ func (c *Client) PendingRequestedOrchestrationStarts(ctx context.Context, projec
 	return out, rows.Err()
 }
 
+func (c *Client) OrchestrationStartAttempt(ctx context.Context, projectID, issueID, intentKey string) (OrchestrationStartAttempt, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return OrchestrationStartAttempt{}, err
+	}
+	var attempt OrchestrationStartAttempt
+	err = db.QueryRowContext(ctx, `SELECT project_id,issue_id,intent_key,actor_id,dedupe_key,state,claim_acquired,COALESCE(operation_id,''),COALESCE(last_error,'') FROM orchestration_start_attempts WHERE project_id=? AND issue_id=? AND intent_key=?`, strings.TrimSpace(projectID), strings.TrimSpace(issueID), strings.TrimSpace(intentKey)).Scan(&attempt.ProjectID, &attempt.IssueID, &attempt.IntentKey, &attempt.ActorID, &attempt.DedupeKey, &attempt.State, &attempt.ClaimAcquired, &attempt.OperationID, &attempt.LastError)
+	return attempt, err
+}
+
 // BeginOrchestrationStart atomically reserves an issue for one orchestrator and
 // records the durable saga step that must either submit a session start or be
 // compensated. Existing ownership by the same actor is preserved and is never
@@ -150,10 +160,17 @@ func (c *Client) BeginOrchestrationStart(ctx context.Context, projectID, issueID
 			if !strings.EqualFold(result.ActorID, actorID) {
 				return fmt.Errorf("%w: orchestration intent owned by %s", domain.ErrConflict, result.ActorID)
 			}
-			if result.State == "compensated" {
-				return fmt.Errorf("%w: orchestration intent was compensated after %s", domain.ErrConflict, result.LastError)
+			if result.DedupeKey != dedupeKey {
+				return fmt.Errorf("%w: orchestration intent dedupe identity changed", domain.ErrConflict)
 			}
-			return tx.Commit()
+			if result.State == "compensated" {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM orchestration_start_attempts WHERE project_id=? AND issue_id=? AND intent_key=? AND state='compensated'`, projectID, issueID, intentKey); err != nil {
+					return err
+				}
+				err = sql.ErrNoRows
+			} else {
+				return tx.Commit()
+			}
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err

@@ -1624,7 +1624,7 @@ func printIssueCreateUsage(w io.Writer) {
 }
 
 func printIssueSplitUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: az ticket split [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
+	fmt.Fprintln(w, "Usage: az ticket split [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--intent-key <stable-key>] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
 	fmt.Fprintln(w, "Note: use --parent or AZEDARACH_ISSUE_ID for parentage; --impl only assigns implementation/spec variant metadata.")
 }
 

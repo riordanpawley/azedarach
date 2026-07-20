@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1388,6 +1389,7 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("issue store unavailable")
 	}
 	requestedIntents := make([]issues.RequestedOrchestrationStart, 0, len(result.Requested))
+	pendingIssueIDs := make([]string, 0, len(result.Requested))
 	requestDigest, err := orchestrationStartRequestDigest(request, result.Requested)
 	if err != nil {
 		return protocol.OrchestrationIntentResult{}, err
@@ -1398,6 +1400,39 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 			return protocol.OrchestrationIntentResult{}, fmt.Errorf("queue requested orchestration start: %w", err)
 		}
 		requestedIntents = append(requestedIntents, requested)
+		if requested.State == "completed" {
+			attempt, attemptErr := issueClient.OrchestrationStartAttempt(ctx, projectID, issueID, request.IntentKey)
+			if attemptErr != nil && !errors.Is(attemptErr, sql.ErrNoRows) {
+				return protocol.OrchestrationIntentResult{}, fmt.Errorf("recover completed orchestration start %s: %w", issueID, attemptErr)
+			}
+			if attemptErr != nil || attempt.State == "compensated" || strings.TrimSpace(attempt.OperationID) == "" {
+				if err := issueClient.UpdateRequestedOrchestrationStart(ctx, requested, "queued", "retry_compensated", nil); err != nil {
+					return protocol.OrchestrationIntentResult{}, fmt.Errorf("requeue compensated orchestration start %s: %w", issueID, err)
+				}
+				pendingIssueIDs = append(pendingIssueIDs, issueID)
+				continue
+			}
+			state := string(protocol.OperationStateQueued)
+			if a.daemon.operationRuntime != nil && a.daemon.operationRuntime.manager != nil {
+				if record, getErr := a.daemon.operationRuntime.manager.Get(ctx, attempt.OperationID); getErr == nil {
+					state = string(record.State)
+				}
+			}
+			sessionID := issueID
+			if parsed, parseErr := naming.ParseIssueID(issueID); parseErr == nil && strings.TrimSpace(request.RepoDir) != "" {
+				sessionID = naming.CanonicalSessionIDForIssue(request.RepoDir, parsed).String()
+			}
+			result.Started = append(result.Started, issueID)
+			result.Launched = append(result.Launched, protocol.OrchestrationLaunch{IssueID: issueID, SessionID: sessionID, OperationID: attempt.OperationID, OperationState: state})
+			continue
+		}
+		pendingIssueIDs = append(pendingIssueIDs, issueID)
+	}
+	if len(result.Requested) > 0 && len(pendingIssueIDs) == 0 {
+		return result, nil
+	}
+	if len(result.Requested) > 0 {
+		request.IssueIDs = pendingIssueIDs
 	}
 	// Keep readiness, capacity selection, claims, and operation submission in
 	// one daemon-authoritative critical section. Ownership claims remain the

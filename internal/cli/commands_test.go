@@ -9880,6 +9880,7 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	child := naming.IssueID("az-child")
 	var requests []protocol.RequestEnvelope
 	var createReq daemonclient.TaskCreateParams
+	createCalls := 0
 	var intentReq protocol.OrchestrationIntentRequest
 	taskListCalls := 0
 	deps := &Dependencies{
@@ -9987,7 +9988,8 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 					if err := json.Unmarshal(req.Body, &createReq); err != nil {
 						t.Fatalf("decode create request: %v", err)
 					}
-					return responseWithJSON(req, map[string]string{"task_id": child.String()}), nil
+					createCalls++
+					return responseWithJSON(req, daemonclient.TaskIDResponse{TaskID: child, Created: createCalls == 1}), nil
 				case daemonclient.CommandTaskDependencyAdd:
 					var depReq daemonclient.TaskDependencyParams
 					if err := json.Unmarshal(req.Body, &depReq); err != nil {
@@ -10056,11 +10058,17 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	if createReq.ParentID == nil || *createReq.ParentID != root {
 		t.Fatalf("create parent = %+v, want %s", createReq.ParentID, root)
 	}
+	if createReq.IntentKey == "" || createReq.CreatedFromID == nil || *createReq.CreatedFromID != root {
+		t.Fatalf("create idempotency request = %+v, want stable intent and atomic created-in parent", createReq)
+	}
 	if !reflect.DeepEqual(createReq.Implementations, []string{"go-bubbletea"}) {
 		t.Fatalf("create implementations = %+v, want inherited parent impl", createReq.Implementations)
 	}
 	if intentReq.Kind != protocol.OrchestrationIntentStart || !reflect.DeepEqual(intentReq.IssueIDs, []string{child.String()}) {
 		t.Fatalf("intent = %+v", intentReq)
+	}
+	if intentReq.IntentKey != "ticket-split-start:"+createReq.IntentKey {
+		t.Fatalf("start intent = %q, want split-derived key for %q", intentReq.IntentKey, createReq.IntentKey)
 	}
 	if intentReq.BaseBranch != "user/az-parent/parent-work" {
 		t.Fatalf("intent base_branch = %q, want parent worktree branch", intentReq.BaseBranch)
@@ -10086,6 +10094,9 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	})
 	if !strings.Contains(textOutput, "`az ticket close` owns") || !strings.Contains(textOutput, "az ticket close --id "+child.String()) {
 		t.Fatalf("split output missing canonical ticket close guidance: %s", textOutput)
+	}
+	if !strings.Contains(textOutput, "Reused canonical child issue: "+child.String()) {
+		t.Fatalf("split replay output missing canonical child disposition: %s", textOutput)
 	}
 	if strings.Contains(textOutput, "az issue close") {
 		t.Fatalf("split output contains legacy issue close guidance: %s", textOutput)

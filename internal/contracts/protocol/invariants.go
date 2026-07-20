@@ -21,7 +21,7 @@ var knownDaemonInvariants = map[string]struct{}{
 	"task.read_committed_revision": {}, "task.close": {}, "task.close_preflight": {}, "task.delete": {},
 	"task.delete_preflight": {}, "task.graph_readiness": {}, "task.complete_check": {}, "task.review_handoff": {},
 	"task.integration_readiness": {}, "task.context_risk_closeout": {}, "task.merge_base_target": {},
-	"task.follow_on_merge_candidates": {}, "task.publication_queue": {}, "worker.observation_projection": {},
+	"task.follow_on_merge_candidates": {}, "task.split_intent": {}, "task.publication_queue": {}, "worker.observation_projection": {},
 	"interaction.waiting_human": {}, "investigation.waiting_human": {}, "interaction.staleness": {},
 	"decision.markdown_transfer_target": {}, "decision.propagation_delivery": {}, "runtime.known_project_ids": {},
 	"cross_project.view_projection": {}, "issue_resources.lifecycle": {}, "orchestration.scope_identity": {},

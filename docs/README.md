@@ -71,6 +71,7 @@ This directory primarily contains **developer/internal documentation**.
 - `orchestration.project_candidates`: `projection` (bounded durable lifecycle/graph, ownership, session activity, and interaction candidate projection).
 - `orchestration.project_review`: `hybrid` (refreshed durable issue/review/ownership and exact issue-worktree projections plus live Git worktree identity, clean HEAD, and aggregate-revision verification; accepted outcomes delegate integration and cleanup to hybrid `task.close`).
 - `orchestration.claim_start`: `hybrid` (durable ownership/start-attempt projection plus daemon session-start operation/runtime compensation).
+- `task.split_intent`: `hybrid` (durable project-scoped split identity, canonical child, and graph edges plus exact orchestration start operation/session runtime).
 - `orchestration.project_loop`: `projection` (durable issue-observation cursor and loop checkpoint refreshed before deterministic non-blocking start/review action replay; queued reviews remain visible without globally stalling unrelated starts).
 - `projection.delta_stream`: `projection` (durable project delta ledger and version history; cursor replay and snapshot reads never reconcile or poll tmux).
 - `validation.machine_capacity`: `projection` (durable daemon-owned publication/timing-capacity projection; ordinary worktree validation bypasses admission, publication starts immediately, and only controlled timing capacity is overlap-sensitive).

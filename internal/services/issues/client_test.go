@@ -4645,6 +4645,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0056_legacy_attachment_blob_forward",
 		"0057_agent_input_delivery",
 		"0058_orchestration_start_intents",
+		"0059_task_creation_intents",
 	}, got)
 }
 
