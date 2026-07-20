@@ -155,17 +155,26 @@ func (d *Daemon) enforceOrchestratorContinuation(ctx context.Context, authority 
 	if !found || d.agentInputService() == nil {
 		return nil
 	}
+	deliveryIntent := orchestratorWakeIntentKey(woken.Identity.Scope, action.Revision, woken.SessionID, target)
+	if action.Kind == "review" {
+		if err := d.recordReviewPromptBindings(ctx, projectID, deliveryIntent, reviewPrompt, snapshot.ReviewQueue, false); err != nil {
+			return err
+		}
+	}
 	result, err := d.agentInputService().Deliver(ctx, domain.AgentInputDeliveryRequest{
 		ProjectID: projectID, SessionID: woken.SessionID, Target: target,
 		Tool: d.runtimeConfigForProject(projectID).CLITool, Kind: domain.AgentInputMessageOrchestratorWake,
 		Payload:   snapshot.ContinuationContract,
-		IntentKey: orchestratorWakeIntentKey(woken.Identity.Scope, action.Revision, woken.SessionID, target),
+		IntentKey: deliveryIntent,
 	})
 	if err != nil {
 		return fmt.Errorf("deliver orchestrator continuation wake: %w", err)
 	}
 	if result.Outcome != domain.AgentInputDelivered {
 		return nil // fail closed; durable wake is retried by reconciliation
+	}
+	if action.Kind == "review" {
+		return d.recordReviewPromptBindings(ctx, projectID, deliveryIntent, reviewPrompt, snapshot.ReviewQueue, true)
 	}
 	return nil
 }

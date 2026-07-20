@@ -2029,6 +2029,13 @@ func (a daemonOrchestrationAuthority) recordReviewRestartSubmitted(ctx context.C
 }
 
 func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string, restart *domain.ReviewRestartSubmission, metadata map[string]any, inspection *protocol.OrchestrationReview) error {
+	decisionDigest, decisionEpoch := request.ReviewPromptDigest, request.ReviewEpochEventID
+	for boundIssue, binding := range request.ReviewPromptBindings {
+		if naming.IssueIDsEqual(boundIssue, issueID) {
+			decisionDigest, decisionEpoch = binding.Digest, binding.ReviewEpochEventID
+			break
+		}
+	}
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return fmt.Errorf("issue store unavailable")
@@ -2055,14 +2062,41 @@ func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context
 	if metadata == nil {
 		metadata = make(map[string]any)
 	}
-	prompt, promptErr := a.daemon.resolvedReviewPrompt(projectID)
-	if promptErr != nil {
-		return promptErr
+	if inspection != nil && decisionEpoch > 0 && decisionEpoch != inspection.ReviewEpochEventID {
+		return fmt.Errorf("review decision epoch does not match the admitted review epoch")
 	}
-	metadata["review_prompt_source"] = prompt.Source
-	metadata["review_prompt_digest"] = prompt.Digest
-	metadata["review_prompt_composition_mode"] = prompt.CompositionMode
-	metadata["review_coverage_contract"] = prompt.CoverageContract
+	if decisionEpoch > 0 && len(strings.TrimSpace(decisionDigest)) == 64 {
+		prompt, promptErr := a.daemon.boundReviewPromptForOutcome(ctx, projectID, issueID, decisionEpoch, decisionDigest)
+		if promptErr != nil {
+			return promptErr
+		}
+		metadata["review_prompt_source"] = prompt.Source
+		metadata["review_prompt_digest"] = prompt.Digest
+		metadata["review_prompt_composition_mode"] = prompt.CompositionMode
+		metadata["review_coverage_contract"] = prompt.CoverageContract
+	} else {
+		// Reviews delivered before prompt binding was introduced have no durable
+		// identity to echo. Preserve their existing completion path during upgrade.
+		epoch := int64(0)
+		if inspection != nil {
+			epoch = inspection.ReviewEpochEventID
+		}
+		bound, boundErr := a.daemon.hasReviewPromptBinding(ctx, projectID, issueID, epoch)
+		if boundErr != nil {
+			return boundErr
+		}
+		if bound {
+			return fmt.Errorf("review decision requires the delivered prompt digest and review epoch")
+		}
+		prompt, promptErr := a.daemon.resolvedReviewPrompt(projectID)
+		if promptErr != nil {
+			return promptErr
+		}
+		metadata["review_prompt_source"] = prompt.Source
+		metadata["review_prompt_digest"] = prompt.Digest
+		metadata["review_prompt_composition_mode"] = prompt.CompositionMode
+		metadata["review_coverage_contract"] = prompt.CoverageContract
+	}
 	if request.ReviewPass != nil {
 		if metadata == nil {
 			metadata = make(map[string]any)
@@ -2135,14 +2169,17 @@ func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context
 
 func reviewRequestFingerprint(request protocol.OrchestrationIntentRequest) string {
 	body, _ := json.Marshal(struct {
-		Scope         domain.OrchestrationScope             `json:"scope"`
-		Kind          protocol.OrchestrationIntentKind      `json:"kind"`
-		ActorID       string                                `json:"actor_id"`
-		RepoDir       string                                `json:"repo_dir,omitempty"`
-		Findings      []protocol.OrchestrationReviewFinding `json:"findings,omitempty"`
-		RestartWorker bool                                  `json:"restart_worker,omitempty"`
-		ReviewPass    *protocol.OrchestrationReviewPass     `json:"review_pass,omitempty"`
-	}{Scope: request.Scope, Kind: request.Kind, ActorID: strings.TrimSpace(request.ActorID), RepoDir: strings.TrimSpace(request.RepoDir), Findings: request.Findings, RestartWorker: request.RestartWorker, ReviewPass: request.ReviewPass})
+		Scope                domain.OrchestrationScope                            `json:"scope"`
+		Kind                 protocol.OrchestrationIntentKind                     `json:"kind"`
+		ActorID              string                                               `json:"actor_id"`
+		RepoDir              string                                               `json:"repo_dir,omitempty"`
+		Findings             []protocol.OrchestrationReviewFinding                `json:"findings,omitempty"`
+		RestartWorker        bool                                                 `json:"restart_worker,omitempty"`
+		ReviewPass           *protocol.OrchestrationReviewPass                    `json:"review_pass,omitempty"`
+		ReviewPromptDigest   string                                               `json:"review_prompt_digest,omitempty"`
+		ReviewEpochEventID   int64                                                `json:"review_epoch_event_id,omitempty"`
+		ReviewPromptBindings map[string]protocol.OrchestrationReviewPromptBinding `json:"review_prompt_bindings,omitempty"`
+	}{Scope: request.Scope, Kind: request.Kind, ActorID: strings.TrimSpace(request.ActorID), RepoDir: strings.TrimSpace(request.RepoDir), Findings: request.Findings, RestartWorker: request.RestartWorker, ReviewPass: request.ReviewPass, ReviewPromptDigest: request.ReviewPromptDigest, ReviewEpochEventID: request.ReviewEpochEventID, ReviewPromptBindings: request.ReviewPromptBindings})
 	return fmt.Sprintf("%x", sha256.Sum256(body))
 }
 
