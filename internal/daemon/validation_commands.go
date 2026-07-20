@@ -17,6 +17,7 @@ import (
 	operationstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
+	"golang.org/x/sys/unix"
 )
 
 const defaultValidationLeaseTTL = 30 * time.Second
@@ -204,13 +205,17 @@ func (d *Daemon) validationRequestSuccessResponse(req protocol.RequestEnvelope, 
 func (d *Daemon) validationArtifactRoot(projectID string) string {
 	projectDigest := sha256.Sum256([]byte(strings.TrimSpace(projectID)))
 	projectKey := fmt.Sprintf("%x", projectDigest[:])
+	return filepath.Join(d.validationArtifactBaseRoot(), "validation", projectKey, "sha256")
+}
+
+func (d *Daemon) validationArtifactBaseRoot() string {
 	if configured := strings.TrimSpace(d.cfg.WorkflowArtifactDir); configured != "" {
-		return filepath.Join(configured, "validation", projectKey, "sha256")
+		return configured
 	}
 	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		return filepath.Join(home, ".azedarach", "artifacts", "validation", projectKey, "sha256")
+		return filepath.Join(home, ".azedarach", "artifacts")
 	}
-	return filepath.Join(os.TempDir(), "azedarach", "artifacts", "validation", projectKey, "sha256")
+	return filepath.Join(os.TempDir(), "azedarach", "artifacts")
 }
 
 // retainValidationArtifact creates an immutable, content-addressed copy before
@@ -277,14 +282,19 @@ func (d *Daemon) openValidationArtifact(projectID, reference string) (*os.File, 
 			return nil, "", 0, fmt.Errorf("invalid validation artifact digest")
 		}
 	}
-	root := d.validationArtifactRoot(projectID)
-	path := filepath.Join(root, digest)
-	rel, relErr := filepath.Rel(root, path)
-	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return nil, "", 0, fmt.Errorf("invalid validation artifact path")
-	}
-	file, err := os.Open(path)
+	projectDigest := sha256.Sum256([]byte(strings.TrimSpace(projectID)))
+	root, err := openValidationArtifactRoot(d.validationArtifactBaseRoot(), []string{"validation", fmt.Sprintf("%x", projectDigest[:]), "sha256"})
 	if err != nil {
+		return nil, "", 0, fmt.Errorf("validation artifact unavailable")
+	}
+	defer root.Close()
+	fd, err := unix.Openat(int(root.Fd()), digest, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("validation artifact unavailable")
+	}
+	file := os.NewFile(uintptr(fd), digest)
+	if file == nil {
+		_ = unix.Close(fd)
 		return nil, "", 0, fmt.Errorf("validation artifact unavailable")
 	}
 	info, err := file.Stat()
@@ -303,6 +313,65 @@ func (d *Daemon) openValidationArtifact(projectID, reference string) (*os.File, 
 		return nil, "", 0, fmt.Errorf("validation artifact unavailable")
 	}
 	return file, digest, info.Size(), nil
+}
+
+func openValidationArtifactRoot(basePath string, descendants []string) (*os.File, error) {
+	abs, err := filepath.Abs(filepath.Clean(basePath))
+	if err != nil || strings.TrimSpace(basePath) == "" || abs == string(filepath.Separator) {
+		return nil, fmt.Errorf("invalid validation artifact root")
+	}
+	baseName := filepath.Base(abs)
+	canonicalParent, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	if err != nil {
+		return nil, err
+	}
+	fd, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	current := os.NewFile(uintptr(fd), string(filepath.Separator))
+	if current == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("open validation artifact root")
+	}
+	relative, err := filepath.Rel(string(filepath.Separator), canonicalParent)
+	if err != nil {
+		_ = current.Close()
+		return nil, err
+	}
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		if component == "" || component == "." || component == ".." || filepath.Base(component) != component {
+			_ = current.Close()
+			return nil, fmt.Errorf("invalid validation artifact root component")
+		}
+		nextFD, openErr := unix.Openat(int(current.Fd()), component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		_ = current.Close()
+		if openErr != nil {
+			return nil, openErr
+		}
+		current = os.NewFile(uintptr(nextFD), component)
+		if current == nil {
+			_ = unix.Close(nextFD)
+			return nil, fmt.Errorf("open validation artifact root component")
+		}
+	}
+	for _, component := range append([]string{baseName}, descendants...) {
+		if component == "" || component == "." || component == ".." || filepath.Base(component) != component {
+			_ = current.Close()
+			return nil, fmt.Errorf("invalid validation artifact root component")
+		}
+		nextFD, openErr := unix.Openat(int(current.Fd()), component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		_ = current.Close()
+		if openErr != nil {
+			return nil, openErr
+		}
+		current = os.NewFile(uintptr(nextFD), component)
+		if current == nil {
+			_ = unix.Close(nextFD)
+			return nil, fmt.Errorf("open validation artifact root component")
+		}
+	}
+	return current, nil
 }
 
 func (d *Daemon) readValidationArtifact(projectID, reference string, offset int64, limit int) ([]byte, string, int64, int64, error) {

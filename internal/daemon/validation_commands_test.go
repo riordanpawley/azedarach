@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -156,6 +157,38 @@ func TestOpenValidationArtifactPinsVerifiedFileAcrossPathReplacement(t *testing.
 	content, err := io.ReadAll(file)
 	require.NoError(t, err)
 	assert.Equal(t, "verified output\n", string(content), "serving must use the descriptor whose content was verified")
+}
+
+func TestOpenValidationArtifactRejectsSymlinkTraversal(t *testing.T) {
+	root := t.TempDir()
+	content := []byte("outside artifact\n")
+	digest := fmt.Sprintf("%x", sha256.Sum256(content))
+	reference := "artifact:sha256/" + digest
+
+	t.Run("digest path", func(t *testing.T) {
+		artifactRoot := filepath.Join(root, "digest-link-artifacts")
+		d := &Daemon{cfg: Config{WorkflowArtifactDir: artifactRoot}}
+		projectRoot := d.validationArtifactRoot("project-a")
+		require.NoError(t, os.MkdirAll(projectRoot, 0o700))
+		outside := filepath.Join(root, "outside-digest")
+		require.NoError(t, os.WriteFile(outside, content, 0o600))
+		require.NoError(t, os.Symlink(outside, filepath.Join(projectRoot, digest)))
+
+		_, _, _, err := d.openValidationArtifact("project-a", reference)
+		require.ErrorContains(t, err, "unavailable")
+	})
+
+	t.Run("artifact root component", func(t *testing.T) {
+		outsideRoot := filepath.Join(root, "outside-root")
+		directRoot := filepath.Join(root, "direct-root")
+		require.NoError(t, os.MkdirAll(filepath.Join(outsideRoot, "project-a", "sha256"), 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(outsideRoot, "project-a", "sha256", digest), content, 0o400))
+		require.NoError(t, os.Symlink(outsideRoot, directRoot))
+		d := &Daemon{cfg: Config{WorkflowArtifactDir: directRoot}}
+
+		_, _, _, err := d.openValidationArtifact("project-a", reference)
+		require.ErrorContains(t, err, "unavailable")
+	})
 }
 
 func TestValidationArtifactReadCommandIsProjectScopedAndDigestVerified(t *testing.T) {

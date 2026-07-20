@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -120,37 +122,7 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 			return err
 		}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			writer := io.Writer(os.Stdout)
-			var file *os.File
-			if strings.TrimSpace(*output) != "" {
-				var err error
-				file, err = os.OpenFile(*output, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-				if err != nil {
-					return err
-				}
-				defer file.Close()
-				writer = file
-			}
-			var offset int64
-			for {
-				result, err := deps.DaemonClient.ValidationArtifactRead(context.Background(), protocol.ValidationArtifactReadRequest{Reference: *reference, Offset: offset})
-				if err != nil {
-					return err
-				}
-				if result.Offset != offset || result.NextOffset != offset+int64(len(result.Content)) {
-					return fmt.Errorf("validation artifact returned non-contiguous chunk")
-				}
-				if _, err = writer.Write(result.Content); err != nil {
-					return err
-				}
-				if result.Complete {
-					return nil
-				}
-				if result.NextOffset <= offset {
-					return fmt.Errorf("validation artifact read made no progress")
-				}
-				offset = result.NextOffset
-			}
+			return retrieveValidationArtifact(context.Background(), strings.TrimSpace(*reference), strings.TrimSpace(*output), os.Stdout, deps.DaemonClient.ValidationArtifactRead)
 		})
 	case "evidence-record":
 		flags := flag.NewFlagSet("validation evidence-record", flag.ContinueOnError)
@@ -235,6 +207,115 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 	default:
 		return fmt.Errorf("unknown validation command %q", args[0])
 	}
+}
+
+type validationArtifactReader func(context.Context, protocol.ValidationArtifactReadRequest) (protocol.ValidationArtifactReadResponse, error)
+
+func retrieveValidationArtifact(ctx context.Context, reference, output string, stdout io.Writer, read validationArtifactReader) (returnErr error) {
+	expectedDigest, err := validationArtifactReferenceDigest(reference)
+	if err != nil {
+		return err
+	}
+	tempDir := ""
+	if output != "" {
+		tempDir = filepath.Dir(output)
+	}
+	staged, err := os.CreateTemp(tempDir, ".az-validation-artifact-*")
+	if err != nil {
+		return fmt.Errorf("stage validation artifact: %w", err)
+	}
+	stagedPath := staged.Name()
+	defer func() {
+		_ = staged.Close()
+		_ = os.Remove(stagedPath)
+	}()
+	if err = staged.Chmod(0o600); err != nil {
+		return fmt.Errorf("secure staged validation artifact: %w", err)
+	}
+
+	hash := sha256.New()
+	var offset, totalSize int64
+	var responseDigest string
+	for {
+		result, readErr := read(ctx, protocol.ValidationArtifactReadRequest{Reference: reference, Offset: offset})
+		if readErr != nil {
+			return readErr
+		}
+		if result.Reference != reference || result.Digest != "sha256:"+expectedDigest {
+			return fmt.Errorf("validation artifact identity changed during retrieval")
+		}
+		if offset == 0 {
+			totalSize, responseDigest = result.TotalSize, result.Digest
+			if totalSize < 0 {
+				return fmt.Errorf("validation artifact returned invalid total size")
+			}
+		} else if result.TotalSize != totalSize || result.Digest != responseDigest {
+			return fmt.Errorf("validation artifact metadata changed during retrieval")
+		}
+		if result.Offset != offset || result.NextOffset != offset+int64(len(result.Content)) || result.NextOffset > totalSize {
+			return fmt.Errorf("validation artifact returned non-contiguous chunk")
+		}
+		if _, err = io.MultiWriter(staged, hash).Write(result.Content); err != nil {
+			return fmt.Errorf("write staged validation artifact: %w", err)
+		}
+		offset = result.NextOffset
+		if result.Complete {
+			if offset != totalSize {
+				return fmt.Errorf("validation artifact completed at unexpected size")
+			}
+			break
+		}
+		if offset == result.Offset {
+			return fmt.Errorf("validation artifact read made no progress")
+		}
+	}
+	if fmt.Sprintf("%x", hash.Sum(nil)) != expectedDigest {
+		return fmt.Errorf("validation artifact stream digest mismatch")
+	}
+	if err = staged.Sync(); err != nil {
+		return fmt.Errorf("sync staged validation artifact: %w", err)
+	}
+	if err = staged.Close(); err != nil {
+		return fmt.Errorf("close staged validation artifact: %w", err)
+	}
+	if output == "" {
+		verified, openErr := os.Open(stagedPath)
+		if openErr != nil {
+			return openErr
+		}
+		_, copyErr := io.Copy(stdout, verified)
+		closeErr := verified.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	}
+	if err = os.Rename(stagedPath, output); err != nil {
+		return fmt.Errorf("publish validation artifact: %w", err)
+	}
+	stagedPath = ""
+	if dir, openErr := os.Open(filepath.Dir(output)); openErr == nil {
+		syncErr := dir.Sync()
+		_ = dir.Close()
+		if syncErr != nil {
+			return fmt.Errorf("sync validation artifact destination: %w", syncErr)
+		}
+	}
+	return nil
+}
+
+func validationArtifactReferenceDigest(reference string) (string, error) {
+	const prefix = "artifact:sha256/"
+	digest := strings.TrimPrefix(reference, prefix)
+	if prefix+digest != reference || len(digest) != sha256.Size*2 {
+		return "", fmt.Errorf("invalid validation artifact reference")
+	}
+	for _, char := range digest {
+		if !strings.ContainsRune("0123456789abcdef", char) {
+			return "", fmt.Errorf("invalid validation artifact reference")
+		}
+	}
+	return digest, nil
 }
 
 func validationReviewerID() string {
