@@ -450,8 +450,10 @@ func TestCodexAppServerLaunchUsesStockRemoteTUIAndSupervisedResume(t *testing.T)
 			t.Fatalf("supervisor trace = %q, want %s from stable cwd %q", got, action, stableDir)
 		}
 	}
-	if strings.Contains(supervisor, "kill ") {
-		t.Fatalf("supervisor directly terminates processes instead of preserving native daemon ownership: %s", supervisor)
+	for _, signal := range []string{"kill -TERM", "kill -KILL", "kill -HUP", "kill -INT"} {
+		if strings.Contains(supervisor, signal) {
+			t.Fatalf("supervisor directly terminates processes instead of preserving native daemon ownership: %s", supervisor)
+		}
 	}
 }
 
@@ -491,6 +493,22 @@ func TestCodexAppServerRecoveryCoordinatesConcurrentSupervisors(t *testing.T) {
 	}
 	if got := strings.Count(string(data), "restart\n"); got != 1 {
 		t.Fatalf("restart count = %d, want one globally coordinated recovery; trace=%q", got, data)
+	}
+}
+
+func TestCodexAppServerRecoveryReclaimsDeadOwnerLock(t *testing.T) {
+	stableDir := t.TempDir()
+	lockPath := filepath.Join(stableDir, "codex-app-server-recovery.lock")
+	if err := os.WriteFile(lockPath, []byte("999999999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	supervisor := codexAppServerSupervisedCommand("codex", stableDir, "codex first", "codex resume")
+	fakeCodex := `codex() { case "$*" in "mcp get --json floop"|"-c mcp_servers.floop.required=false app-server daemon start"|"-c mcp_servers.floop.required=false app-server daemon restart"|"resume") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon version"|"first") return 1 ;; *) return 2 ;; esac; }; `
+	if output, err := exec.Command("sh", "-c", fakeCodex+supervisor).CombinedOutput(); err != nil {
+		t.Fatalf("recover dead owner lock: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery lock remains after success: %v", err)
 	}
 }
 

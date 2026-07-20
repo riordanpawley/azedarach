@@ -6235,10 +6235,19 @@ func codexAppServerSupervisedCommand(tool, stableDir, firstCommand, resumeComman
 	restartDaemon := managedDaemon("restart")
 	recoveryLock := filepath.Join(stableDir, "codex-app-server-recovery.lock")
 	recoverDaemon := "__az_codex_recovery_lock=" + singleQuoteForShell(recoveryLock) + "; " +
-		"while ! mkdir \"$__az_codex_recovery_lock\" 2>/dev/null; do sleep 1; done; " +
-		"trap 'rmdir \"$__az_codex_recovery_lock\" 2>/dev/null' EXIT HUP INT TERM; " +
+		"__az_codex_recovery_owner=\"$__az_codex_recovery_lock.$$\"; " +
+		"__az_codex_recovery_stale=\"$__az_codex_recovery_lock.stale.$$\"; " +
+		"(umask 077; printf '%s\\n' \"$$\" >\"$__az_codex_recovery_owner\") || exit $?; " +
+		"while ! ln \"$__az_codex_recovery_owner\" \"$__az_codex_recovery_lock\" 2>/dev/null; do " +
+		"__az_codex_recovery_pid=$(cat \"$__az_codex_recovery_lock\" 2>/dev/null || :); " +
+		"case $__az_codex_recovery_pid in ''|*[!0-9]*) ;; *) if ! kill -0 \"$__az_codex_recovery_pid\" 2>/dev/null; then " +
+		"rm -f \"$__az_codex_recovery_stale\"; if ln \"$__az_codex_recovery_lock\" \"$__az_codex_recovery_stale\" 2>/dev/null && " +
+		"[ \"$__az_codex_recovery_lock\" -ef \"$__az_codex_recovery_stale\" ]; then rm -f \"$__az_codex_recovery_lock\"; fi; " +
+		"rm -f \"$__az_codex_recovery_stale\"; fi;; esac; sleep 1; done; " +
+		"__az_codex_recovery_cleanup='if [ \"$__az_codex_recovery_lock\" -ef \"$__az_codex_recovery_owner\" ]; then rm -f \"$__az_codex_recovery_lock\"; fi; rm -f \"$__az_codex_recovery_owner\" \"$__az_codex_recovery_stale\"'; " +
+		"trap 'eval \"$__az_codex_recovery_cleanup\"' EXIT HUP INT TERM; " +
 		"if ! " + healthDaemon + "; then " + restartDaemon + " || exit $?; fi; " +
-		"rmdir \"$__az_codex_recovery_lock\" 2>/dev/null; trap - EXIT HUP INT TERM"
+		"eval \"$__az_codex_recovery_cleanup\"; trap - EXIT HUP INT TERM"
 	steps := []string{
 		"__az_codex_remote_started=$(date +%s)",
 		"if [ \"$__az_codex_remote_first\" -eq 1 ]; then __az_codex_remote_first=0; " + firstCommand + "; else " + resumeCommand + "; fi",
