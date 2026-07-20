@@ -236,10 +236,26 @@ func (d *Daemon) enqueueAcceptedReviewPublication(ctx context.Context, projectID
 }
 
 func (d *Daemon) acceptAndEnqueueReviewPublication(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, pin acceptedReviewPin, inspection protocol.OrchestrationReview) (domain.PublicationOperation, error) {
+	reviewer, err := domain.CanonicalReviewerIdentity(request.ActorID, domain.ReviewerOwnerKindOrchestrator)
+	if err != nil {
+		return domain.PublicationOperation{}, err
+	}
+	pin.Reviewer = reviewer
+	pin.ReviewEpochEventID = inspection.ReviewEpochEventID
 	operation, err := d.prepareAcceptedReviewPublication(ctx, projectID, request, issueID, pin)
 	if err != nil {
 		return domain.PublicationOperation{}, err
 	}
+	patchEvidence, err := d.acceptedPatchReviewEvidence(ctx, projectID, request.ActorID, inspection)
+	if err != nil {
+		return domain.PublicationOperation{}, fmt.Errorf("prepare accepted patch-review evidence: %w", err)
+	}
+	if strings.TrimSpace(patchEvidence.EvidenceID) == "" {
+		return domain.PublicationOperation{}, fmt.Errorf("publication evidence capability absent: configure publicationEvidence.policyVersion for accepted patch authority")
+	}
+	operation.ReviewerKind = "orchestrator"
+	operation.ReviewEpochEventID = inspection.ReviewEpochEventID
+	operation.PatchEvidenceID = patchEvidence.EvidenceID
 	admission, err := reviewAdmissionPinFromInspection(inspection)
 	if err != nil {
 		return domain.PublicationOperation{}, err
@@ -258,7 +274,7 @@ func (d *Daemon) acceptAndEnqueueReviewPublication(ctx context.Context, projectI
 		return domain.PublicationOperation{}, fmt.Errorf("initialize publication queue projection: %w", err)
 	}
 	payload := map[string]any{
-		"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": request.ActorID,
+		"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": reviewer.OwnerID, "actor_kind": reviewer.OwnerKind,
 		"intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request), "findings": request.Findings,
 		"reviewed_source_oid": pin.SourceOID, "reviewed_evidence_source": pin.EvidenceSource,
 		"reviewed_evidence_event_id": pin.EvidenceEventID, "reviewed_evidence_seq": pin.EvidenceSeq,
@@ -270,11 +286,12 @@ func (d *Daemon) acceptAndEnqueueReviewPublication(ctx context.Context, projectI
 	}
 	receipt, err := issueClient.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(request.Kind), Payload: payload,
-	}, operation, publicationCoalesceKey(operation), admission, inspection.ParentIssueID, request.ActorID)
+	}, operation, patchEvidence, publicationCoalesceKey(operation), admission, inspection.ParentIssueID, request.ActorID)
 	if err != nil {
 		return domain.PublicationOperation{}, err
 	}
 	operation.OperationID = receipt.PublicationOperationID
+	operation.AcceptedReviewEventID = receipt.EventID
 	read := func(_ string, readCtx context.Context, projectID, operationID string) (domain.PublicationOperation, bool, error) {
 		return store.PublicationOperation(readCtx, operationID)
 	}
@@ -320,10 +337,18 @@ func (d *Daemon) prepareAcceptedReviewPublication(ctx context.Context, projectID
 		return domain.PublicationOperation{}, fmt.Errorf("publication capability absent: configure gate.command for exact synthetic-candidate validation")
 	}
 	policyVersion := publicationPolicyVersion(projectCfg, gateCommand)
+	reviewer := pin.Reviewer
+	if reviewer.OwnerID == "" {
+		reviewer, err = domain.CanonicalReviewerIdentity(request.ActorID, domain.ReviewerOwnerKindOrchestrator)
+		if err != nil {
+			return domain.PublicationOperation{}, err
+		}
+	}
 	operation := domain.PublicationOperation{
 		OperationID: publicationOperationIdentity(projectID, issueID, request.IntentKey), ProjectID: projectID,
 		IssueID: issueID, IntentKey: request.IntentKey, RequestFingerprint: reviewRequestFingerprint(request),
-		ActorID: request.ActorID, TargetID: "base", TargetBranch: target.Branch,
+		ActorID: reviewer.OwnerID, ReviewerKind: reviewer.OwnerKind, ReviewEpochEventID: pin.ReviewEpochEventID, AcceptedReviewEventID: pin.AcceptedReviewEventID,
+		PatchEvidenceID: publicationOperationIdentity(projectID, issueID, request.IntentKey), TargetID: "base", TargetBranch: target.Branch,
 		SourceRevision: pin.SourceOID, BaseRevision: strings.TrimSpace(baseRevision), PolicyVersion: policyVersion,
 		EnvironmentFingerprint: publicationEnvironmentFingerprint(projectCfg), ValidationCommand: gateCommand, EvidenceSource: pin.EvidenceSource, EvidenceEventID: pin.EvidenceEventID,
 		EvidenceSeq: pin.EvidenceSeq, EvidenceDigest: pin.EvidenceDigest, State: domain.PublicationOperationQueued,
@@ -546,6 +571,12 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	}
 	stopClaimHeartbeat := d.startPublicationClaimHeartbeat(store, operationID, claimToken, claimTTL)
 	defer stopClaimHeartbeat()
+	var reviewAuthorityErr error
+	// Test-only execution hooks replace the durable close/identity boundaries;
+	// production and active-path tests always validate the persisted authority.
+	if d.publicationClose == nil && d.publicationIdentityCheck == nil {
+		reviewAuthorityErr = d.validatePublicationReviewAuthority(ctx, operation)
+	}
 	ticketID, ticketIdentityErr := naming.ParseTicketID(operation.IssueID)
 	identityCheck := d.publicationIdentityCheck
 	appliedRecovery := false
@@ -558,11 +589,16 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 			identityCheck = d.validatePublicationOperationIdentity
 		}
 	}
-	if identityCheck != nil || ticketIdentityErr != nil {
-		identityErr := ticketIdentityErr
+	if reviewAuthorityErr != nil || identityCheck != nil || ticketIdentityErr != nil {
+		identityErr := reviewAuthorityErr
 		if identityErr != nil {
-			identityErr = fmt.Errorf("bind accepted-review publication ticket identity: %w", identityErr)
+			identityErr = fmt.Errorf("bind accepted-review publication authority: %w", identityErr)
 		} else {
+			identityErr = ticketIdentityErr
+		}
+		if ticketIdentityErr != nil {
+			identityErr = fmt.Errorf("bind accepted-review publication ticket identity: %w", identityErr)
+		} else if identityErr == nil {
 			identityErr = identityCheck(ctx, operation)
 		}
 		if identityErr != nil {
@@ -580,7 +616,7 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 			if errors.As(identityErr, &retry) {
 				terminal, _, transitionErr = d.transitionPublicationWithRetry(context.Background(), store, operation, claimToken, state, mutate, retry)
 			} else {
-				terminal, transitionErr = d.transitionPublicationOperation(context.Background(), operation, claimToken, state, mutate)
+				terminal, transitionErr = d.terminalizeAcceptedReviewPublication(context.Background(), operation, claimToken, state, kind, identityErr.Error(), artifact, finished)
 			}
 			if transitionErr != nil {
 				return nil, fmt.Errorf("%w; persist terminal publication continuation: %v", identityErr, transitionErr)
@@ -611,13 +647,18 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	})
 	ctx = git.WithCandidateValidationCommand(ctx, operation.ValidationCommand)
 	ctx = git.WithCandidateValidationTicket(ctx, ticketID)
+	ctx = git.WithCandidateValidationReviewAuthority(ctx, git.CandidateValidationReviewAuthority{
+		ReviewerID: operation.ActorID, ReviewerKind: operation.ReviewerKind,
+		ReviewEpochEventID: operation.ReviewEpochEventID, PublicationOperationID: operation.OperationID,
+		AcceptedReviewEventID: operation.AcceptedReviewEventID, AcceptedPublicationOperationID: operation.OperationID,
+	})
 	ctx = git.WithCandidateValidationAdmission(ctx, d.publicationCandidateAdmission(operation.ProjectID, operationID, claimToken, claimTTL))
 
 	request := protocol.OrchestrationIntentRequest{
 		Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: operation.IntentKey, ActorID: operation.ActorID,
 		IssueIDs: []string{operation.IssueID}, RepoDir: d.resolveRepoDirForProjectExact(operation.ProjectID),
 	}
-	pin := acceptedReviewPin{SourceOID: operation.SourceRevision, EvidenceSource: operation.EvidenceSource, EvidenceEventID: operation.EvidenceEventID, EvidenceSeq: operation.EvidenceSeq, EvidenceDigest: operation.EvidenceDigest}
+	pin := acceptedReviewPin{Reviewer: domain.ReviewerIdentity{OwnerID: operation.ActorID, OwnerKind: operation.ReviewerKind}, ReviewEpochEventID: operation.ReviewEpochEventID, AcceptedReviewEventID: operation.AcceptedReviewEventID, AcceptedPublicationOperationID: operation.OperationID, SourceOID: operation.SourceRevision, EvidenceSource: operation.EvidenceSource, EvidenceEventID: operation.EvidenceEventID, EvidenceSeq: operation.EvidenceSeq, EvidenceDigest: operation.EvidenceDigest}
 	result := protocol.OrchestrationIntentResult{Scope: request.Scope, Kind: request.Kind, IntentKey: request.IntentKey, Requested: []string{operation.IssueID}}
 	operation, err = d.renewPublicationClaim(context.Background(), store, operationID, claimToken, claimTTL)
 	if err != nil {
@@ -669,7 +710,7 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 		if errors.As(runErr, &retry) {
 			terminal, _, transitionErr = d.transitionPublicationWithRetry(context.Background(), store, current, claimToken, state, mutate, retry)
 		} else {
-			terminal, transitionErr = d.transitionPublicationOperation(context.Background(), current, claimToken, state, mutate)
+			terminal, transitionErr = d.terminalizeAcceptedReviewPublication(context.Background(), current, claimToken, state, kind, runErr.Error(), artifact, finished)
 		}
 		if transitionErr != nil {
 			return nil, fmt.Errorf("%w; persist terminal publication continuation: %v", runErr, transitionErr)
@@ -687,6 +728,61 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	d.ensurePublicationTargetContinuation(store, current)
 	_ = daemonops.ReportProgress(ctx, daemonops.Progress{Phase: "merged", Message: "exact candidate merged and accepted issue closed", Current: 100, Total: 100, Unit: "percent", Percent: 100})
 	return json.Marshal(current)
+}
+
+func (d *Daemon) terminalizeAcceptedReviewPublication(ctx context.Context, current domain.PublicationOperation, claimToken string, state domain.PublicationOperationState, failureKind, failureDetail, failureArtifact string, finished time.Time) (domain.PublicationOperation, error) {
+	issueClient := d.issueClientForProject(current.ProjectID)
+	if issueClient == nil {
+		return domain.PublicationOperation{}, fmt.Errorf("issue store unavailable for terminal publication disposition")
+	}
+	terminal, err := issueClient.TerminalizeAcceptedReviewPublication(ctx, issues.TerminalReviewPublicationDisposition{Operation: current, ExpectedClaimToken: claimToken, State: state, FailureKind: failureKind, FailureDetail: failureDetail, FailureArtifact: failureArtifact, FinishedAt: finished})
+	if err != nil {
+		return domain.PublicationOperation{}, err
+	}
+	d.publishPublicationOperationEvent(terminal)
+	if d.publicationStateChanged != nil {
+		d.publicationStateChanged(terminal)
+	}
+	return terminal, nil
+}
+
+func (d *Daemon) validatePublicationReviewAuthority(ctx context.Context, operation domain.PublicationOperation) error {
+	if err := operation.ValidateReviewAuthority(); err != nil {
+		return err
+	}
+	store, err := d.publicationStoreForProject(operation.ProjectID)
+	if err != nil {
+		return err
+	}
+	snapshot, err := store.PublicationEvidenceSnapshot(ctx, operation.ProjectID, operation.IssueID)
+	if err != nil {
+		return fmt.Errorf("read patch-review prerequisite: %w", err)
+	}
+	foundEvidence := false
+	for _, evidence := range snapshot.Evidence {
+		if evidence.EvidenceID == operation.PatchEvidenceID && evidence.Layer == domain.PublicationEvidencePatchReview && evidence.SourceRevision == operation.SourceRevision && evidence.PolicyVersion == operation.PolicyVersion && evidence.EnvironmentFingerprint == operation.EnvironmentFingerprint && strings.EqualFold(strings.TrimPrefix(evidence.Producer, "reviewer:"), operation.ActorID) {
+			foundEvidence = true
+			break
+		}
+	}
+	if !foundEvidence {
+		return fmt.Errorf("publication patch-review prerequisite %s is missing or incompatible", operation.PatchEvidenceID)
+	}
+	issueClient := d.issueClientForProject(operation.ProjectID)
+	if issueClient == nil {
+		return fmt.Errorf("issue store unavailable for accepted-review authority")
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, operation.IssueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}, NewestIDFirst: true})
+	if err != nil {
+		return fmt.Errorf("read accepted-review authority: %w", err)
+	}
+	for _, event := range events {
+		outcome, trusted := domain.TrustedReviewOutcome(event)
+		if event.ID == operation.AcceptedReviewEventID && trusted && outcome == domain.ReviewOutcomeAccepted && strings.EqualFold(observationPayloadString(event.Payload, "actor_id"), operation.ActorID) && observationPayloadString(event.Payload, "publication_operation_id") == operation.OperationID && reviewPayloadInt64(event.Payload["review_epoch_event_id"]) == operation.ReviewEpochEventID {
+			return nil
+		}
+	}
+	return fmt.Errorf("publication accepted-review event %d is missing or incompatible", operation.AcceptedReviewEventID)
 }
 
 func (d *Daemon) publicationOperationAlreadyApplied(ctx context.Context, operation domain.PublicationOperation) (bool, error) {
@@ -836,11 +932,12 @@ func (d *Daemon) publicationCandidateAdmission(projectID, operationID, claimToke
 			}
 		}
 		acquire := func(id string) (domain.ValidationRequest, error) {
+			profile := d.publicationValidationProfile(context.Background(), operation, candidateRevision)
 			return d.operationRuntime.store.AcquireValidation(context.Background(), domain.ValidationAcquire{
 				RequestID: id, LeaseToken: leaseToken, ProjectID: operation.ProjectID,
 				Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate,
 				IsolationMode: "synthetic-worktree", EnvironmentFingerprint: operation.EnvironmentFingerprint,
-				Override: domain.ValidationOverrideNone, Profile: "publication:" + operation.PolicyVersion,
+				Override: domain.ValidationOverrideNone, Profile: profile,
 				Command: operation.ValidationCommand, SourceRevision: candidateRevision, TTL: defaultValidationLeaseTTL,
 			}, time.Now().UTC())
 		}
@@ -928,6 +1025,32 @@ func (d *Daemon) publicationCandidateAdmission(projectID, operationID, claimToke
 		}
 		return false, finish, nil
 	}
+}
+
+// publicationValidationProfile preserves the queue's policy-derived profile
+// unless an exact completed reviewer-owned execution proves that the same
+// command and environment already ran for this candidate. Selecting that
+// execution's profile lets validation admission apply its existing typed
+// ticket-review-to-repository-publication compatibility rule; no looser
+// command, revision, environment, or authority match is introduced here.
+func (d *Daemon) publicationValidationProfile(ctx context.Context, operation domain.PublicationOperation, candidateRevision string) string {
+	fallback := "publication:" + operation.PolicyVersion
+	if d == nil || d.operationRuntime == nil || d.operationRuntime.store == nil {
+		return fallback
+	}
+	review, err := d.operationRuntime.store.LatestReviewValidation(ctx, operation.ProjectID, operation.IssueID, time.Now().UTC(), defaultValidationLeaseTTL)
+	if err != nil || review == nil || review.State != domain.ValidationRequestCompleted || !review.Evidence.Present {
+		return fallback
+	}
+	if operation.ValidateReviewAuthority() != nil || review.SourceRevision != strings.TrimSpace(candidateRevision) ||
+		strings.Join(strings.Fields(review.Command), " ") != strings.Join(strings.Fields(operation.ValidationCommand), " ") ||
+		review.EnvironmentFingerprint != operation.EnvironmentFingerprint || review.Override == domain.ValidationOverrideEmergency ||
+		review.Scope != domain.ValidationScopeTicket || review.Purpose != domain.ValidationPurposeReviewEvidence ||
+		!strings.EqualFold(strings.TrimSpace(review.ReviewerID), strings.TrimSpace(operation.ActorID)) ||
+		review.ReviewEpochEventID != operation.ReviewEpochEventID {
+		return fallback
+	}
+	return review.Profile
 }
 
 func (d *Daemon) transitionPublicationOperation(ctx context.Context, current domain.PublicationOperation, claimToken string, state domain.PublicationOperationState, mutate func(*operationstore.PublicationOperationUpdate)) (domain.PublicationOperation, error) {

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -421,14 +422,18 @@ func TestCodexAppServerLaunchUsesStockRemoteTUIAndSupervisedResume(t *testing.T)
 		t.Fatalf("launch command still uses removed custom client: %s", command)
 	}
 
-	supervisor := codexAppServerSupervisedCommand("codex", "codex --remote unix://", "codex resume --remote unix:// --last")
+	stableDir := filepath.Join(t.TempDir(), "stable daemon cwd")
+	if err := os.MkdirAll(stableDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	supervisor := codexAppServerSupervisedCommand("codex", stableDir, "codex --remote unix://", "codex resume --remote unix:// --last")
 	if out, err := exec.Command("sh", "-n", "-c", supervisor).CombinedOutput(); err != nil {
 		t.Fatalf("supervisor shell syntax: %v\n%s\n%s", err, out, supervisor)
 	}
 	trace := filepath.Join(t.TempDir(), "trace")
-	fakeCodex := `codex() { printf '%s\n' "$*" >> "$TRACE"; case "$*" in "mcp get --json floop") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon start") return 0 ;; "--remote unix://") return 1 ;; "resume --remote unix:// --last") return 0 ;; *) return 2 ;; esac; }; `
+	fakeCodex := `codex() { printf '%s|%s\n' "$*" "$PWD" >> "$TRACE"; case "$*" in "mcp get --json floop") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon start") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon version") return 1 ;; "-c mcp_servers.floop.required=false app-server daemon restart") return 0 ;; "--remote unix://") return 1 ;; "resume --remote unix:// --last") return 0 ;; *) return 2 ;; esac; }; `
 	cmd := exec.Command("sh", "-c", fakeCodex+supervisor)
-	cmd.Env = append(os.Environ(), "TRACE="+trace)
+	cmd.Env = append(os.Environ(), "TRACE="+trace, "AZEDARACH_DAEMON_SCOPE=global")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("supervisor execution: %v\n%s", err, out)
 	}
@@ -439,6 +444,131 @@ func TestCodexAppServerLaunchUsesStockRemoteTUIAndSupervisedResume(t *testing.T)
 	got := string(data)
 	if !strings.Contains(got, "--remote unix://") || !strings.Contains(got, "resume --remote unix:// --last") {
 		t.Fatalf("supervisor trace = %q", got)
+	}
+	for _, action := range []string{"app-server daemon start", "app-server daemon restart"} {
+		if !strings.Contains(got, action+"|"+stableDir) {
+			t.Fatalf("supervisor trace = %q, want %s from stable cwd %q", got, action, stableDir)
+		}
+	}
+	for _, signal := range []string{"kill -TERM", "kill -KILL", "kill -HUP", "kill -INT"} {
+		if strings.Contains(supervisor, signal) {
+			t.Fatalf("supervisor directly terminates processes instead of preserving native daemon ownership: %s", supervisor)
+		}
+	}
+}
+
+func TestCodexAppServerRecoveryCoordinatesConcurrentSupervisors(t *testing.T) {
+	stableDir := t.TempDir()
+	supervisor := codexAppServerSupervisedCommand("codex", stableDir, "codex first", "codex resume")
+	trace := filepath.Join(t.TempDir(), "trace")
+	healthy := filepath.Join(t.TempDir(), "healthy")
+	fakeCodex := `codex() {
+  case "$*" in
+    "mcp get --json floop"|"-c mcp_servers.floop.required=false app-server daemon start") return 0 ;;
+    "-c mcp_servers.floop.required=false app-server daemon version") [ -f "$HEALTHY" ] ;;
+    "-c mcp_servers.floop.required=false app-server daemon restart") printf 'restart\n' >> "$TRACE"; touch "$HEALTHY" ;;
+    "first") return 1 ;;
+    "resume") return 0 ;;
+    *) return 2 ;;
+  esac
+}; `
+	commands := []*exec.Cmd{exec.Command("sh", "-c", fakeCodex+supervisor), exec.Command("sh", "-c", fakeCodex+supervisor)}
+	outputs := make([]bytes.Buffer, len(commands))
+	for i, cmd := range commands {
+		cmd.Env = append(os.Environ(), "TRACE="+trace, "HEALTHY="+healthy, "AZEDARACH_DAEMON_SCOPE=global")
+		cmd.Stdout = &outputs[i]
+		cmd.Stderr = &outputs[i]
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, cmd := range commands {
+		if err := cmd.Wait(); err != nil {
+			t.Fatalf("concurrent supervisor: %v\n%s", err, outputs[i].Bytes())
+		}
+	}
+	data, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(data), "restart\n"); got != 1 {
+		t.Fatalf("restart count = %d, want one globally coordinated recovery; trace=%q", got, data)
+	}
+}
+
+func TestCodexAppServerRecoveryReclaimsDeadOwnerLock(t *testing.T) {
+	stableDir := t.TempDir()
+	lockPath := filepath.Join(stableDir, "codex-app-server-recovery.lock")
+	if err := os.WriteFile(lockPath, []byte("999999999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	supervisor := codexAppServerSupervisedCommand("codex", stableDir, "codex first", "codex resume")
+	fakeCodex := `codex() { case "$*" in "mcp get --json floop"|"-c mcp_servers.floop.required=false app-server daemon start"|"-c mcp_servers.floop.required=false app-server daemon restart"|"resume") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon version"|"first") return 1 ;; *) return 2 ;; esac; }; `
+	cmd := exec.Command("sh", "-c", fakeCodex+supervisor)
+	cmd.Env = append(os.Environ(), "AZEDARACH_DAEMON_SCOPE=global")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("recover dead owner lock: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery lock remains after success: %v", err)
+	}
+}
+
+func TestCodexAppServerSupervisorRefusesGlobalControlFromWorktreeScopedDaemon(t *testing.T) {
+	stableDir := t.TempDir()
+	trace := filepath.Join(t.TempDir(), "trace")
+	supervisor := codexAppServerSupervisedCommand("codex", stableDir, "codex first", "codex resume")
+	cmd := exec.Command("sh", "-c", `codex() { printf '%s\n' "$*" >> "$TRACE"; }; `+supervisor)
+	cmd.Env = append(os.Environ(), "TRACE="+trace, "AZEDARACH_DAEMON_SCOPE=worktree")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("worktree-scoped supervisor unexpectedly succeeded: %s", output)
+	}
+	if !strings.Contains(string(output), "refusing to control the user-global Codex app-server") {
+		t.Fatalf("worktree-scoped supervisor output = %q, want honest refusal", output)
+	}
+	if data, readErr := os.ReadFile(trace); readErr == nil && len(data) != 0 {
+		t.Fatalf("worktree-scoped supervisor invoked Codex: %q", data)
+	} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatal(readErr)
+	}
+}
+
+func TestCodexAppServerSupervisorRequiresExplicitGlobalDaemonScope(t *testing.T) {
+	stableDir := t.TempDir()
+	trace := filepath.Join(t.TempDir(), "trace")
+	supervisor := codexAppServerSupervisedCommand("codex", stableDir, "codex first", "codex resume")
+	cmd := exec.Command("sh", "-c", `codex() { printf '%s\n' "$*" >> "$TRACE"; }; `+supervisor)
+	cmd.Env = append(os.Environ(), "TRACE="+trace, "AZEDARACH_DAEMON_SCOPE=")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("unscoped supervisor unexpectedly succeeded: %s", output)
+	}
+	if data, readErr := os.ReadFile(trace); readErr == nil && len(data) != 0 {
+		t.Fatalf("unscoped supervisor invoked Codex: %q", data)
+	} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatal(readErr)
+	}
+}
+
+func TestDaemonScopeTmuxEnvironmentUsesAuthoritativeConfig(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		ambientScope  string
+		scopedRuntime bool
+		want          string
+	}{
+		{name: "global config ignores worktree ambient", ambientScope: "worktree", want: "global"},
+		{name: "scoped config ignores global ambient", ambientScope: "global", scopedRuntime: true, want: "worktree"},
+		{name: "scoped config ignores absent ambient", scopedRuntime: true, want: "worktree"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("AZEDARACH_DAEMON_SCOPE", test.ambientScope)
+			d := &Daemon{cfg: Config{ScopedRuntime: test.scopedRuntime}}
+			if got := d.daemonScopeTmuxEnvironment()["AZEDARACH_DAEMON_SCOPE"]; got != test.want {
+				t.Fatalf("scope marker = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -1274,6 +1404,7 @@ func TestSessionRestartAllRefusesSessionsWithoutManagedIdentity(t *testing.T) {
 }
 
 func TestSessionRestartAllCompletionCheckpointFailureReturnsProtocolError(t *testing.T) {
+	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
 	if err != nil {
@@ -1282,12 +1413,20 @@ func TestSessionRestartAllCompletionCheckpointFailureReturnsProtocolError(t *tes
 	sessionID := naming.CanonicalSessionID(repoDir, "cph")
 	runner := newSessionStartTmuxRunner()
 	runner.sessions[sessionID] = true
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: "cph", State: daemonstate.SessionStateRunning,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	d := &Daemon{
-		cfg:  Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
-		tmux: tmux.NewClient(runner, slog.Default()),
+		cfg:                    Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		tmux:                   tmux.NewClient(runner, slog.Default()),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
 	}
 	writes := 0
-	ctx := daemonops.WithProgressReporter(context.Background(), func(context.Context, daemonops.Progress) error {
+	ctx = daemonops.WithProgressReporter(ctx, func(context.Context, daemonops.Progress) error {
 		writes++
 		if writes == 3 {
 			return errors.New("completion checkpoint unavailable")
@@ -1381,6 +1520,60 @@ func TestSessionRestartAllForceBusyStillRequiresManagedIdentity(t *testing.T) {
 	}
 	if tmuxRunner.sendKeysCalls != 0 {
 		t.Fatalf("send-keys calls = %d, want no legacy terminal input", tmuxRunner.sendKeysCalls)
+	}
+}
+
+func TestSessionRestartAllUsesRefreshedHookActivityForBusyGate(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	issueID := "busy-hook"
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	base := time.Now().UTC()
+	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning,
+		Activity: "idle", ActivitySource: "session", UpdatedAt: base,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+		ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning,
+		Activity: "busy", ActivitySource: "hooks", UpdatedAt: base.Add(time.Second), ObservedVersion: base.Add(time.Second).UnixNano(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[sessionID] = true
+	d := &Daemon{
+		cfg:                    Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		tmux:                   tmux.NewClient(runner, slog.Default()),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+	}
+	runner.onRespawnPane = seedManagedRestartIdentity(t, d, runner, projectID, sessionID)
+	resp, err := d.handleSessionRestartAll(ctx, protocol.RequestEnvelope{
+		Command: protocol.CommandSessionRestartAll,
+		Meta:    protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:    marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID)}),
+	})
+	if err != nil || resp.Error != nil {
+		t.Fatalf("restart-all response=%+v err=%v", resp.Error, err)
+	}
+	var result protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Restarted != 0 || result.Skipped != 1 || len(result.Sessions) != 1 || result.Sessions[0].Reason != "busy_requires_force" || result.Sessions[0].Activity != "busy" || result.Sessions[0].ActivitySource != "hooks" {
+		t.Fatalf("hook-busy restart result = %+v", result)
+	}
+	for _, command := range runner.commands {
+		if len(command) > 0 && command[0] == "respawn-pane" {
+			t.Fatalf("hook-busy session bypassed force gate: %v", command)
+		}
 	}
 }
 
@@ -1845,6 +2038,8 @@ func seedManagedRestartIdentity(t *testing.T, d *Daemon, runner *sessionStartTmu
 			if err != nil {
 				continue
 			}
+			runner.launchScriptPaths[sessionID] = matches[1]
+			runner.launchScriptContents[sessionID] = string(body)
 			incarnation := regexp.MustCompile(`AZEDARACH_AGENT_INCARNATION='([^']+)'`).FindStringSubmatch(string(body))
 			if len(incarnation) != 2 {
 				continue
@@ -3980,6 +4175,7 @@ func TestSessionStartInjectsIssueImageAttachments(t *testing.T) {
 }
 
 func TestSessionStartLargeCodexPromptUsesFileBootstrap(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID := "proj-large-codex-prompt"
@@ -4008,11 +4204,13 @@ func TestSessionStartLargeCodexPromptUsesFileBootstrap(t *testing.T) {
 
 	d := &Daemon{
 		cfg: Config{
-			RepoDir:      repoDir,
-			BaseBranch:   "main",
-			CLITool:      "codex",
-			SessionShell: "zsh",
-			Logger:       slog.Default(),
+			RepoDir:        repoDir,
+			BaseBranch:     "main",
+			CLITool:        "codex",
+			CodexAppServer: true,
+			SessionShell:   "zsh",
+			Logger:         slog.Default(),
+			ScopedRuntime:  true,
 		},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		issues:       issuesClient,
@@ -4052,6 +4250,16 @@ func TestSessionStartLargeCodexPromptUsesFileBootstrap(t *testing.T) {
 
 	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
 	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, sessionID)
+	var launchArgs []string
+	for _, command := range tmuxRunner.commands {
+		if len(command) > 0 && command[0] == "new-session" {
+			launchArgs = command
+			break
+		}
+	}
+	if got, ok := tmuxCommandEnvironmentValue(launchArgs, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "worktree" {
+		t.Fatalf("active tmux launch scope = %q, present=%t; command=%v", got, ok, launchArgs)
+	}
 	if strings.Contains(launchCommand, "large prompt line") || strings.Contains(launchCommand, initialPromptShellVariable) {
 		t.Fatalf("launch command contains large prompt payload or prompt variable")
 	}
@@ -4753,6 +4961,7 @@ func TestSessionStartTmuxCreateFailureIncludesDiagnostics(t *testing.T) {
 
 func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing.T) {
 	ctx := context.Background()
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
 	repoDir := t.TempDir()
 	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
 	t.Setenv("PATH", filepath.Join(repoDir, "bin")+string(os.PathListSeparator)+"/usr/bin:/bin")
@@ -4783,6 +4992,7 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 			SessionShell:            "zsh",
 			ManagedGenerationBinDir: managedDir,
 			Logger:                  slog.Default(),
+			ScopedRuntime:           true,
 		},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		issues:       issuesClient,
@@ -4868,6 +5078,18 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 	}
 	if !tmuxRunner.windows[sessionID][sessionConflictWindowName] {
 		t.Fatalf("expected conflict window to be created in session %q", sessionID)
+	}
+	for _, commandName := range []string{"new-session", "new-window"} {
+		var commandArgs []string
+		for _, command := range tmuxRunner.commands {
+			if len(command) > 0 && command[0] == commandName {
+				commandArgs = command
+				break
+			}
+		}
+		if got, ok := tmuxCommandEnvironmentValue(commandArgs, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "worktree" {
+			t.Fatalf("%s scope = %q, present=%t; command=%v", commandName, got, ok, commandArgs)
+		}
 	}
 	if tmuxRunner.sendKeysCalls != 0 || len(tmuxRunner.inputPayloads) != 0 {
 		t.Fatalf("conflict launch bypassed artifact transport: send-keys=%d inputs=%d", tmuxRunner.sendKeysCalls, len(tmuxRunner.inputPayloads))
@@ -4969,6 +5191,9 @@ func TestSessionResolveConflictRetiresWindowAfterAmbiguousCreateErrors(t *testin
 		{name: "respawn window then error", respawn: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.respawn {
+				t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
+			}
 			ctx := context.Background()
 			repoDir := t.TempDir()
 			projectID := "proj-conflict-ambiguous"
@@ -4991,7 +5216,7 @@ func TestSessionResolveConflictRetiresWindowAfterAmbiguousCreateErrors(t *testin
 			}
 			memoryStore := daemonstate.NewStore()
 			d := &Daemon{
-				cfg:  Config{RepoDir: repoDir, BaseBranch: "main", CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+				cfg:  Config{RepoDir: repoDir, BaseBranch: "main", CLITool: "codex", SessionShell: "zsh", Logger: slog.Default(), ScopedRuntime: tc.respawn},
 				tmux: tmux.NewClient(runner, slog.Default()), issues: issuesClient,
 				session: daemonhandlers.NewSessionHandler(memoryStore), sessionStore: memoryStore, revision: map[string]uint64{},
 			}
@@ -5012,6 +5237,18 @@ func TestSessionResolveConflictRetiresWindowAfterAmbiguousCreateErrors(t *testin
 			}
 			if !runner.sessions[sessionID] {
 				t.Fatalf("cleanup removed the containing session %s", sessionID)
+			}
+			if tc.respawn {
+				var respawnCommand []string
+				for _, command := range runner.commands {
+					if len(command) > 0 && command[0] == "respawn-window" {
+						respawnCommand = command
+						break
+					}
+				}
+				if got, ok := tmuxCommandEnvironmentValue(respawnCommand, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "worktree" {
+					t.Fatalf("respawn window scope = %q, present=%t; command=%v", got, ok, respawnCommand)
+				}
 			}
 		})
 	}
@@ -7664,6 +7901,7 @@ func TestUntargetedReconcilePreservesProjectOrchestratorRuntime(t *testing.T) {
 }
 
 func TestReconcileRecoversRootedOrchestratorThroughOrchestratorAuthority(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	for _, target := range []string{"targeted", "full", "batched"} {
 		t.Run(target, func(t *testing.T) {
 			repoDir := t.TempDir()
@@ -7686,7 +7924,7 @@ func TestReconcileRecoversRootedOrchestratorThroughOrchestratorAuthority(t *test
 			runner := newSessionStartTmuxRunner()
 			store := daemonstate.NewStore()
 			manager := git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/root"}, repoDir, slog.Default())
-			d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: "codex", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), session: daemonhandlers.NewSessionHandler(store), sessionStore: store, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore}, worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager}}
+			d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: "codex", CodexAppServer: true, Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), session: daemonhandlers.NewSessionHandler(store), sessionStore: store, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore}, worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager}}
 			acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
 			targetIssue := issueID
 			if target == "full" {
@@ -7720,6 +7958,16 @@ func TestReconcileRecoversRootedOrchestratorThroughOrchestratorAuthority(t *test
 			contract := requireNewSessionLaunchCommand(t, runner, sessionID) + "\n" + requireNewSessionLaunchScript(t, runner, sessionID) + "\n" + runner.launchPromptContents[sessionID] + "\n" + strings.Join(runner.inputPayloads, "\n") + "\n" + strings.Join(runner.sendKeysPayloads, "\n")
 			if !strings.Contains(contract, "Role: orchestrator") || strings.Contains(contract, "Role: worker") {
 				t.Fatalf("rooted orchestrator launch contract=%q", contract)
+			}
+			var launchArgs []string
+			for _, command := range runner.commands {
+				if len(command) > 0 && command[0] == "new-session" {
+					launchArgs = command
+					break
+				}
+			}
+			if got, ok := tmuxCommandEnvironmentValue(launchArgs, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "global" {
+				t.Fatalf("rooted orchestrator scope = %q, present=%t; command=%v", got, ok, launchArgs)
 			}
 		})
 	}
@@ -7802,6 +8050,17 @@ func TestManagedRuntimeLifecycleEvaluationConsultsInvariantPolicy(t *testing.T) 
 }
 
 func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
+	priorScope, hadPriorScope := os.LookupEnv("AZEDARACH_DAEMON_SCOPE")
+	if err := os.Unsetenv("AZEDARACH_DAEMON_SCOPE"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if hadPriorScope {
+			_ = os.Setenv("AZEDARACH_DAEMON_SCOPE", priorScope)
+		} else {
+			_ = os.Unsetenv("AZEDARACH_DAEMON_SCOPE")
+		}
+	})
 	repoDir := t.TempDir()
 	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
 	t.Setenv("PATH", filepath.Join(repoDir, "bin")+string(os.PathListSeparator)+"/usr/bin:/bin")
@@ -7839,7 +8098,8 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	daemon := &Daemon{
 		cfg: Config{
 			RepoDir:                 repoDir,
-			CLITool:                 "claude",
+			CLITool:                 "codex",
+			CodexAppServer:          true,
 			ManagedGenerationBinDir: managedDir,
 			Logger:                  slog.Default(),
 		},
@@ -7887,6 +8147,9 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	}
 	if got, ok := tmuxCommandEnvironmentValue(recreatedCommand, "PATH"); ok || got != "" {
 		t.Fatalf("recreated session injected PATH = %q, %t; command=%v", got, ok, recreatedCommand)
+	}
+	if got, ok := tmuxCommandEnvironmentValue(recreatedCommand, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "global" {
+		t.Fatalf("recreated session scope = %q, present=%t; command=%v", got, ok, recreatedCommand)
 	}
 	launchCommand := recreatedCommand[len(recreatedCommand)-1]
 	if !strings.Contains(launchCommand, "session-launch") || strings.Contains(launchCommand, "export PATH=") || strings.Contains(launchCommand, managedDir) {
@@ -10084,6 +10347,7 @@ func TestSessionLaunchAtomicallyBootstrapsSlowAgentsAcrossToolsAndStartModes(t *
 				}
 				t.Cleanup(func() { _ = os.Remove(scriptPath) })
 				command := exec.Command("/bin/sh", "-c", tmuxCommand)
+				command.Env = append(os.Environ(), "AZEDARACH_DAEMON_SCOPE="+d.daemonScopeTmuxEnvironment()["AZEDARACH_DAEMON_SCOPE"])
 				output, err := command.CombinedOutput()
 				if err != nil {
 					t.Fatalf("execute slow %s %s launch: %v (%s)", tool, mode, err, output)

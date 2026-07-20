@@ -64,6 +64,15 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 	result := protocol.OrchestratorSessionResult{Scope: body.Scope, SessionID: sessionID}
 	switch req.Command {
 	case protocol.CommandOrchestratorSessionStart:
+		if body.Scope.Kind == domain.OrchestrationScopeRooted {
+			admission, gateErr := d.rootedOrchestrationAdmission(ctx, projectID, body.Scope.RootIssueID.String())
+			if gateErr != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, gateErr.Error()), nil
+			}
+			if admission.Blocked() {
+				return d.errorResponse(req, protocol.ErrorCodeConflict, rootedOrchestrationBlockedMessage(admission)), nil
+			}
+		}
 		rootedPrompt := ""
 		if body.Scope.Kind == domain.OrchestrationScopeRooted {
 			rootedPrompt, err = d.rootedOrchestratorBootstrapPrompt(ctx, projectID, body.Scope)
@@ -220,7 +229,7 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 				if artifactErr != nil {
 					return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare project orchestrator launch artifact: %v%s", artifactErr, cleanupNote(pauseOrReleaseLease()))), nil
 				}
-				if launchErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, acquired.Lease.SessionID, workdir, artifact.Command, nil); launchErr != nil {
+				if launchErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, acquired.Lease.SessionID, workdir, artifact.Command, d.daemonScopeTmuxEnvironment()); launchErr != nil {
 					appeared, _ := d.tmux.HasSession(ctx, acquired.Lease.SessionID)
 					if !appeared {
 						artifact.remove()

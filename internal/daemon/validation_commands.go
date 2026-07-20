@@ -57,7 +57,7 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
-		acquire := domain.ValidationAcquire{RequestID: strings.TrimSpace(body.RequestID), LeaseToken: strings.TrimSpace(body.LeaseToken), ProjectID: projectID, IssueID: strings.TrimSpace(body.IssueID), IssuePriority: authority.issuePriority, IssuePriorityResolved: true, Class: body.Class, Scope: body.Scope, Purpose: body.Purpose, IsolationMode: strings.TrimSpace(body.IsolationMode), EnvironmentFingerprint: strings.TrimSpace(body.EnvironmentFingerprint), Override: body.Override, OverrideActor: strings.TrimSpace(body.OverrideActor), OverrideReason: strings.TrimSpace(body.OverrideReason), Profile: strings.TrimSpace(body.Profile), Command: strings.TrimSpace(body.Command), SourceRevision: strings.TrimSpace(body.SourceRevision), ReviewerID: authority.reviewerID, ReviewEpochEventID: authority.reviewEpochEventID, TTL: ttl}
+		acquire := domain.ValidationAcquire{RequestID: strings.TrimSpace(body.RequestID), LeaseToken: strings.TrimSpace(body.LeaseToken), ProjectID: projectID, IssueID: strings.TrimSpace(body.IssueID), IssuePriority: authority.issuePriority, IssuePriorityResolved: true, Class: body.Class, Scope: body.Scope, Purpose: body.Purpose, IsolationMode: strings.TrimSpace(body.IsolationMode), EnvironmentFingerprint: strings.TrimSpace(body.EnvironmentFingerprint), Override: body.Override, OverrideActor: strings.TrimSpace(body.OverrideActor), OverrideReason: strings.TrimSpace(body.OverrideReason), Profile: strings.TrimSpace(body.Profile), Command: strings.TrimSpace(body.Command), SourceRevision: strings.TrimSpace(body.SourceRevision), ReviewerID: authority.reviewerID, ReviewerKind: authority.reviewerKind, ReviewEpochEventID: authority.reviewEpochEventID, PublicationOperationID: authority.publicationOperationID, AcceptedReviewEventID: authority.acceptedReviewEventID, AcceptedPublicationOperationID: authority.acceptedPublicationOperationID, TTL: ttl}
 		if err := acquire.Validate(); err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 		}
@@ -1070,9 +1070,13 @@ func publicationAssessmentInvalidation(evidenceID string, reason domain.Publicat
 }
 
 type validationIssueAuthority struct {
-	issuePriority      domain.Priority
-	reviewerID         string
-	reviewEpochEventID int64
+	issuePriority                  domain.Priority
+	reviewerID                     string
+	reviewerKind                   string
+	reviewEpochEventID             int64
+	publicationOperationID         string
+	acceptedReviewEventID          int64
+	acceptedPublicationOperationID string
 }
 
 func (d *Daemon) validationIssueAuthority(ctx context.Context, projectID string, body protocol.ValidationAcquireRequest) (validationIssueAuthority, error) {
@@ -1110,29 +1114,31 @@ func (d *Daemon) validationIssueAuthority(ctx context.Context, projectID string,
 	if task.Status != domain.StatusInReview {
 		return authority, nil
 	}
-	reviewerID := strings.TrimSpace(body.ReviewerID)
-	if reviewerID == "" {
-		return validationIssueAuthority{}, fmt.Errorf("review-assigned aggregate validation requires reviewer identity")
+	reviewer, err := domain.CanonicalReviewerIdentity(body.ReviewerID, body.ReviewerKind)
+	if err != nil {
+		return validationIssueAuthority{}, fmt.Errorf("review-assigned aggregate validation requires typed orchestrator identity: %w", err)
 	}
 	reviewLease := coordinationLease(task, domain.CoordinationLeaseReview)
 	if reviewLease == nil || reviewLease.IsExpired(time.Now().UTC()) {
 		return validationIssueAuthority{}, fmt.Errorf("review-assigned aggregate validation requires an active durable review lease")
 	}
-	if !strings.EqualFold(strings.TrimSpace(reviewLease.OwnerID), reviewerID) {
-		return validationIssueAuthority{}, fmt.Errorf("review-assigned aggregate validation reviewer %s does not own review lease held by %s", reviewerID, reviewLease.OwnerID)
+	if !reviewer.Matches(reviewLease.OwnerID, reviewLease.OwnerKind) {
+		return validationIssueAuthority{}, fmt.Errorf("review-assigned aggregate validation reviewer %s/%s does not own typed review lease", reviewer.OwnerID, reviewer.OwnerKind)
 	}
-	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged}, NewestIDFirst: true})
-	if err != nil {
-		return validationIssueAuthority{}, err
+	reviewAuthority := issues.ReviewPublicationAuthority{
+		Reviewer: reviewer, ReviewEpochEventID: body.ReviewEpochEventID,
+		AcceptedReviewEventID: body.AcceptedReviewEventID, PublicationOperationID: strings.TrimSpace(body.PublicationOperationID),
+		AcceptedPublicationOperationID: strings.TrimSpace(body.AcceptedPublicationOperationID),
 	}
-	for _, event := range events {
-		if domain.IsReviewRequestTransition(event) {
-			authority.reviewerID = reviewerID
-			authority.reviewEpochEventID = event.ID
-			return authority, nil
-		}
+	if err := issueClient.BeginReviewPublicationClose(ctx, issueID, reviewAuthority, nil); err != nil {
+		return validationIssueAuthority{}, fmt.Errorf("review-assigned aggregate validation publication authority: %w", err)
 	}
-	return validationIssueAuthority{}, fmt.Errorf("review-assigned aggregate validation has no current review epoch")
+	authority.reviewerID, authority.reviewerKind = reviewer.OwnerID, reviewer.OwnerKind
+	authority.reviewEpochEventID = body.ReviewEpochEventID
+	authority.publicationOperationID = strings.TrimSpace(body.PublicationOperationID)
+	authority.acceptedReviewEventID = body.AcceptedReviewEventID
+	authority.acceptedPublicationOperationID = strings.TrimSpace(body.AcceptedPublicationOperationID)
+	return authority, nil
 }
 
 func (d *Daemon) validationProjectionStore() (*operationstore.SQLiteStore, error) {

@@ -12,6 +12,7 @@
   },
   "gate": {
     "command": "just review-gate",
+    "environmentFingerprint": "azedarach-go-review-v1",
     "failureArtifactPaths": [
       ".tmp/test-timing"
     ]
@@ -153,7 +154,7 @@
   },
   "session": {
     "asyncInitCommands": [],
-    "codexAppServer": true,
+    "codexAppServer": false,
     "dangerouslySkipPermissions": true,
     "logDir": "/Users/riordan/.azedarach/logs",
     "shell": "zsh",

@@ -308,7 +308,37 @@ func TestValidationAcquireBindsReviewAssignmentToDurableLease(t *testing.T) {
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
-	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "assigned-reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview}); err != nil {
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+	admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil || admission.Evidence == nil {
+		t.Fatalf("capture review admission = %+v err=%v", admission, err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "assigned-reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission, ReviewSourceOID: "candidate-a"}); err != nil {
+		t.Fatal(err)
+	}
+	publication := domain.PublicationOperation{
+		OperationID: "publication-validation-authority", ProjectID: "project", IssueID: issueID, IntentKey: "accepted-validation",
+		RequestFingerprint: "fingerprint", ActorID: "assigned-reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator,
+		ReviewEpochEventID: admission.ReviewEpochEventID, TargetID: "base", TargetBranch: "main", SourceRevision: "candidate-a",
+		BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain", ValidationCommand: "just test", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
+	}
+	publication.PatchEvidenceID = publication.OperationID
+	patchEvidence := domain.PublicationEvidence{EvidenceID: publication.PatchEvidenceID, ProjectID: publication.ProjectID, IssueID: publication.IssueID, Layer: domain.PublicationEvidencePatchReview, PatchDigest: "patch", SourceRevision: publication.SourceRevision, BaseRevision: publication.BaseRevision, Producer: "reviewer:" + publication.ActorID, PolicyVersion: publication.PolicyVersion, EnvironmentFingerprint: publication.EnvironmentFingerprint, CreatedAt: publication.CreatedAt}
+	queueStore := operationstore.NewAtPath(filepath.Join(repoDir, "issues.db"), nil)
+	t.Cleanup(func() { _ = queueStore.Close() })
+	if _, err := queueStore.PublicationOperations(ctx, "project", "", false); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := client.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
+			"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": publication.IntentKey, "request_fingerprint": publication.RequestFingerprint,
+			"reviewed_evidence_source": admission.Evidence.Source, "reviewed_evidence_event_id": admission.Evidence.EventID,
+			"reviewed_evidence_seq": admission.Evidence.Seq, "reviewed_evidence_digest": admission.Evidence.Digest,
+		},
+	}, publication, patchEvidence, "candidate-a", admission, "", "assigned-reviewer")
+	if err != nil {
 		t.Fatal(err)
 	}
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
@@ -317,7 +347,7 @@ func TestValidationAcquireBindsReviewAssignmentToDurableLease(t *testing.T) {
 
 	acquire := func(requestID, reviewer string) protocol.ResponseEnvelope {
 		t.Helper()
-		body, err := json.Marshal(protocol.ValidationAcquireRequest{RequestID: requestID, LeaseToken: "secret", IssueID: issueID, Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, IsolationMode: "worktree", EnvironmentFingerprint: "toolchain-a", Override: domain.ValidationOverrideNone, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: reviewer, TTLSeconds: 30})
+		body, err := json.Marshal(protocol.ValidationAcquireRequest{RequestID: requestID, LeaseToken: "secret", IssueID: issueID, Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, IsolationMode: "worktree", EnvironmentFingerprint: "toolchain-a", Override: domain.ValidationOverrideNone, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: reviewer, ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: admission.ReviewEpochEventID, PublicationOperationID: receipt.PublicationOperationID, AcceptedReviewEventID: receipt.EventID, AcceptedPublicationOperationID: receipt.PublicationOperationID, TTLSeconds: 30})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -329,7 +359,7 @@ func TestValidationAcquireBindsReviewAssignmentToDurableLease(t *testing.T) {
 	}
 
 	wrong := acquire("wrong-reviewer", "other-reviewer")
-	if wrong.OK || !strings.Contains(wrong.Error.Message, "does not own review lease") {
+	if wrong.OK || !strings.Contains(wrong.Error.Message, "does not own typed review lease") {
 		t.Fatalf("wrong reviewer response = %+v", wrong)
 	}
 	correct := acquire("assigned-reviewer", "assigned-reviewer")
@@ -340,7 +370,7 @@ func TestValidationAcquireBindsReviewAssignmentToDurableLease(t *testing.T) {
 	if err := json.Unmarshal(correct.Body, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Request.ReviewerID != "assigned-reviewer" || result.Request.ReviewEpochEventID != latestReviewEpochEventID(t, ctx, client, issueID) {
+	if result.Request.ReviewerID != "assigned-reviewer" || result.Request.ReviewerKind != domain.ReviewerOwnerKindOrchestrator || result.Request.ReviewEpochEventID != latestReviewEpochEventID(t, ctx, client, issueID) || result.Request.PublicationOperationID != receipt.PublicationOperationID || result.Request.AcceptedReviewEventID != receipt.EventID {
 		t.Fatalf("durable assignment = %+v", result.Request)
 	}
 }
@@ -452,7 +482,7 @@ func TestPublicationEvidenceCommandsRetainPatchAcrossUnrelatedBaseMovement(t *te
 		RequestID: "review-validation", LeaseToken: "secret", ProjectID: "project", IssueID: issueID,
 		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence,
 		IsolationMode: "worktree", EnvironmentFingerprint: "node-22", Profile: "consumer-integration", Command: "npm test",
-		SourceRevision: sourceRevision, ReviewerID: "reviewer", ReviewEpochEventID: 1, TTL: time.Minute,
+		SourceRevision: sourceRevision, ReviewerID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: 1, PublicationOperationID: "publication", AcceptedReviewEventID: 2, AcceptedPublicationOperationID: "publication", TTL: time.Minute,
 	}, started)
 	require.NoError(t, err)
 	_, err = runtime.store.FinishValidation(ctx, "review-validation", "secret", domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{
@@ -494,6 +524,49 @@ func TestPublicationEvidenceCommandsRetainPatchAcrossUnrelatedBaseMovement(t *te
 	assert.True(t, evaluated.Assessments[0].BaseMovementOnly)
 }
 
+func TestAcceptedIndependentReviewRecordsPatchEvidenceIdempotently(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	runPublicationGit(t, repoDir, "init", "-b", "main")
+	runPublicationGit(t, repoDir, "config", "user.email", "test@example.com")
+	runPublicationGit(t, repoDir, "config", "user.name", "Test")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".azedarach", "config.json"), []byte(`{
+  "publicationEvidence": {"policyVersion":"portable-v1","activePathProfiles":[],"exactBaseSurfaces":{},"dependencies":{}}
+}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("issues.db*\n.azedarach/*\n!.azedarach/config.json\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644))
+	runPublicationGit(t, repoDir, "add", ".")
+	runPublicationGit(t, repoDir, "commit", "-m", "base")
+	base := runPublicationGit(t, repoDir, "rev-parse", "HEAD")
+	runPublicationGit(t, repoDir, "checkout", "-b", "feature")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "feature.txt"), []byte("portable\n"), 0o644))
+	runPublicationGit(t, repoDir, "add", "feature.txt")
+	runPublicationGit(t, repoDir, "commit", "-m", "feature")
+	head := runPublicationGit(t, repoDir, "rev-parse", "HEAD")
+
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "portable review", Type: domain.TypeFeature, Priority: domain.P1, Status: domain.StatusInReview})
+	require.NoError(t, err)
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()}, operationRuntime: runtime,
+		issueClientsByProject: map[string]*issues.Client{"project": client}, publicationEvidenceCache: map[string]domain.PublicationEvidenceSnapshot{},
+		git: gitservice.NewClient(gitservice.NewExecRunner(repoDir), slog.Default()),
+	}
+	inspection := protocol.OrchestrationReview{IssueID: issueID, ReviewEpochEventID: 17, WorktreePath: repoDir, SourceOID: head, DiffBaseRevision: base}
+	require.NoError(t, d.recordAcceptedPatchReviewEvidence(ctx, "project", "independent-reviewer", inspection))
+	require.NoError(t, d.recordAcceptedPatchReviewEvidence(ctx, "project", "independent-reviewer", inspection))
+	snapshot, err := runtime.store.PublicationEvidenceSnapshot(ctx, "project", issueID)
+	require.NoError(t, err)
+	require.Len(t, snapshot.Evidence, 1)
+	assert.Equal(t, domain.PublicationEvidencePatchReview, snapshot.Evidence[0].Layer)
+	assert.Equal(t, "reviewer:independent-reviewer", snapshot.Evidence[0].Producer)
+	assert.Equal(t, []string{"feature.txt"}, snapshot.Evidence[0].Coverage.Paths)
+}
+
 func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -533,7 +606,8 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 		RequestID: "merge-review", LeaseToken: "secret", ProjectID: projectID, IssueID: issueID,
 		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence,
 		IsolationMode: "worktree", EnvironmentFingerprint: "node-consumer", Profile: "consumer-integration", Command: "npm test",
-		SourceRevision: sourceOID, ReviewerID: "reviewer", ReviewEpochEventID: 1, TTL: time.Minute,
+		SourceRevision: sourceOID, ReviewerID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: 1,
+		PublicationOperationID: "publication-close-exact", AcceptedReviewEventID: 2, AcceptedPublicationOperationID: "publication-close-exact", TTL: time.Minute,
 	}, started)
 	require.NoError(t, err)
 	_, err = runtime.store.FinishValidation(ctx, "merge-review", "secret", domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{
@@ -556,8 +630,6 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 		Requested: true, Integrated: true, ConfiguredBaseTarget: true, TargetID: "base", SourceBranch: "feature", TargetBranch: "main",
 		BaseOID: baseOID, SourceOID: sourceOID, TargetOID: targetOID, ValidationAttempts: merge.ValidationAttempts,
 	}
-	_, _, err = d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, "portable-v1", "npm run verify-publication", "node-consumer")
-	require.ErrorContains(t, err, "missing publication operation identity", "ticket-only review evidence must not authorize task close")
 	_, err = runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{
 		RequestID: "candidate-authority", LeaseToken: "candidate-authority-secret", ProjectID: projectID,
 		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate,
@@ -582,12 +654,14 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	require.Equal(t, domain.ValidationExecutionReused, push.Execution)
 	publication := domain.PublicationOperation{
 		OperationID: "publication-close-exact", ProjectID: projectID, IssueID: issueID, IntentKey: "review-accept",
-		RequestFingerprint: "fingerprint", ActorID: "reviewer", TargetID: "base", TargetBranch: "main",
+		RequestFingerprint: "fingerprint", ActorID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator,
+		ReviewEpochEventID: 1, AcceptedReviewEventID: 2, PatchEvidenceID: "publication-close-exact", TargetID: "base", TargetBranch: "main",
 		SourceRevision: sourceOID, BaseRevision: baseOID, PolicyVersion: "portable-v1", EnvironmentFingerprint: "node-consumer",
 		ValidationCommand: "npm run verify-publication", State: domain.PublicationOperationQueued, CreatedAt: started,
 	}
 	mergedA := publication
 	mergedA.OperationID = "publication-merged-a"
+	mergedA.PatchEvidenceID = mergedA.OperationID
 	mergedA.IntentKey = "review-accept-a"
 	storedMergedA, _, err := runtime.store.EnqueuePublication(ctx, mergedA, "publication-merged-a")
 	require.NoError(t, err)
@@ -656,7 +730,7 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	require.NoError(t, err)
 	_, err = issueClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
-		Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "intent_key": publication.IntentKey, "request_fingerprint": publication.RequestFingerprint, "reviewed_source_oid": sourceOID, "publication_operation_id": publication.OperationID},
+		Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": publication.ReviewEpochEventID, "intent_key": publication.IntentKey, "request_fingerprint": publication.RequestFingerprint, "reviewed_source_oid": sourceOID, "publication_operation_id": publication.OperationID},
 	})
 	require.NoError(t, err)
 	resolvedOperation, resolvedValidation, err := d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, "portable-v1", "npm run verify-publication", "node-consumer")

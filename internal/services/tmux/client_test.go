@@ -123,6 +123,18 @@ func TestClientRespawnPaneTargetsOnlyExactPane(t *testing.T) {
 	}
 }
 
+func TestClientRespawnPaneWithEnvironmentTargetsOnlyReplacementPane(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(runner, slog.Default())
+	if err := client.RespawnPaneWithEnvironment(context.Background(), "%12", "/tmp/worktree", "exec /tmp/restart.sh", map[string]string{"AZEDARACH_DAEMON_SCOPE": "worktree"}); err != nil {
+		t.Fatalf("RespawnPaneWithEnvironment: %v", err)
+	}
+	want := [][]string{{"respawn-pane", "-k", "-t", "%12", "-c", "/tmp/worktree", "-e", "AZEDARACH_DAEMON_SCOPE=worktree", "exec /tmp/restart.sh"}}
+	if !reflect.DeepEqual(runner.commands, want) {
+		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+}
+
 func TestClient_NewSessionWithCommand(t *testing.T) {
 	runner := &recordingRunner{}
 	client := NewClient(runner, slog.Default())

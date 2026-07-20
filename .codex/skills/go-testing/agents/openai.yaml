@@ -1,0 +1,4 @@
+interface:
+  display_name: "Go Testing"
+  short_description: "Design deterministic, high-signal Go tests"
+  default_prompt: "Use $go-testing to design and validate robust tests for this Go change."

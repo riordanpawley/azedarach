@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
@@ -31,7 +32,7 @@ func TestProjectReviewQueuePrioritizesReviewAndExcludesForeignOwnedWork(t *testi
 	repoDir := t.TempDir()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
-	first := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	first := createReviewTask(t, ctx, client, domain.P1, "worker-a")
 	foreign := createReviewTask(t, ctx, client, domain.P2, "worker-b")
 	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", foreign, issues.OwnershipClaimParams{OwnerID: "another-orchestrator", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseOrchestration}); err != nil {
 		t.Fatal(err)
@@ -108,6 +109,9 @@ func TestReviewInspectionKeepsStableScopeAcrossCandidateRevisions(t *testing.T) 
 			t.Fatalf("bounded context leaked local worktree path: %s", encoded)
 		}
 	}
+	if first.ReviewMode != "full" || first.ReviewFallback != "initial_review" {
+		t.Fatalf("initial review selection = mode:%q fallback:%q", first.ReviewMode, first.ReviewFallback)
+	}
 	if incremental := first.HeadRevision + ".." + second.HeadRevision; incremental != "head-revision-1..head-revision-2" {
 		t.Fatalf("incremental range = %q, want prior reviewed head through current head", incremental)
 	}
@@ -129,6 +133,121 @@ func TestBuildReviewWorkflowContextUsesRecordedInvariantNotReviewMatrixLabels(t 
 	}
 }
 
+func TestReviewInspectionUsesVerifiedReturnedCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
+	task, err := client.GetWithRuntime(ctx, projectID, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission, ReviewSourceOID: "head-revision-1"}); err != nil {
+		t.Fatal(err)
+	}
+	oldScope := "issue:" + issueID + ":base:main@base-revision"
+	returned, err := client.AppendIssueObservationEventWithReviewAdmission(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return",
+		Payload: map[string]any{
+			"outcome": "returned", "actor_id": "reviewer", "actor_kind": "orchestrator", "review_diff_base_revision": "base-revision",
+			"review_head_revision": "head-revision-1", "review_diff_scope": oldScope,
+			"findings":       []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "repair", Validation: []string{"session.activity_convergence"}}},
+			"review_verdict": "returned", "review_angle": "state and recovery", "review_broader_invalidation": false,
+			"review_unique_findings":     []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "repair", Validation: []string{"session.activity_convergence"}}},
+			"review_reused_layers":       []string{},
+			"review_matrix":              domain.WorkerEvidenceReviewMatrix{Type: "stateful", CoveredCells: []string{"recovery"}},
+			"review_affected_invariants": []string{"session.activity_convergence"},
+		},
+	}, admission, "", "reviewer")
+	if err != nil || returned == 0 {
+		t.Fatalf("record returned review = (%+v,%v)", returned, err)
+	}
+	if _, err := client.ReleaseOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: "reviewer", Purpose: domain.CoordinationLeaseReview}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
+	task, err = client.GetWithRuntime(ctx, projectID, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.issueClientsByProject[projectID] = client
+	d.git = git.NewClient(&revisionReviewGitRunner{headRevision: "head-revision-2"}, slog.Default())
+	inspection := (daemonOrchestrationAuthority{daemon: d}).reviewInspection(ctx, projectID, repoDir, "reviewer", task, map[string]domain.Task{issueID: task}, map[string]git.Worktree{issueID: {IssueID: issueID, Path: repoDir, Branch: "feature/review"}})
+	if inspection.ReviewMode != "incremental" || inspection.DeltaBaseRevision != "head-revision-1" || inspection.DiffRange != "head-revision-1..head-revision-2" || inspection.ReviewFallback != "" {
+		t.Fatalf("incremental selection = %+v", inspection)
+	}
+	if len(inspection.PriorFindings) != 1 || !slices.Contains(inspection.AffectedInvariants, "session.activity_convergence") {
+		t.Fatalf("checkpoint context = findings:%+v invariants:%v", inspection.PriorFindings, inspection.AffectedInvariants)
+	}
+}
+
+func TestReviewCheckpointSemanticsFailClosed(t *testing.T) {
+	valid := func() map[string]any {
+		return map[string]any{
+			"review_verdict": "returned", "review_angle": "state and recovery", "review_broader_invalidation": false,
+			"review_unique_findings":     []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "repair"}},
+			"review_reused_layers":       []string{},
+			"review_matrix":              domain.WorkerEvidenceReviewMatrix{Type: "stateful", CoveredCells: []string{"recovery"}},
+			"review_affected_invariants": []string{"task.publication_queue"},
+		}
+	}
+	tests := []struct {
+		name, fallback string
+		mutate         func(map[string]any)
+	}{
+		{name: "missing angle", fallback: "checkpoint_missing_semantics", mutate: func(p map[string]any) { delete(p, "review_angle") }},
+		{name: "broader invalidation", fallback: "checkpoint_broader_invalidation", mutate: func(p map[string]any) { p["review_broader_invalidation"] = true }},
+		{name: "malformed findings", fallback: "checkpoint_malformed", mutate: func(p map[string]any) { p["review_unique_findings"] = "not-findings" }},
+		{name: "missing reused layers", fallback: "checkpoint_malformed", mutate: func(p map[string]any) { delete(p, "review_reused_layers") }},
+		{name: "missing affected invariants", fallback: "checkpoint_malformed", mutate: func(p map[string]any) { delete(p, "review_affected_invariants") }},
+		{name: "empty affected invariants", fallback: "checkpoint_malformed", mutate: func(p map[string]any) { p["review_affected_invariants"] = []string{} }},
+		{name: "unknown affected invariant", fallback: "checkpoint_malformed", mutate: func(p map[string]any) { p["review_affected_invariants"] = []string{"unknown.invariant"} }},
+		{name: "mixed affected invariants", fallback: "checkpoint_malformed", mutate: func(p map[string]any) {
+			p["review_affected_invariants"] = []string{"task.publication_queue", "unknown.invariant"}
+		}},
+		{name: "duplicate reused layers", fallback: "checkpoint_malformed", mutate: func(p map[string]any) { p["review_reused_layers"] = []string{"patch", "PATCH"} }},
+		{name: "duplicate findings", fallback: "checkpoint_malformed", mutate: func(p map[string]any) {
+			p["review_unique_findings"] = []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "same"}, {Severity: "HIGH", Finding: "same"}}
+		}},
+		{name: "duplicate covered cell", fallback: "checkpoint_malformed", mutate: func(p map[string]any) {
+			p["review_matrix"] = domain.WorkerEvidenceReviewMatrix{Type: "stateful", CoveredCells: []string{"recovery", "RECOVERY"}}
+		}},
+		{name: "covered and skipped overlap", fallback: "checkpoint_malformed", mutate: func(p map[string]any) {
+			p["review_matrix"] = domain.WorkerEvidenceReviewMatrix{Type: "stateful", CoveredCells: []string{"recovery"}, SkippedCells: []domain.WorkerEvidenceReviewSkippedMatrix{{Cell: "RECOVERY", Reason: "covered elsewhere"}}}
+		}},
+		{name: "unexplained skip", fallback: "checkpoint_malformed", mutate: func(p map[string]any) {
+			p["review_matrix"] = domain.WorkerEvidenceReviewMatrix{Type: "stateful", SkippedCells: []domain.WorkerEvidenceReviewSkippedMatrix{{Cell: "recovery"}}}
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := valid()
+			tc.mutate(payload)
+			if _, _, got := reviewCheckpointSemantics(payload); got != tc.fallback {
+				t.Fatalf("fallback = %q, want %q", got, tc.fallback)
+			}
+		})
+	}
+	if findings, affected, fallback := reviewCheckpointSemantics(valid()); fallback != "" || len(findings) != 1 || !slices.Contains(affected, "task.publication_queue") {
+		t.Fatalf("valid checkpoint = findings:%+v affected:%v fallback:%q", findings, affected, fallback)
+	}
+}
+
 type revisionReviewGitRunner struct {
 	headRevision string
 }
@@ -140,6 +259,10 @@ func (r *revisionReviewGitRunner) Run(_ context.Context, args ...string) (string
 		return "base-revision\n", nil
 	case strings.Contains(command, " rev-parse --verify HEAD"):
 		return r.headRevision + "\n", nil
+	case strings.Contains(command, " rev-parse --verify head-revision-1^{commit}"):
+		return "head-revision-1\n", nil
+	case strings.Contains(command, " merge-base --is-ancestor head-revision-1 "+r.headRevision):
+		return "", nil
 	case strings.Contains(command, " diff "):
 		return "1 file changed, 1 insertion(+)\n", nil
 	default:
@@ -291,6 +414,7 @@ func TestProjectStartIntentRoutesPrematureWorkWhileReviewRemainsQueued(t *testin
 }
 
 func TestReviewIntentValidationRejectsNonActionableOrConflictingOutcomes(t *testing.T) {
+	validPass := validReturnedReviewPass()
 	tests := []struct {
 		name    string
 		request protocol.OrchestrationIntentRequest
@@ -298,6 +422,29 @@ func TestReviewIntentValidationRejectsNonActionableOrConflictingOutcomes(t *test
 	}{
 		{name: "return without findings", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn}, want: "requires at least one"},
 		{name: "empty finding", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high"}}}, want: "requires finding text"},
+		{name: "missing broader invalidation", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: &protocol.OrchestrationReviewPass{AffectedInvariants: []string{"task.publication_queue"}}}, want: "explicit broader-invalidation"},
+		{name: "empty affected invariants", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: func() *protocol.OrchestrationReviewPass {
+			pass := *validPass
+			pass.AffectedInvariants = nil
+			return &pass
+		}()}, want: "at least one canonical"},
+		{name: "unknown affected invariant", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: func() *protocol.OrchestrationReviewPass {
+			pass := *validPass
+			pass.AffectedInvariants = []string{"unknown.invariant"}
+			return &pass
+		}()}, want: "not canonical"},
+		{name: "mixed affected invariants", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: func() *protocol.OrchestrationReviewPass {
+			pass := *validPass
+			pass.AffectedInvariants = []string{"task.publication_queue", "unknown.invariant"}
+			return &pass
+		}()}, want: "not canonical"},
+		{name: "empty angle", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: func() *protocol.OrchestrationReviewPass { pass := *validPass; pass.Angle = ""; return &pass }()}, want: "angle"},
+		{name: "omitted reused layers", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: func() *protocol.OrchestrationReviewPass { pass := *validPass; pass.ReusedLayers = nil; return &pass }()}, want: "reused layers"},
+		{name: "empty matrix", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: func() *protocol.OrchestrationReviewPass {
+			pass := *validPass
+			pass.Matrix = domain.WorkerEvidenceReviewMatrix{}
+			return &pass
+		}()}, want: "matrix"},
 		{name: "accept with findings", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewAccept, Findings: []protocol.OrchestrationReviewFinding{{Finding: "conflict"}}}, want: "cannot include findings"},
 	}
 	for _, tt := range tests {
@@ -306,6 +453,15 @@ func TestReviewIntentValidationRejectsNonActionableOrConflictingOutcomes(t *test
 				t.Fatalf("error = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func validReturnedReviewPass() *protocol.OrchestrationReviewPass {
+	broaderInvalidation := false
+	return &protocol.OrchestrationReviewPass{
+		Verdict: "returned", Angle: "stateful review return", ReusedLayers: []string{},
+		AffectedInvariants: []string{"orchestration.project_review"}, BroaderInvalidation: &broaderInvalidation,
+		Matrix: domain.WorkerEvidenceReviewMatrix{Type: "stateful", CoveredCells: []string{"state", "recovery"}},
 	}
 }
 
@@ -904,7 +1060,7 @@ func TestProjectReviewQueueRefreshesCrossProcessReviewLease(t *testing.T) {
 	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
 	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
 	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
-	issueID := createReviewTask(t, ctx, reader, domain.P1, "orchestrator")
+	issueID := createReviewTask(t, ctx, reader, domain.P1, "worker")
 	d := newOrchestrationReviewTestDaemon(repoDir, reader)
 	authority := d.orchestrationAuthority()
 	if err := d.ensureLegacyMailboxObservationProjection(ctx, "project", repoDir); err != nil {
@@ -957,6 +1113,7 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 		ActorID:       "orchestrator",
 		IssueIDs:      []string{issueID},
 		RepoDir:       repoDir,
+		ReviewPass:    validReturnedReviewPass(),
 		RestartWorker: true,
 		Findings: []protocol.OrchestrationReviewFinding{{
 			Severity:     "high",
@@ -1012,6 +1169,7 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 		ActorID:       "orchestrator",
 		IssueIDs:      []string{issueID},
 		RepoDir:       repoDir,
+		ReviewPass:    validReturnedReviewPass(),
 		RestartWorker: true,
 		Findings: []protocol.OrchestrationReviewFinding{{
 			Severity:     "high",
@@ -1034,7 +1192,7 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	if len(replayedMail) != 1 || len(tmuxRunner.inputPayloads) != 1 {
 		t.Fatalf("replayed side effects mail=%d prompts=%d, want one each", len(replayedMail), len(tmuxRunner.inputPayloads))
 	}
-	conflict, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "review-return-1", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "different request"}}})
+	conflict, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "review-return-1", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, ReviewPass: validReturnedReviewPass(), Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "different request"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1061,7 +1219,8 @@ func TestReviewReturnDoesNotRequireProjectSnapshotAdmission(t *testing.T) {
 	request := protocol.OrchestrationIntentRequest{
 		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn,
 		IntentKey: "review-return-with-project-churn", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
-		Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "repair the bounded worker issue"}},
+		ReviewPass: validReturnedReviewPass(),
+		Findings:   []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "repair the bounded worker issue"}},
 	}
 	result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
 	if err != nil {
@@ -1089,7 +1248,7 @@ func TestReviewReturnAcceptsFailedAggregateGateFromCurrentReviewEpochAfterWorker
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 	t.Cleanup(func() { _ = runtime.Close() })
 	now := time.Now().UTC()
-	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: "orchestrator", ReviewEpochEventID: reviewEpochEventID, TTL: time.Minute}, now)
+	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: "orchestrator", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: reviewEpochEventID, PublicationOperationID: "publication-review-gate", AcceptedReviewEventID: 2, AcceptedPublicationOperationID: "publication-review-gate", TTL: time.Minute}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1109,7 +1268,7 @@ func TestReviewReturnAcceptsFailedAggregateGateFromCurrentReviewEpochAfterWorker
 	sessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()
 	tmuxRunner.sessions[sessionID] = true
 	seedReadyAgentInput(t, d, tmuxRunner, "project", sessionID)
-	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "failed-review-gate", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "gate found a regression"}}}
+	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "failed-review-gate", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, ReviewPass: validReturnedReviewPass(), Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "gate found a regression"}}}
 
 	result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
 	if err != nil {
@@ -1134,7 +1293,7 @@ func TestReviewReturnRejectsCompletedExitZeroAggregateGateDuringActiveValidation
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 	t.Cleanup(func() { _ = runtime.Close() })
 	now := time.Now().UTC()
-	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "successful-review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: "orchestrator", ReviewEpochEventID: reviewEpochEventID, TTL: time.Minute}, now)
+	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "successful-review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeCapacity, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: "orchestrator", ReviewEpochEventID: reviewEpochEventID, TTL: time.Minute}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1148,7 +1307,7 @@ func TestReviewReturnRejectsCompletedExitZeroAggregateGateDuringActiveValidation
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
 	d.operationRuntime = runtime
 	d.git = git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) { return "candidate-a\n", nil }}, slog.Default())
-	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "successful-gate-return", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "must not return after successful validation"}}})
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "successful-gate-return", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, ReviewPass: validReturnedReviewPass(), Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "must not return after successful validation"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1178,7 +1337,7 @@ func TestReviewReturnRejectsActiveValidationAssignmentForWrongActorOrRevision(t 
 			runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 			t.Cleanup(func() { _ = runtime.Close() })
 			now := time.Now().UTC()
-			_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: tc.gateRevision, ReviewerID: tc.gateReviewer, ReviewEpochEventID: epochID, TTL: time.Minute}, now)
+			_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeCapacity, Profile: "cold", Command: "just test", SourceRevision: tc.gateRevision, ReviewerID: tc.gateReviewer, ReviewEpochEventID: epochID, TTL: time.Minute}, now)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1192,7 +1351,7 @@ func TestReviewReturnRejectsActiveValidationAssignmentForWrongActorOrRevision(t 
 			d := newOrchestrationReviewTestDaemon(repoDir, client)
 			d.operationRuntime = runtime
 			d.git = git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) { return tc.headRevision + "\n", nil }}, slog.Default())
-			result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "rejected-return", ActorID: tc.actor, IssueIDs: []string{issueID}, RepoDir: repoDir, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "must be rejected"}}})
+			result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "rejected-return", ActorID: tc.actor, IssueIDs: []string{issueID}, RepoDir: repoDir, ReviewPass: validReturnedReviewPass(), Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "must be rejected"}}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1239,7 +1398,7 @@ func TestReviewReturnBoundsBlockedLiveDeliveryAndPublishesFailure(t *testing.T) 
 			return deadlineExceededTestContext{Context: parent, done: done}, func() {}
 		},
 	}
-	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "review-return-blocked-delivery", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "delivery must be bounded"}}}
+	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "review-return-blocked-delivery", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, ReviewPass: validReturnedReviewPass(), Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "delivery must be bounded"}}}
 
 	result, err := authority.Apply(ctx, "project", request)
 	if err != nil {
@@ -1320,7 +1479,7 @@ func TestReviewReturnRejectsFailedAggregateGateFromPriorReviewEpoch(t *testing.T
 	}
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
 	d.operationRuntime = runtime
-	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "stale-gate-return", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "stale finding"}}})
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "stale-gate-return", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, ReviewPass: validReturnedReviewPass(), Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "stale finding"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1352,13 +1511,14 @@ func TestReviewReturnReplayConvergesAfterReviewLeaseReleaseFailure(t *testing.T)
 		return err
 	}
 	request := protocol.OrchestrationIntentRequest{
-		Scope:     domain.ProjectOrchestrationScope(),
-		Kind:      protocol.OrchestrationIntentReviewReturn,
-		IntentKey: "review-return-release-retry",
-		ActorID:   "orchestrator",
-		IssueIDs:  []string{issueID},
-		RepoDir:   repoDir,
-		Findings:  []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "clean up the review lease on replay"}},
+		Scope:      domain.ProjectOrchestrationScope(),
+		Kind:       protocol.OrchestrationIntentReviewReturn,
+		IntentKey:  "review-return-release-retry",
+		ActorID:    "orchestrator",
+		IssueIDs:   []string{issueID},
+		RepoDir:    repoDir,
+		ReviewPass: validReturnedReviewPass(),
+		Findings:   []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "clean up the review lease on replay"}},
 	}
 
 	first, err := authority.Apply(ctx, "project", request)
@@ -1449,6 +1609,7 @@ func TestReviewReturnRestartConvergesAfterRealStartTransitionAndDaemonReplay(t *
 		ActorID:       "orchestrator",
 		IssueIDs:      []string{issueID},
 		RepoDir:       repoDir,
+		ReviewPass:    validReturnedReviewPass(),
 		RestartWorker: true,
 		Findings:      []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "resume with durable finding"}},
 	}
@@ -1557,6 +1718,7 @@ func TestReviewReturnRestartReplaySurfacesDelayedTerminalFailureOutsideReviewQue
 	request := protocol.OrchestrationIntentRequest{
 		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn,
 		IntentKey: "review-return-delayed-failure", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
+		ReviewPass:    validReturnedReviewPass(),
 		RestartWorker: true, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "surface delayed failure"}},
 	}
 	first, err := authority.Apply(ctx, "project", request)
@@ -1618,6 +1780,7 @@ func TestReviewReturnDoesNotReportTerminalFailedRestartAsSubmitted(t *testing.T)
 	request := protocol.OrchestrationIntentRequest{
 		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn,
 		IntentKey: "review-return-failed", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
+		ReviewPass:    validReturnedReviewPass(),
 		RestartWorker: true, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "retry safely"}},
 	}
 
@@ -1658,13 +1821,14 @@ func TestReviewIntentLeavesForeignOwnedWorkUntouched(t *testing.T) {
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
 
 	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{
-		Scope:     domain.ProjectOrchestrationScope(),
-		Kind:      protocol.OrchestrationIntentReviewReturn,
-		IntentKey: "foreign-review",
-		ActorID:   "orchestrator",
-		IssueIDs:  []string{issueID},
-		RepoDir:   repoDir,
-		Findings:  []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "must not deliver"}},
+		Scope:      domain.ProjectOrchestrationScope(),
+		Kind:       protocol.OrchestrationIntentReviewReturn,
+		IntentKey:  "foreign-review",
+		ActorID:    "orchestrator",
+		IssueIDs:   []string{issueID},
+		RepoDir:    repoDir,
+		ReviewPass: validReturnedReviewPass(),
+		Findings:   []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "must not deliver"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1741,6 +1905,7 @@ func TestReviewRestartSubmissionIgnoresUntrustedIntentConflict(t *testing.T) {
 	request := protocol.OrchestrationIntentRequest{
 		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn,
 		IntentKey: "untrusted-restart", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
+		ReviewPass:    validReturnedReviewPass(),
 		RestartWorker: true, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "real finding"}},
 	}
 	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
@@ -1812,15 +1977,15 @@ func TestReviewAcceptTrustsDecisionOverInternalReviewArtifactWithoutTreatingArti
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reopened.Failed) != 0 || len(reopened.Closed) != 1 || reopened.Closed[0] != issueID {
-		t.Fatalf("reopened retry = %+v, want current-state authoritative close", reopened)
+	if got := reopened.Failed[issueID]; !strings.Contains(got, "accepted review epoch no longer matches current admission") || len(reopened.Closed) != 0 {
+		t.Fatalf("reopened retry = %+v, want stale accepted epoch rejection", reopened)
 	}
 	task, err = client.GetWithRuntime(ctx, "project", issueID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task.Status != domain.StatusDone {
-		t.Fatalf("reopened review status = %s, want done after same-key recovery", task.Status)
+	if task.Status != domain.StatusOpen {
+		t.Fatalf("reopened review status = %s, want open after stale acceptance rejection", task.Status)
 	}
 }
 
@@ -1952,7 +2117,7 @@ func TestReviewAcceptSameIntentRecoversAfterCloseFailure(t *testing.T) {
 		Type:          domain.IssueEventReviewCompleted,
 		Source:        "daemon-orchestration",
 		SourceCommand: string(protocol.OrchestrationIntentReviewReturn),
-		Payload:       map[string]any{"actor_id": "orchestrator", "intent_key": "newer-return", "outcome": "returned"},
+		Payload:       map[string]any{"actor_id": "orchestrator", "actor_kind": domain.ReviewerOwnerKindOrchestrator, "intent_key": "newer-return", "outcome": "returned"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -2013,7 +2178,21 @@ func TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion(t *t
 	}
 	request := protocol.OrchestrationIntentRequest{Scope: rootedScope, Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-review-batch", ActorID: "orchestrator", IssueIDs: ids, RepoDir: repoDir}
 	authority := daemonOrchestrationAuthority{daemon: d}
-	if err := authority.recordReviewOutcome(ctx, "project", ids[0], request, "accepted", ""); err != nil {
+	admission, err := client.CaptureReviewAdmissionPin(ctx, ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", ids[0], issues.OwnershipClaimParams{
+		OwnerID: request.ActorID, OwnerKind: domain.ReviewerOwnerKindOrchestrator, Purpose: domain.CoordinationLeaseReview,
+		ExpectedReviewAdmission: &admission, ExpectedParentIssueID: rootID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	params := issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
+		Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request), "review_epoch_event_id": admission.ReviewEpochEventID},
+	}
+	if _, err := client.AppendIssueObservationEventWithReviewAdmission(ctx, ids[0], params, admission, rootID, request.ActorID); err != nil {
 		t.Fatal(err)
 	}
 	result, err := authority.Apply(ctx, "project", request)
@@ -2086,8 +2265,8 @@ func TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState(t *tes
 	if task.Status != domain.StatusInReview {
 		t.Fatalf("failed integration task = %+v, want review state preserved", task)
 	}
-	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease != nil {
-		t.Fatalf("failed integration review lease = %+v, want released after durable acceptance", lease)
+	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease == nil || !(domain.ReviewerIdentity{OwnerID: "orchestrator", OwnerKind: domain.ReviewerOwnerKindOrchestrator}).Matches(lease.OwnerID, lease.OwnerKind) {
+		t.Fatalf("failed integration review lease = %+v, want accepted reviewer authority retained", lease)
 	}
 	reviewEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
 	if err != nil {
@@ -2186,7 +2365,7 @@ func TestReviewAcceptRetryRejectsBranchMutationAfterDurableAcceptance(t *testing
 	}
 }
 
-func TestReviewAcceptTerminalCloseRejectsEvidenceMutationAfterLeaseRelease(t *testing.T) {
+func TestReviewAcceptTerminalCloseBlocksEvidenceMutationWhileReviewerLeaseIsFenced(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
@@ -2210,19 +2389,23 @@ func TestReviewAcceptTerminalCloseRejectsEvidenceMutationAfterLeaseRelease(t *te
 	}
 	mutated := mustWorkerEvidencePayload(t)
 	mutated["summary"] = "new evidence after review acceptance"
-	d.reviewLeaseReleasedBeforeClose = func(hookCtx context.Context, _, releasedIssueID string) error {
-		d.reviewLeaseReleasedBeforeClose = nil
-		_, err := client.AppendIssueObservationEvent(hookCtx, releasedIssueID, issues.IssueObservationEventParams{
+	var mutationErr error
+	d.reviewLeaseFencedBeforeClose = func(hookCtx context.Context, _, releasedIssueID string) error {
+		d.reviewLeaseFencedBeforeClose = nil
+		_, mutationErr = client.AppendIssueObservationEvent(hookCtx, releasedIssueID, issues.IssueObservationEventParams{
 			Type: domain.IssueEventEvidenceSubmitted, Source: "late-worker", Payload: mutated,
 		})
-		return err
+		return nil
 	}
 	retried, err := d.orchestrationAuthority().Apply(ctx, "project", request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failure := retried.Failed[issueID]; !strings.Contains(failure, "reviewed evidence changed") || !strings.Contains(failure, "authoritative close") {
-		t.Fatalf("post-release evidence mutation = %+v, want terminal close revalidation failure", retried)
+	if !errors.Is(mutationErr, domain.ErrConflict) {
+		t.Fatalf("fenced evidence mutation error = %v, want conflict", mutationErr)
+	}
+	if failure := retried.Failed[issueID]; !strings.Contains(failure, "authoritative close") || strings.Contains(failure, "reviewed evidence changed") {
+		t.Fatalf("fenced evidence mutation = %+v, want unchanged evidence to reach authoritative close", retried)
 	}
 	task, err := client.GetWithRuntime(ctx, "project", issueID)
 	if err != nil {
@@ -2386,7 +2569,7 @@ func TestReviewReplayAndAcceptShareObservedAtEvidenceOrdering(t *testing.T) {
 	}
 }
 
-func TestReviewAcceptReleasesLeaseBeforeAcceptedInternalReviewClose(t *testing.T) {
+func TestReviewAcceptConsumesReviewerLeaseWithAcceptedInternalReviewClose(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
@@ -2444,8 +2627,8 @@ func TestReviewAcceptReleasesLeaseBeforeAcceptedInternalReviewClose(t *testing.T
 			closeID = event.ID
 		}
 	}
-	if acceptedID == 0 || releaseID <= acceptedID || closeID <= releaseID {
-		t.Fatalf("event order accepted=%d release=%d close=%d, want accepted < review release < close", acceptedID, releaseID, closeID)
+	if acceptedID == 0 || releaseID != 0 || closeID <= acceptedID {
+		t.Fatalf("event order accepted=%d release=%d close=%d, want accepted < atomic lease-consuming close without prior release", acceptedID, releaseID, closeID)
 	}
 
 	replayed, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-internal-review", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir})
@@ -2489,12 +2672,13 @@ func TestReviewAcceptFenceBlocksSecondDaemonReturnBetweenReleaseAndClose(t *test
 	acceptDaemon.git = git.NewClient(runner, slog.Default())
 	acceptDaemon.worktreeAdapter = &worktreeServiceAdapter{manager: git.NewWorktreeManager(runner, repoDir, slog.Default()), logger: slog.Default()}
 	var competing protocol.OrchestrationIntentResult
-	acceptDaemon.reviewLeaseReleasedBeforeClose = func(hookCtx context.Context, projectID, releasedIssueID string) error {
+	acceptDaemon.reviewLeaseFencedBeforeClose = func(hookCtx context.Context, projectID, releasedIssueID string) error {
 		var hookErr error
 		competing, hookErr = returnDaemon.orchestrationAuthority().Apply(hookCtx, projectID, protocol.OrchestrationIntentRequest{
 			Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn,
 			IntentKey: "second-daemon-return", ActorID: "second-orchestrator", IssueIDs: []string{releasedIssueID}, RepoDir: repoDir,
-			Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "late finding"}},
+			ReviewPass: validReturnedReviewPass(),
+			Findings:   []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "late finding"}},
 		})
 		return hookErr
 	}
@@ -2536,14 +2720,21 @@ func TestReviewAcceptResumesDurablyAcceptedIntentWithoutReacquiringLease(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := client.Update(ctx, issueID, domain.StatusOpen); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
 	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "resume-accepted-internal-review", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	reviewEpochEventID := latestReviewEpochEventID(t, ctx, client, issueID)
 	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview}); err != nil {
 		t.Fatal(err)
 	}
 	for _, event := range []issues.IssueObservationEventParams{
 		{Type: domain.IssueEventInvestigationDisposition, Source: "test", Payload: map[string]any{"disposition": "internal_review"}},
 		{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "accepted", "summary": "parent consumed findings"}},
-		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept), Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request)}},
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept), Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": reviewEpochEventID, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request)}},
 	} {
 		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
 			t.Fatal(err)
@@ -2599,18 +2790,25 @@ func TestReviewAcceptResumesDurableEvidenceFenceAfterCloseCrash(t *testing.T) {
 		t.Fatalf("evidence pin = %+v err=%v", evidencePin, err)
 	}
 	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "resume-evidence-fence", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission, ReviewSourceOID: "reviewed-source-oid"}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
 		Payload: map[string]any{
-			"outcome": "accepted", "actor_id": request.ActorID, "intent_key": request.IntentKey,
+			"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": admission.ReviewEpochEventID, "intent_key": request.IntentKey,
 			"request_fingerprint": reviewRequestFingerprint(request), "reviewed_source_oid": "reviewed-source-oid",
 			"reviewed_evidence_source": evidencePin.Source, "reviewed_evidence_event_id": evidencePin.EventID,
-			"reviewed_evidence_digest": evidencePin.Digest,
+			"reviewed_evidence_seq": evidencePin.Seq, "reviewed_evidence_digest": evidencePin.Digest,
 		},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.BeginReviewEvidenceClose(ctx, issueID, evidencePin); err != nil {
+	if _, err := client.BeginReviewEvidenceClose(ctx, issueID, evidencePin, request.ActorID); err != nil {
 		t.Fatal(err)
 	}
 

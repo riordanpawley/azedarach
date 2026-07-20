@@ -173,6 +173,7 @@ type TaskGraphReadiness struct {
 	Revision               uint64                                `json:"revision,omitempty"`
 	Source                 protocol.MaterializedSnapshotMetadata `json:"source,omitempty"`
 	RootIssueID            string                                `json:"root_issue_id"`
+	RootBlockers           []string                              `json:"root_blockers,omitempty"`
 	Capacity               TaskCapacitySummary                   `json:"capacity"`
 	Runnable               []string                              `json:"runnable"`
 	NestedRoots            []TaskNestedRoot                      `json:"nested_roots,omitempty"`
@@ -1055,6 +1056,21 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 		HistoricalAuthorization: opts.HistoricalAuthorization,
 	}, &out); err != nil {
 		return TaskCloseResult{}, err
+	}
+	expectedStatus := string(domain.StatusDone)
+	if opts.CloseOutcome == domain.IssueCloseCancelled {
+		expectedStatus = string(domain.StatusCancelled)
+	}
+	if out.TaskID != parsedTaskID.String() || out.Status != expectedStatus || out.Revision == 0 {
+		return TaskCloseResult{}, fmt.Errorf(
+			"%s returned invalid successful response: task_id=%q status=%q revision=%d, want task_id=%q status=%q with nonzero revision",
+			CommandTaskClose,
+			out.TaskID,
+			out.Status,
+			out.Revision,
+			parsedTaskID,
+			expectedStatus,
+		)
 	}
 	return out, nil
 }

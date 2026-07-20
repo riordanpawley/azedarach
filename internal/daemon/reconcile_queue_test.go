@@ -152,8 +152,8 @@ func TestReconcileQueueReprioritizesPendingJobOrdering(t *testing.T) {
 		Priority: reconcilePriorityBackground,
 		Reason:   "target-background",
 		Work: func(context.Context) (string, error) {
-			appendOrder("target")
-			return "target", nil
+			appendOrder("target-background")
+			return "target-background", nil
 		},
 	})
 	if err != nil {
@@ -165,8 +165,8 @@ func TestReconcileQueueReprioritizesPendingJobOrdering(t *testing.T) {
 		Priority: reconcilePriorityManual,
 		Reason:   "target-manual",
 		Work: func(context.Context) (string, error) {
-			t.Fatal("reprioritized pending job should reuse existing work")
-			return "", nil
+			appendOrder("target-manual")
+			return "target-manual", nil
 		},
 	})
 	if err != nil {
@@ -183,16 +183,25 @@ func TestReconcileQueueReprioritizesPendingJobOrdering(t *testing.T) {
 
 	close(releaseBusy)
 
-	for _, sub := range []reconcileQueueSubmission[string]{busy, later, target, targetManual} {
+	for _, sub := range []reconcileQueueSubmission[string]{busy, later} {
 		if _, err := sub.Wait(context.Background()); err != nil {
 			t.Fatalf("wait submission: %v", err)
+		}
+	}
+	for _, sub := range []reconcileQueueSubmission[string]{target, targetManual} {
+		result, err := sub.Wait(context.Background())
+		if err != nil {
+			t.Fatalf("wait reprioritized submission: %v", err)
+		}
+		if result.Value != "target-manual" {
+			t.Fatalf("reprioritized result = %q, want current manual work", result.Value)
 		}
 	}
 
 	orderMu.Lock()
 	gotOrder := append([]string(nil), order...)
 	orderMu.Unlock()
-	wantOrder := []string{"busy", "target", "later"}
+	wantOrder := []string{"busy", "target-manual", "later"}
 	if len(gotOrder) != len(wantOrder) {
 		t.Fatalf("execution order = %v, want %v", gotOrder, wantOrder)
 	}

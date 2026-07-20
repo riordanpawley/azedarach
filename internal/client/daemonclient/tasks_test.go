@@ -302,8 +302,9 @@ func TestTaskGraphReadinessDecodesWorkerObservations(t *testing.T) {
 				t.Fatalf("actor_id = %q, want agent-a", body.ActorID)
 			}
 			return responseWithJSON(t, req, TaskGraphReadiness{
-				RootIssueID: "az-root",
-				Runnable:    []string{"az-1"},
+				RootIssueID:  "az-root",
+				RootBlockers: []string{"az-blocker"},
+				Runnable:     []string{"az-1"},
 				NestedRoots: []TaskNestedRoot{{
 					IssueID:    "az-nested",
 					Status:     string(domain.StatusOpen),
@@ -335,6 +336,9 @@ func TestTaskGraphReadinessDecodesWorkerObservations(t *testing.T) {
 	}
 	if len(ready.WorkerObservations) != 1 {
 		t.Fatalf("worker observations = %+v", ready.WorkerObservations)
+	}
+	if len(ready.RootBlockers) != 1 || ready.RootBlockers[0] != "az-blocker" {
+		t.Fatalf("root blockers = %+v", ready.RootBlockers)
 	}
 	if len(ready.NestedRoots) != 1 || ready.NestedRoots[0].IssueID != "az-nested" {
 		t.Fatalf("nested roots = %+v", ready.NestedRoots)
@@ -1103,8 +1107,9 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 						t.Fatalf("request body = %+v", body)
 					}
 					return responseWithJSON(t, req, TaskCloseResult{
-						TaskID: "az-3",
-						Status: string(domain.StatusDone),
+						TaskID:   "az-3",
+						Status:   string(domain.StatusDone),
+						Revision: 1,
 					}), nil
 				default:
 					t.Fatalf("command = %q, want %q", req.Command, CommandTaskClose)
@@ -1140,8 +1145,9 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 					t.Fatalf("request body = %+v, want cancelled close without integration", body)
 				}
 				return responseWithJSON(t, req, TaskCloseResult{
-					TaskID: "az-9",
-					Status: string(domain.StatusCancelled),
+					TaskID:   "az-9",
+					Status:   string(domain.StatusCancelled),
+					Revision: 1,
 				}), nil
 			},
 		}
@@ -1218,6 +1224,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 					return responseWithJSON(t, req, TaskCloseResult{
 						TaskID:          "az-3",
 						Status:          string(domain.StatusDone),
+						Revision:        1,
 						SessionStopped:  true,
 						WorktreeRemoved: true,
 					}), nil
@@ -1260,6 +1267,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				return responseWithJSON(t, req, TaskCloseResult{
 					TaskID:                 "az-3",
 					Status:                 string(domain.StatusDone),
+					Revision:               1,
 					IntegrationRequested:   true,
 					Integrated:             true,
 					IntegratedSourceBranch: "feature/az-3",
@@ -1278,6 +1286,57 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 		if got.TaskID != "az-3" || got.Status != string(domain.StatusDone) || !got.WorktreeForced || !got.IntegrationRequested || !got.Integrated {
 			t.Fatalf("close result = %+v", got)
+		}
+	})
+
+	t.Run("close task rejects empty success response", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandTaskClose {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskClose)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		_, err := client.CloseTask(context.Background(), "az-3", TaskStatusOptions{IntegrateBeforeClose: true})
+		if err == nil || !strings.Contains(err.Error(), "invalid successful response") {
+			t.Fatalf("CloseTask error = %v, want invalid successful response", err)
+		}
+	})
+
+	t.Run("close task rejects nonterminal success response", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				return responseWithJSON(t, req, TaskCloseResult{TaskID: "az-3", Status: string(domain.StatusInReview)}), nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		_, err := client.CloseTask(context.Background(), "az-3", TaskStatusOptions{IntegrateBeforeClose: true})
+		if err == nil || !strings.Contains(err.Error(), "invalid successful response") {
+			t.Fatalf("CloseTask error = %v, want invalid successful response", err)
+		}
+	})
+
+	t.Run("close task rejects terminal response without mutation revision", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				return responseWithJSON(t, req, TaskCloseResult{TaskID: "az-3", Status: string(domain.StatusDone)}), nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		_, err := client.CloseTask(context.Background(), "az-3", TaskStatusOptions{IntegrateBeforeClose: true})
+		if err == nil || !strings.Contains(err.Error(), "invalid successful response") {
+			t.Fatalf("CloseTask error = %v, want invalid successful response", err)
 		}
 	})
 
@@ -1357,7 +1416,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 					if body.TaskID != "az-3" || !body.ForceWorktree {
 						t.Fatalf("close body = %+v, want force close for az-3", body)
 					}
-					return responseWithJSON(t, req, TaskCloseResult{TaskID: "az-3", Status: string(domain.StatusDone), WorktreeForced: true}), nil
+					return responseWithJSON(t, req, TaskCloseResult{TaskID: "az-3", Status: string(domain.StatusDone), WorktreeForced: true, Revision: 1}), nil
 				default:
 					t.Fatalf("unexpected command = %q", req.Command)
 					return protocol.ResponseEnvelope{}, nil
@@ -1444,7 +1503,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 					if !body.IgnoreAhead {
 						t.Fatalf("close body = %+v, want ignore_ahead", body)
 					}
-					return responseWithJSON(t, req, TaskCloseResult{TaskID: "az-3", Status: string(domain.StatusDone)}), nil
+					return responseWithJSON(t, req, TaskCloseResult{TaskID: "az-3", Status: string(domain.StatusDone), Revision: 1}), nil
 				default:
 					t.Fatalf("unexpected command = %q", req.Command)
 					return protocol.ResponseEnvelope{}, nil

@@ -134,18 +134,24 @@ type taskClosePreflightRequest struct {
 }
 
 type taskCloseRequest struct {
-	TaskID                    string                                     `json:"task_id"`
-	ForceWorktree             bool                                       `json:"force_worktree,omitempty"`
-	IgnoreAhead               bool                                       `json:"ignore_ahead,omitempty"`
-	IntegrateBeforeClose      bool                                       `json:"integrate_before_close,omitempty"`
-	CloseCleanChildren        bool                                       `json:"close_clean_children,omitempty"`
-	AllowActiveSession        bool                                       `json:"allow_active_session,omitempty"`
-	CloseOutcome              string                                     `json:"closed_outcome,omitempty"`
-	ExpectedSourceOID         string                                     `json:"expected_source_oid,omitempty"`
-	ExpectedBaseOID           string                                     `json:"expected_base_oid,omitempty"`
-	ExpectedReviewEvidence    *issues.ReviewEvidencePin                  `json:"expected_review_evidence,omitempty"`
-	HistoricalAuthorization   *domain.HistoricalPublicationAuthorization `json:"historical_authorization,omitempty"`
-	PromoteBacklogBeforeClose bool                                       `json:"-"`
+	TaskID                                 string                                     `json:"task_id"`
+	ForceWorktree                          bool                                       `json:"force_worktree,omitempty"`
+	IgnoreAhead                            bool                                       `json:"ignore_ahead,omitempty"`
+	IntegrateBeforeClose                   bool                                       `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren                     bool                                       `json:"close_clean_children,omitempty"`
+	AllowActiveSession                     bool                                       `json:"allow_active_session,omitempty"`
+	CloseOutcome                           string                                     `json:"closed_outcome,omitempty"`
+	ExpectedSourceOID                      string                                     `json:"expected_source_oid,omitempty"`
+	ExpectedBaseOID                        string                                     `json:"expected_base_oid,omitempty"`
+	ExpectedReviewEvidence                 *issues.ReviewEvidencePin                  `json:"expected_review_evidence,omitempty"`
+	ExpectedReviewerID                     string                                     `json:"expected_reviewer_id,omitempty"`
+	ExpectedReviewerKind                   string                                     `json:"expected_reviewer_kind,omitempty"`
+	ExpectedReviewEpochEventID             int64                                      `json:"expected_review_epoch_event_id,omitempty"`
+	ExpectedAcceptedReviewEventID          int64                                      `json:"expected_accepted_review_event_id,omitempty"`
+	ExpectedPublicationOperationID         string                                     `json:"expected_publication_operation_id,omitempty"`
+	ExpectedAcceptedPublicationOperationID string                                     `json:"expected_accepted_publication_operation_id,omitempty"`
+	HistoricalAuthorization                *domain.HistoricalPublicationAuthorization `json:"historical_authorization,omitempty"`
+	PromoteBacklogBeforeClose              bool                                       `json:"-"`
 }
 
 type taskCloseExpectedBaseStaleError struct {
@@ -230,6 +236,7 @@ type taskGraphReadinessResult struct {
 	Revision               uint64                                `json:"revision,omitempty"`
 	Source                 protocol.MaterializedSnapshotMetadata `json:"source,omitempty"`
 	RootIssueID            string                                `json:"root_issue_id"`
+	RootBlockers           []string                              `json:"root_blockers,omitempty"`
 	Capacity               taskGraphCapacitySummary              `json:"capacity"`
 	Runnable               []string                              `json:"runnable"`
 	NestedRoots            []taskGraphNestedRoot                 `json:"nested_roots,omitempty"`
@@ -387,6 +394,9 @@ type taskFollowOnMergeCandidateItem struct {
 }
 
 func (d *Daemon) sourceForTaskInvariant(invariant daemonInvariantID) daemonInvariantSource {
+	if d != nil && d.taskInvariantSourceOverride != nil {
+		return d.taskInvariantSourceOverride(invariant)
+	}
 	return sourceForInvariant(invariant)
 }
 
@@ -2200,18 +2210,22 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		return result, fmt.Errorf("context risk is high for issue %s: record root_cause, invariant, regression_validation, or a structured risk note before closeout", taskID)
 	}
 	reviewEvidenceFence := ""
-	if cmd.ExpectedReviewEvidence != nil {
-		reviewEvidenceFence, err = issueClient.BeginReviewEvidenceClose(ctx, taskID, *cmd.ExpectedReviewEvidence)
+	reviewAuthority := issues.ReviewPublicationAuthority{
+		Reviewer:                       domain.ReviewerIdentity{OwnerID: cmd.ExpectedReviewerID, OwnerKind: cmd.ExpectedReviewerKind},
+		ReviewEpochEventID:             cmd.ExpectedReviewEpochEventID,
+		AcceptedReviewEventID:          cmd.ExpectedAcceptedReviewEventID,
+		PublicationOperationID:         cmd.ExpectedPublicationOperationID,
+		AcceptedPublicationOperationID: cmd.ExpectedAcceptedPublicationOperationID,
+	}
+	if strings.TrimSpace(cmd.ExpectedPublicationOperationID) != "" {
+		if err = issueClient.BeginReviewPublicationClose(ctx, taskID, reviewAuthority, cmd.ExpectedReviewEvidence); err != nil {
+			return result, fmt.Errorf("publication review close authority for issue %s: %w", taskID, err)
+		}
+	} else if cmd.ExpectedReviewEvidence != nil {
+		reviewEvidenceFence, err = issueClient.BeginReviewEvidenceClose(ctx, taskID, *cmd.ExpectedReviewEvidence, cmd.ExpectedReviewerID)
 		if err != nil {
 			return result, fmt.Errorf("reviewed evidence close fence for issue %s: %w", taskID, err)
 		}
-		defer func() {
-			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			defer cancel()
-			if releaseErr := issueClient.ReleaseReviewEvidenceClose(releaseCtx, taskID, reviewEvidenceFence); releaseErr != nil && d.cfg.Logger != nil {
-				d.cfg.Logger.Error("release review evidence close fence", "project_id", projectID, "task_id", taskID, "error", releaseErr)
-			}
-		}()
 	}
 	recordPhase := func(name string, startedAt time.Time, skipped bool) {
 		result.Phases = append(result.Phases, taskClosePhaseTiming{
@@ -2337,8 +2351,12 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 
 	phaseStartedAt = time.Now()
 	var task domain.Task
-	if cmd.ExpectedReviewEvidence != nil {
+	if strings.TrimSpace(cmd.ExpectedPublicationOperationID) != "" {
+		task, err = issueClient.CloseWithRuntimeReviewPublicationAuthority(ctx, projectID, taskID, closeStatus, reviewAuthority, cmd.ExpectedReviewEvidence)
+	} else if cmd.ExpectedReviewEvidence != nil {
 		task, err = issueClient.CloseWithRuntimeReviewEvidenceFence(ctx, projectID, taskID, closeStatus, *cmd.ExpectedReviewEvidence, reviewEvidenceFence)
+	} else if strings.TrimSpace(cmd.ExpectedReviewerID) != "" {
+		task, err = issueClient.CloseWithRuntimeReviewLease(ctx, projectID, taskID, closeStatus, cmd.ExpectedReviewerID)
 	} else {
 		task, err = issueClient.CloseWithRuntime(ctx, projectID, taskID, closeStatus)
 	}
@@ -3022,25 +3040,18 @@ func (d *Daemon) persistTaskCloseIntegrationReceipt(ctx context.Context, project
 	if receipt.TargetID == "" || receipt.SourceBranch == "" || receipt.TargetBranch == "" || receipt.BaseOID == "" || receipt.SourceOID == "" || receipt.TargetOID == "" {
 		return fmt.Errorf("integration result is missing exact typed target, base/source/target branch, or OID")
 	}
-	_, err := issueClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
-		Type:          domain.IssueEventTaskIntegrationCompleted,
-		Source:        "daemon-task-close",
-		SourceCommand: "integrate-before-close",
-		WorktreePath:  strings.TrimSpace(worktreePath),
-		Payload: map[string]any{
-			"project_id":               receipt.ProjectID,
-			"source_branch":            receipt.SourceBranch,
-			"target_branch":            receipt.TargetBranch,
-			"integrated":               receipt.Integrated,
-			"configured_base_target":   receipt.ConfiguredBaseTarget,
-			"target_id":                receipt.TargetID,
-			"base_oid":                 receipt.BaseOID,
-			"source_oid":               receipt.SourceOID,
-			"target_oid":               receipt.TargetOID,
-			"publication_operation_id": receipt.PublicationOperationID,
-		},
-	})
-	if err != nil {
+	if _, err := issueClient.AppendTaskIntegrationReceiptIfAbsent(ctx, taskID, issues.TaskIntegrationReceipt{
+		ProjectID:              receipt.ProjectID,
+		SourceBranch:           receipt.SourceBranch,
+		TargetBranch:           receipt.TargetBranch,
+		Integrated:             receipt.Integrated,
+		ConfiguredBaseTarget:   receipt.ConfiguredBaseTarget,
+		TargetID:               receipt.TargetID,
+		BaseOID:                receipt.BaseOID,
+		SourceOID:              receipt.SourceOID,
+		TargetOID:              receipt.TargetOID,
+		PublicationOperationID: receipt.PublicationOperationID,
+	}, worktreePath); err != nil {
 		return fmt.Errorf("persist exact integration receipt: %w", err)
 	}
 	return nil
@@ -5795,16 +5806,24 @@ func (d *Daemon) taskGraphReadinessForActor(ctx context.Context, projectID, root
 	rootIssueID = strings.TrimSpace(rootIssueID)
 	actorID = strings.TrimSpace(actorID)
 	cacheKey := taskGraphReadinessLoadKey(projectID, rootIssueID, actorID)
+	var currentDeliveryCursor uint64
+	if d.materializedReadsEnabled() {
+		_, source, err := d.projectReadSnapshotCurrent(ctx, projectID)
+		if err != nil {
+			return taskGraphReadinessResult{}, fmt.Errorf("refresh issue graph readiness projection: %w", err)
+		}
+		currentDeliveryCursor = source.DeliveryCursor
+	}
 
 	for {
 		revision := d.currentRevision(projectID)
-		loadKey := fmt.Sprintf("%s\x00%d", cacheKey, revision)
+		loadKey := fmt.Sprintf("%s\x00%d\x00%d", cacheKey, revision, currentDeliveryCursor)
 
 		d.taskGraphReadinessMu.Lock()
 		if d.taskGraphReadinessCache == nil {
 			d.taskGraphReadinessCache = map[string]taskGraphReadinessCacheEntry{}
 		}
-		if cached, ok := d.taskGraphReadinessCache[cacheKey]; ok && cached.revision == revision && (cached.expiresAt.IsZero() || time.Now().Before(cached.expiresAt)) {
+		if cached, ok := d.taskGraphReadinessCache[cacheKey]; ok && cached.revision == revision && cached.result.Source.DeliveryCursor == currentDeliveryCursor && (cached.expiresAt.IsZero() || time.Now().Before(cached.expiresAt)) {
 			d.taskGraphReadinessMu.Unlock()
 			if !d.materializedReadsEnabled() {
 				if err := d.validateTaskGraphRuntime(ctx, projectID, cached.result.scopeIssueIDs, revision); err != nil && d.cfg.Logger != nil {
@@ -5923,8 +5942,8 @@ func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID,
 	)
 	if d.materializedReadsEnabled() {
 		var materialized []domain.Task
-		materialized, source, err = d.projectReadSnapshot(projectID)
-		tasks = materializedParentChildClosure(materialized, rootIssueID)
+		materialized, source, err = d.projectReadSnapshotCurrent(ctx, projectID)
+		tasks = materializedRootedGraphContext(materialized, rootIssueID)
 	} else {
 		tasks, err = d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootIssueID)
 	}
@@ -6169,11 +6188,11 @@ func (d *Daemon) taskGraphReadinessCacheExpiry(projectID, rootIssueID, actorID s
 
 func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectID, rootIssueID string) ([]domain.Task, error) {
 	if d.materializedReadsEnabled() {
-		tasks, _, err := d.projectReadSnapshot(projectID)
+		tasks, _, err := d.projectReadSnapshotCurrent(ctx, projectID)
 		if err != nil {
 			return nil, err
 		}
-		return materializedParentChildClosure(tasks, rootIssueID), nil
+		return materializedRootedGraphContext(tasks, rootIssueID), nil
 	}
 	// Explicit compatibility exception: production starts project materializers
 	// before serving commands. This direct indexed read exists only for embedded
@@ -6196,6 +6215,26 @@ func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectI
 		}
 	}
 	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
+}
+
+func (d *Daemon) rootedOrchestrationAdmission(ctx context.Context, projectID, rootIssueID string) (domain.RootedOrchestrationAdmission, error) {
+	source := d.sourceForTaskInvariant(daemonInvariantOrchestrationRootBlockerGate)
+	if source != daemonInvariantSourceProjection {
+		return domain.RootedOrchestrationAdmission{}, fmt.Errorf("unsupported rooted dependency admission invariant source: %s", source)
+	}
+	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootIssueID)
+	if err != nil {
+		return domain.RootedOrchestrationAdmission{}, fmt.Errorf("refresh rooted orchestration graph: %w", err)
+	}
+	rootID, byID, _, err := daemonTaskGraphIndexes(rootIssueID, tasks)
+	if err != nil {
+		return domain.RootedOrchestrationAdmission{}, err
+	}
+	return domain.AssessRootedOrchestrationAdmission(rootID, byID)
+}
+
+func rootedOrchestrationBlockedMessage(admission domain.RootedOrchestrationAdmission) string {
+	return fmt.Sprintf("root orchestration blocked: requested=%s root=%s blockers=%s", admission.RequestedRootID, admission.BlockingRootID, strings.Join(admission.Blockers, ","))
 }
 
 func (result *taskGraphReadinessResult) applySessionStartProgress(progressByIssue map[string]taskGraphSessionStartProgress) {
@@ -6265,6 +6304,11 @@ func daemonTaskGraphReadinessFromIndexesWithCompletionEvidence(rootID naming.Iss
 
 func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, actorID string, now time.Time, completionEvidence map[string]taskDurableCompletionEvidence) (taskGraphReadinessResult, error) {
 	rootBacklog := byID[rootID].IssueFacts().LifecycleState == domain.IssueWorkflowBacklog
+	admission, err := domain.AssessRootedOrchestrationAdmission(rootID, byID)
+	if err != nil {
+		return taskGraphReadinessResult{}, err
+	}
+	rootBlockers := admission.Blockers
 	leafIDs := daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children)
 	leaves := make([]string, 0, len(leafIDs))
 	for _, id := range leafIDs {
@@ -6276,11 +6320,28 @@ func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID na
 	}
 	sort.Strings(leaves)
 	result := taskGraphReadinessResult{
-		RootIssueID: rootID.String(),
-		Runnable:    make([]string, 0, len(leaves)),
-		NestedRoots: daemonTaskGraphNestedRootSummaries(rootID, byID, children, actorID, now),
-		Active:      make([]string, 0),
-		Blocked:     make(map[string]string),
+		RootIssueID:  rootID.String(),
+		RootBlockers: append([]string(nil), rootBlockers...),
+		Runnable:     make([]string, 0, len(leaves)),
+		NestedRoots:  daemonTaskGraphNestedRootSummaries(rootID, byID, children, actorID, now),
+		Active:       make([]string, 0),
+		Blocked:      make(map[string]string),
+	}
+	if len(rootBlockers) > 0 {
+		for i := range result.NestedRoots {
+			reason := "root waiting on " + strings.Join(rootBlockers, ",")
+			if nestedID, err := naming.ParseIssueID(result.NestedRoots[i].IssueID); err == nil {
+				if local := domain.UnresolvedBlockers(byID[nestedID], byID); len(local) > 0 {
+					reason += "; issue waiting on " + strings.Join(local, ",")
+				}
+			}
+			result.Blocked[result.NestedRoots[i].IssueID] = reason
+			result.NestedRoots[i].Status = "blocked_root_dependency"
+			result.NestedRoots[i].Classification = string(domain.OrchestrationCandidateBlocked)
+			result.NestedRoots[i].ExclusionReasons = uniqueNonEmpty(append(result.NestedRoots[i].ExclusionReasons, "root-dependency-blocked"))
+			result.NestedRoots[i].FallbackPolicy = "wait_for_root_blockers"
+			result.NestedRoots[i].Advice = fmt.Sprintf("settle root %s blockers before starting nested root %s: %s", rootID, result.NestedRoots[i].IssueID, strings.Join(rootBlockers, ","))
+		}
 	}
 	if rootBacklog {
 		for i := range result.NestedRoots {
@@ -6306,11 +6367,19 @@ func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID na
 			result.Active = append(result.Active, idRaw)
 			continue
 		}
+		blockers := daemonTaskGraphUnresolvedBlockers(task, byID)
+		if len(rootBlockers) > 0 && id != rootID {
+			reason := "root waiting on " + strings.Join(rootBlockers, ",")
+			if len(blockers) > 0 {
+				reason += "; issue waiting on " + strings.Join(blockers, ",")
+			}
+			result.Blocked[idRaw] = reason
+			continue
+		}
 		if rootBacklog && id != rootID {
 			result.Blocked[idRaw] = "lifecycle-backlog"
 			continue
 		}
-		blockers := daemonTaskGraphUnresolvedBlockers(task, byID)
 		if daemonTaskStaleCloseableCandidate(task, completionEvidence[task.ID.String()]) {
 			continue
 		}
@@ -6760,6 +6829,7 @@ func daemonTaskGraphCapacitySummary(ready taskGraphReadinessResult) taskGraphCap
 }
 
 func cloneTaskGraphReadinessResult(result taskGraphReadinessResult) taskGraphReadinessResult {
+	result.RootBlockers = append([]string(nil), result.RootBlockers...)
 	result.Runnable = append([]string(nil), result.Runnable...)
 	result.Pending = append([]taskGraphPendingStart(nil), result.Pending...)
 	result.Active = append([]string(nil), result.Active...)
@@ -7595,22 +7665,7 @@ func daemonTaskGraphRequiresNestedRootOrchestration(root, id naming.IssueID, tas
 }
 
 func daemonTaskGraphUnresolvedBlockers(task domain.Task, byID map[naming.IssueID]domain.Task) []string {
-	out := make([]string, 0, 4)
-	for _, dep := range task.Dependencies {
-		if dep.Type != domain.DependencyBlocks {
-			continue
-		}
-		depTask, ok := byID[dep.ID]
-		if !ok {
-			out = append(out, dep.ID.String()+"(missing)")
-			continue
-		}
-		if !depTask.IssueClosed() {
-			out = append(out, dep.ID.String())
-		}
-	}
-	sort.Strings(out)
-	return out
+	return domain.UnresolvedBlockers(task, byID)
 }
 
 func daemonTaskGraphActiveSessions(activeIDs []string, byID map[naming.IssueID]domain.Task, progressByIssue map[string]taskGraphSessionStartProgress, captured taskGraphReadinessContext) []taskGraphActiveSession {

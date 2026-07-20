@@ -62,7 +62,15 @@ not substitute a bare `go test ./...` when claiming the safe broad-suite
 contract. Real-database migration checks require explicit
 `AZEDARACH_USER_DB_CLONE` or `AZEDARACH_PROJECT_DB_CLONES` paths to safe
 temporary clones. Configured originals remain refused even if one is supplied
-through a clone variable.
+through a clone variable. The `migration-clone` profile snapshots every supplied
+clone independently for each package before starting package processes, then
+runs those processes in parallel with package-local HOME, config, and default
+database roots. Its status line and v5 report identify the
+`package-isolated-parallel` mode and the exact package-local clone paths. Clone
+authority mappings fail closed for unknown packages, invalid authorities, and
+configured user or project sources without a consuming package. The focused
+contract reproduces the former shared-identity `SQLITE_BUSY` failure before
+proving that concurrent private snapshots succeed without changing the source.
 
 ## Commands
 
@@ -121,7 +129,7 @@ replayed package/test durations are reported but excluded from current pathology
 budgets; the cached profile's current wall time remains budgeted. The raw stream
 remains authoritative.
 
-Every v4 report records `test_result_cache_mode` as `cleared-and-bypassed`,
+Every v5 report records `test_result_cache_mode` as `cleared-and-bypassed`,
 `bypassed`, or `permitted`. The compatibility `cache_mode` field has the same
 test-result meaning. Neither field describes compiled build objects. The
 `build_cache` object separately records its namespace and retention policy,
@@ -134,6 +142,15 @@ The runner writes all artifacts before returning the test command's exit status
 or a budget failure. Do not replace it with a shell pipeline that loses earlier
 failures or reports only the last failing package.
 
+The command root handles interrupt and SIGTERM through context cancellation.
+Managed Go commands join a runner-owned anchor process group. When the direct
+leader exits, the still-live anchor preserves the exact group identity while
+the runner kills surviving descendants, drains lifecycle and output pipes, and
+reaps the anchor. The same sequence handles cancellation and partial startup;
+there is no process-table polling. Temporary private database roots are removed
+only after supervision completes, and cleanup failures are returned rather than
+ignored.
+
 ## Profile semantics
 
 | Profile | Test-result cache | Build-cache namespace | Scope | Purpose |
@@ -143,7 +160,7 @@ failures or reports only the last failing package.
 | `cached` | explicitly permitted | normal / lifecycle owner | `./...` | Measures normal repeat developer feedback; cached packages remain visible in the JSON stream. |
 | `focused` | bypassed with `-count=1` | normal / lifecycle owner | defaults to `./internal/testtiming`; override with repeated `--package` | Fast development checks without pretending to be complete coverage. |
 | `integration` | bypassed with `-count=1` | normal / lifecycle owner | daemon, daemon-process, Git, and tmux tests named `RealProcessProfile…` | Real subprocess and lifecycle contracts only. |
-| `migration-clone` | bypassed with `-count=1` | normal / lifecycle owner | issue, user-store, runtime-state, and daemon migration/repair tests | Fresh, historical-upgrade, rollback, drift, repair, reopen, and clone-isolation execution paths. |
+| `migration-clone` | bypassed with `-count=1` | normal / lifecycle owner | issue, user-store, runtime-state, operations-store, and daemon migration/repair tests in package-isolated parallel processes | Fresh, historical-upgrade, rollback, drift, repair, reopen, and clone-isolation execution paths without sharing mutable clone identity. |
 | `race` | bypassed with `-count=1` | race / lifecycle owner | selected SQLite-clone, daemon-process, and concurrent Git contracts under `-race` | Focused shared-state validation that remains useful on ordinary developer hosts. |
 | `boundary` | bypassed with `-count=1` | normal / lifecycle owner | CLI/TUI executable boundary guards | Thin-client, transport-shim, and session-projection regressions; static graph checks remain in `just check-boundaries`. |
 

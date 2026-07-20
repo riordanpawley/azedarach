@@ -347,6 +347,12 @@ func (d *Daemon) ensureLegacyMailboxObservationProjection(ctx context.Context, p
 	}
 	imported, err := issueClient.CompleteMailboxObservationProjectionCutover(ctx, observations)
 	if err != nil {
+		if errors.Is(err, domain.ErrConflict) {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Info("legacy mailbox observation projection deferred by active review authority", "project_id", projectID)
+			}
+			return nil
+		}
 		return err
 	}
 	if d.cfg.Logger != nil {

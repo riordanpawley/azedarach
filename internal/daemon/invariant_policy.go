@@ -52,6 +52,7 @@ const (
 	daemonInvariantOrchestrationScope           daemonInvariantID = "orchestration.scope_identity"
 	daemonInvariantOrchestrationSingleton       daemonInvariantID = "orchestration.scope_singleton"
 	daemonInvariantOrchestrationRootedBootstrap daemonInvariantID = "orchestration.rooted_bootstrap_delivery"
+	daemonInvariantOrchestrationRootBlockerGate daemonInvariantID = "orchestration.root_dependency_gate"
 	daemonInvariantOrchestrationCompletion      daemonInvariantID = "orchestration.project_completion"
 	daemonInvariantOrchestrationCandidates      daemonInvariantID = "orchestration.project_candidates"
 	daemonInvariantOrchestrationParentWake      daemonInvariantID = "orchestration.parent_continuation"
@@ -112,6 +113,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantTaskReadAfterWrite:           daemonInvariantSourceProjection,
 	daemonInvariantTaskPublicationQueue:         daemonInvariantSourceHybrid,
 	daemonInvariantPublicationEvidence:          daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationRootBlockerGate: daemonInvariantSourceProjection,
 }
 
 func sourceForInvariant(id daemonInvariantID) daemonInvariantSource {

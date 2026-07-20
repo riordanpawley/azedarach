@@ -3,6 +3,7 @@ package testtiming
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/riordanpawley/azedarach/internal/dbpathguard"
+	"github.com/riordanpawley/azedarach/internal/testisolation"
 )
 
 func TestRunWritesCompleteArtifactsBeforeReturningTestFailure(t *testing.T) {
@@ -159,6 +161,42 @@ func TestEnvironment(t *testing.T) {
 	assert.Zero(t, measurement.ExitCode)
 }
 
+func TestRunWritesRefusalArtifactsBeforeOpeningConfiguredOriginalClone(t *testing.T) {
+	home := t.TempDir()
+	configuredOriginal := filepath.Join(home, ".azedarach", "azedarach.db")
+	require.NoError(t, os.MkdirAll(filepath.Dir(configuredOriginal), 0o700))
+	require.NoError(t, os.WriteFile(configuredOriginal, []byte("must not open"), 0o600))
+	t.Setenv("HOME", home)
+	t.Setenv("AZEDARACH_USER_DB_PATH", "")
+	t.Setenv("AZEDARACH_DB_PATH", "")
+	t.Setenv("AZEDARACH_REFUSE_DB_PATHS", "")
+	t.Setenv("AZEDARACH_REFUSE_DB_PATH", "")
+	t.Setenv("AZEDARACH_USER_DB_CLONE", configuredOriginal)
+	module := t.TempDir()
+	configureTestCacheFamily(t, module)
+	require.NoError(t, os.WriteFile(filepath.Join(module, "go.mod"), []byte("module example.test/refusal\n\ngo 1.24.2\n"), 0o644))
+	output := filepath.Join(t.TempDir(), "artifacts")
+	profile := Profile{
+		Name:                    "migration-refusal-fixture",
+		Packages:                []string{"./..."},
+		GoTestArgs:              []string{"-json", "-count=1"},
+		PackageIsolatedDBClones: true,
+		PackageCloneAuthorities: map[string][]CloneAuthority{"./...": {CloneAuthorityUser}},
+	}
+
+	measurement, err := Run(context.Background(), RunOptions{Profile: profile, OutputDir: output, WorkingDir: module})
+	require.ErrorContains(t, err, "refusing configured original database clone")
+	assert.Equal(t, 1, measurement.ExitCode)
+	assert.Equal(t, cloneIsolationPackageIsolatedParallel, measurement.CloneIsolation.Mode)
+	assert.True(t, measurement.CloneIsolation.Configured)
+	for _, name := range []string{"events.jsonl", "stderr.txt", "report.json", "report.md"} {
+		assert.FileExists(t, filepath.Join(output, name))
+	}
+	stderr, readErr := os.ReadFile(measurement.StderrPath)
+	require.NoError(t, readErr)
+	assert.Contains(t, string(stderr), "refusing configured original database clone")
+}
+
 func configureTestCacheFamily(t *testing.T, workingDir string) {
 	t.Helper()
 	t.Setenv("AZEDARACH_GO_CACHE_ROOT", filepath.Join(workingDir, ".azedarach", "go"))
@@ -198,4 +236,26 @@ func TestRunWritesMachineReadableArtifactsWhenBuildCacheHardLimitRefuses(t *test
 	raw, readErr := os.ReadFile(filepath.Join(output, "events.jsonl"))
 	require.NoError(t, readErr)
 	assert.Empty(t, raw, "refused validation must not execute go test")
+}
+
+func TestRunPropagatesIsolationCleanupError(t *testing.T) {
+	module := t.TempDir()
+	configureTestCacheFamily(t, module)
+	require.NoError(t, os.WriteFile(filepath.Join(module, "go.mod"), []byte("module example.test/cleanup\n\ngo 1.24.2\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(module, "cleanup_test.go"), []byte("package cleanup\nimport \"testing\"\nfunc TestPass(t *testing.T) {}\n"), 0o644))
+	cleanupFailure := errors.New("injected isolation cleanup failure")
+	var isolationRoot string
+
+	_, err := Run(context.Background(), RunOptions{
+		Profile:    Profile{Name: "cleanup-fixture", Packages: []string{"./..."}, GoTestArgs: []string{"-json", "-count=1"}},
+		OutputDir:  filepath.Join(t.TempDir(), "artifacts"),
+		WorkingDir: module,
+		closeIsolation: func(environment *testisolation.Environment) error {
+			isolationRoot = environment.Root
+			return errors.Join(environment.Close(), cleanupFailure)
+		},
+	})
+	require.ErrorIs(t, err, cleanupFailure)
+	require.NotEmpty(t, isolationRoot)
+	assert.NoDirExists(t, isolationRoot)
 }

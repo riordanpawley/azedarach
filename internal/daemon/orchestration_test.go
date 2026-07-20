@@ -716,7 +716,8 @@ func TestRootedOrchestrationReviewQueueStopsAtDirectChildren(t *testing.T) {
 	}
 	reviewResult, err := d.orchestrationAuthority().Apply(ctx, "proj", protocol.OrchestrationIntentRequest{
 		Scope: scope, Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "reject-grandchild-review", ActorID: "parent-orchestrator", IssueIDs: []string{grandchildID},
-		Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "nested worker finding"}},
+		ReviewPass: validReturnedReviewPass(),
+		Findings:   []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "nested worker finding"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2442,7 +2443,7 @@ func TestProjectOrchestrationSnapshotExcludesPostCursorDecisionAndReviewOutcomes
 		}
 		_, appendErr := writer.AppendIssueObservationEvent(ctx, reviewIssue, issues.IssueObservationEventParams{
 			Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
-			Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer"},
+			Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator},
 		})
 		return appendErr
 	}

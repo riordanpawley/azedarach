@@ -3073,19 +3073,19 @@ func TestTaskClosePreflightEnforcesInvestigationDispositionAcceptance(t *testing
 		{name: "human facing remains gated", wantReason: "human-facing investigation lacks explicit issue-specific findings acceptance"},
 		{name: "internal accepted", events: []issues.IssueObservationEventParams{
 			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
-			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator}},
 		}},
 		{name: "internal returned findings remain blocked", events: []issues.IssueObservationEventParams{
 			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
-			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
-			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"outcome": "returned", "actor_id": "reviewer"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"outcome": "returned", "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator}},
 		}, wantReason: "unresolved returned findings"},
 		{name: "new review epoch rejects stale human acceptance", events: []issues.IssueObservationEventParams{
 			{Type: domain.IssueEventHumanInputProvided, Source: "human", Payload: map[string]any{"investigation_findings_accepted": true}},
 		}, newEpoch: true, wantReason: "human-facing investigation lacks explicit issue-specific findings acceptance"},
 		{name: "new review epoch rejects stale internal acceptance", events: []issues.IssueObservationEventParams{
 			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
-			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator}},
 		}, newEpoch: true, wantReason: "internal review lacks durable accepted reviewer outcome"},
 	}
 	for _, tt := range tests {
@@ -6284,7 +6284,7 @@ func TestTaskCloseCommandIntegrationIgnoresDuplicateIssueTargetWorktreeFromOther
 	}
 }
 
-func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved(t *testing.T) {
+func TestTaskCloseCommandRetryRepairsProjectionAndReleasesLeaseAfterIntegratedWorktreeWasRemoved(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	projectID := "proj-close-integrate-cleanup-fail-retry"
@@ -6303,6 +6303,13 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
+	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{
+		OwnerID:   "worker-a",
+		OwnerKind: "agent",
+		Purpose:   domain.CoordinationLeaseExecution,
+	}); err != nil {
+		t.Fatalf("claim execution lease: %v", err)
 	}
 	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
 	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
@@ -6520,6 +6527,9 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	if task.Status != domain.StatusInReview {
 		t.Fatalf("task status after failed close = %s, want %s", task.Status, domain.StatusInReview)
 	}
+	if task.Ownership == nil || task.Ownership.OwnerID != "worker-a" {
+		t.Fatalf("task ownership after failed close = %+v, want execution lease preserved", task.Ownership)
+	}
 	receipts, err := issuesClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
 		Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted},
 	})
@@ -6529,6 +6539,7 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	if len(receipts) != 1 || observationPayloadString(receipts[0].Payload, "source_oid") != "source-sha" || observationPayloadString(receipts[0].Payload, "target_oid") != "merged-sha" {
 		t.Fatalf("exact integration receipts = %+v, want one source-sha/merged-sha receipt before destructive cleanup", receipts)
 	}
+	originalReceipt := receipts[0]
 	if _, err := os.Stat(sourceWorktree); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("source worktree after failed close stat error = %v, want removed path", err)
 	}
@@ -6573,6 +6584,18 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	}
 	if closed.Status != domain.StatusDone {
 		t.Fatalf("task status after retry = %s, want %s", closed.Status, domain.StatusDone)
+	}
+	if closed.Ownership != nil || len(closed.CoordinationLeases) != 0 {
+		t.Fatalf("closed task leases = %+v ownership = %+v, want terminal retry to release execution lease", closed.CoordinationLeases, closed.Ownership)
+	}
+	receipts, err = issuesClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted},
+	})
+	if err != nil {
+		t.Fatalf("list exact integration receipts after retry: %v", err)
+	}
+	if len(receipts) != 1 || receipts[0].ID != originalReceipt.ID || !reflect.DeepEqual(receipts[0].Payload, originalReceipt.Payload) {
+		t.Fatalf("exact integration receipts after retry = %+v, want only original receipt id=%d payload=%+v", receipts, originalReceipt.ID, originalReceipt.Payload)
 	}
 	joined := strings.Join(commands, "\n")
 	if got := strings.Count(joined, "merge --no-edit "+sourceBranch); got != 1 {
@@ -8668,6 +8691,13 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{
+		OwnerID:   "worker-a",
+		OwnerKind: "agent",
+		Purpose:   domain.CoordinationLeaseExecution,
+	}); err != nil {
+		t.Fatalf("claim execution lease: %v", err)
+	}
 	evidenceEvent, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t),
 	})
@@ -8683,6 +8713,24 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 		t.Fatalf("marshal reviewed evidence: %v", err)
 	}
 	evidencePin := &issues.ReviewEvidencePin{Source: "issue_event", EventID: evidenceEvent.ID, Digest: fmt.Sprintf("%x", sha256.Sum256(evidenceBody))}
+	admission, err := issuesClient.CaptureReviewAdmissionPin(ctx, taskID)
+	if err != nil {
+		t.Fatalf("capture review admission: %v", err)
+	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{
+		OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission,
+	}); err != nil {
+		t.Fatalf("claim reviewer lease: %v", err)
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
+			"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator,
+			"reviewed_evidence_source": evidencePin.Source, "reviewed_evidence_event_id": evidencePin.EventID,
+			"reviewed_evidence_seq": evidencePin.Seq, "reviewed_evidence_digest": evidencePin.Digest,
+		},
+	}); err != nil {
+		t.Fatalf("record accepted review: %v", err)
+	}
 	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
 	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
 		t.Fatalf("mkdir source worktree: %v", err)
@@ -8786,7 +8834,7 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	})
 
 	body, err := json.Marshal(taskCloseRequest{
-		TaskID: taskID, IntegrateBeforeClose: true, ExpectedReviewEvidence: evidencePin,
+		TaskID: taskID, IntegrateBeforeClose: true, ExpectedReviewEvidence: evidencePin, ExpectedReviewerID: "reviewer",
 	})
 	if err != nil {
 		t.Fatalf("marshal task close request: %v", err)
@@ -8815,8 +8863,8 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	if !result.IntegrationRequested || result.Integrated {
 		t.Fatalf("close integration result = %+v, want requested no-op integration", result)
 	}
-	if lateEvidenceErr == nil || !strings.Contains(lateEvidenceErr.Error(), "accepted review evidence is fenced") {
-		t.Fatalf("late git-runner evidence error = %v, want durable close-fence conflict", lateEvidenceErr)
+	if lateEvidenceErr == nil || !strings.Contains(lateEvidenceErr.Error(), "active review admission lease fences evidence replacement") {
+		t.Fatalf("late git-runner evidence error = %v, want reviewer-owned durable close-fence conflict", lateEvidenceErr)
 	}
 	if !result.WorktreeRemoved {
 		t.Fatalf("close integration result = %+v, want worktree cleanup", result)
@@ -8827,6 +8875,9 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	}
 	if closed.Status != domain.StatusDone {
 		t.Fatalf("task status = %s, want %s", closed.Status, domain.StatusDone)
+	}
+	if closed.Ownership != nil || len(closed.CoordinationLeases) != 0 {
+		t.Fatalf("closed task leases = %+v ownership = %+v, want already-contained close to release execution lease", closed.CoordinationLeases, closed.Ownership)
 	}
 	joined := strings.Join(commands, "\n")
 	for _, blocked := range []string{
@@ -9778,6 +9829,59 @@ func TestTaskGraphReadinessDependencyGating(t *testing.T) {
 	}
 	if len(gotAfter.Runnable) != 1 || gotAfter.Runnable[0] != b.String() {
 		t.Fatalf("after runnable = %v, want [%s]", gotAfter.Runnable, b.String())
+	}
+}
+
+func TestTaskGraphReadinessPropagatesRootBlockersToDescendantsAndNestedRoots(t *testing.T) {
+	root := naming.IssueID("az-root")
+	blocker := naming.IssueID("az-blocker")
+	leaf := naming.IssueID("az-leaf")
+	nested := naming.IssueID("az-nested")
+	leafParent := root
+	nestedParent := root
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress, Dependencies: []domain.Dependency{{ID: blocker, Type: domain.DependencyBlocks}}},
+		{ID: blocker, Type: domain.TypeTask, Status: domain.StatusInProgress},
+		{ID: leaf, Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &leafParent, Dependencies: []domain.Dependency{{ID: "az-missing", Type: domain.DependencyBlocks}}},
+		{ID: nested, Type: domain.TypeEpic, Status: domain.StatusOpen, ParentID: &nestedParent},
+	}
+
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocked.Runnable) != 0 || !slices.Equal(blocked.RootBlockers, []string{blocker.String()}) {
+		t.Fatalf("blocked readiness = %+v", blocked)
+	}
+	if got := blocked.Blocked[leaf.String()]; !strings.Contains(got, "root waiting on "+blocker.String()) {
+		t.Fatalf("leaf blocker = %q", got)
+	} else if !strings.Contains(got, "az-missing(missing)") {
+		t.Fatalf("leaf-local blocker was hidden by root gate: %q", got)
+	}
+	if len(blocked.NestedRoots) != 1 || blocked.NestedRoots[0].Status != "blocked_root_dependency" || blocked.NestedRoots[0].Classification != string(domain.OrchestrationCandidateBlocked) {
+		t.Fatalf("nested roots = %+v", blocked.NestedRoots)
+	}
+
+	byID[blocker] = domain.Task{ID: blocker, Type: domain.TypeTask, Status: domain.StatusDone}
+	ready, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ready.Runnable) != 0 || !strings.Contains(ready.Blocked[leaf.String()], "az-missing(missing)") || len(ready.RootBlockers) != 0 || ready.NestedRoots[0].Status != "startable" {
+		t.Fatalf("settled readiness = %+v", ready)
+	}
+}
+
+func TestCloneTaskGraphReadinessResultCopiesRootBlockers(t *testing.T) {
+	original := taskGraphReadinessResult{RootBlockers: []string{"upstream-blocker"}}
+	cloned := cloneTaskGraphReadinessResult(original)
+	cloned.RootBlockers[0] = "changed"
+	if original.RootBlockers[0] != "upstream-blocker" {
+		t.Fatalf("clone mutated cached root blockers: %v", original.RootBlockers)
 	}
 }
 
@@ -12210,7 +12314,7 @@ func TestTaskCompleteCheckClassifiesInvestigationChildrenByAcceptance(t *testing
 	}
 	for _, event := range []issues.IssueObservationEventParams{
 		{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
-		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator}},
 	} {
 		if _, err := issuesClient.AppendIssueObservationEvent(ctx, internalID, event); err != nil {
 			t.Fatalf("append internal review event: %v", err)
@@ -12319,7 +12423,7 @@ func reviewValidationAcquire(requestID, token, projectID, issueID, revision stri
 		RequestID: requestID, LeaseToken: token, ProjectID: projectID, IssueID: issueID,
 		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence,
 		IsolationMode: "repository-family", EnvironmentFingerprint: "test-toolchain", Override: domain.ValidationOverrideNone,
-		Profile: "cold", Command: "just test", SourceRevision: revision, ReviewerID: "reviewer", ReviewEpochEventID: 1, TTL: time.Minute,
+		Profile: "cold", Command: "just test", SourceRevision: revision, ReviewerID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: 1, PublicationOperationID: "publication", AcceptedReviewEventID: 2, AcceptedPublicationOperationID: "publication", TTL: time.Minute,
 	}
 }
 

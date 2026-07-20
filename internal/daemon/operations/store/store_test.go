@@ -69,11 +69,24 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 				t.Fatalf("validation authority migration checksum = %q", checksum)
 			}
 			var authorityColumns int
-			if err = store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_validation_requests') WHERE name IN ('scope','purpose','execution','authoritative_request_id','compatibility_key','isolation_mode','environment_fingerprint','override_kind','override_actor','override_reason','issue_priority','priority_bypass_count')`).Scan(&authorityColumns); err != nil {
+			if err = store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_validation_requests') WHERE name IN ('scope','purpose','execution','authoritative_request_id','compatibility_key','isolation_mode','environment_fingerprint','override_kind','override_actor','override_reason','issue_priority','priority_bypass_count','reviewer_kind','publication_operation_id','accepted_review_event_id','accepted_publication_operation_id')`).Scan(&authorityColumns); err != nil {
 				t.Fatal(err)
 			}
-			if authorityColumns != 12 {
-				t.Fatalf("validation authority columns = %d, want 12", authorityColumns)
+			if authorityColumns != 16 {
+				t.Fatalf("validation authority columns = %d, want 16", authorityColumns)
+			}
+			var reviewBindingColumns int
+			if err = store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_validation_requests') WHERE name IN ('reviewer_kind','publication_operation_id','accepted_review_event_id','accepted_publication_operation_id')`).Scan(&reviewBindingColumns); err != nil {
+				t.Fatal(err)
+			}
+			if reviewBindingColumns != 4 {
+				t.Fatalf("validation review binding columns = %d, want 4", reviewBindingColumns)
+			}
+			if err = store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_publication_operations') WHERE name IN ('reviewer_kind','review_epoch_event_id','accepted_review_event_id','patch_evidence_id')`).Scan(&reviewBindingColumns); err != nil {
+				t.Fatal(err)
+			}
+			if reviewBindingColumns != 4 {
+				t.Fatalf("publication review binding columns = %d, want 4", reviewBindingColumns)
 			}
 			var objects, afterOperations int
 			if err = store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN (
@@ -685,7 +698,7 @@ func TestValidationPriorityFairnessMigrationUpgradesRowsAndReopens(t *testing.T)
 	if priority != int(domain.P2) || bypasses != 0 {
 		t.Fatalf("legacy priority state = %d/%d, want P2/0", priority, bypasses)
 	}
-	latest := migrationArtifacts[len(migrationArtifacts)-1]
+	latest := migrationArtifacts[7]
 	var ledgerRows int
 	if err = store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, latest.ID, latest.Checksum).Scan(&ledgerRows); err != nil {
 		t.Fatal(err)
@@ -766,7 +779,7 @@ func TestValidationPriorityFairnessMigrationRejectsLedgerSchemaDrift(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifact := migrationArtifacts[len(migrationArtifacts)-1]
+	artifact := migrationArtifacts[7]
 	if _, err = db.Exec(`INSERT INTO schema_migrations(id,applied_at,artifact_checksum) VALUES(?, 'drifted', ?)`, artifact.ID, artifact.Checksum); err != nil {
 		t.Fatal(err)
 	}
@@ -776,7 +789,7 @@ func TestValidationPriorityFairnessMigrationRejectsLedgerSchemaDrift(t *testing.
 
 	drifted := NewAtPath(dbPath, slog.Default())
 	defer drifted.Close()
-	if _, err = drifted.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), "issue_priority") {
+	if _, err = drifted.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || (!strings.Contains(err.Error(), "issue_priority") && !strings.Contains(err.Error(), "reviewer_kind")) {
 		t.Fatalf("schema drift error = %v", err)
 	}
 }
@@ -919,8 +932,144 @@ func TestPublicationQueueMigrationRejectsAppliedSchemaDrift(t *testing.T) {
 	}
 	drifted := NewAtPath(dbPath, slog.Default())
 	defer drifted.Close()
-	if _, err = drifted.PublicationOperations(context.Background(), "project", "", false); err == nil || !strings.Contains(err.Error(), "missing trigger daemon_publication_operation_identity_immutable") {
+	if _, err = drifted.PublicationOperations(context.Background(), "project", "", false); err == nil || !strings.Contains(err.Error(), "daemon_operations_0009_publication_review_authority") || (!strings.Contains(err.Error(), "no such trigger") && !strings.Contains(err.Error(), "no such trigger")) {
 		t.Fatalf("schema drift error = %v", err)
+	}
+}
+
+func TestPublicationReviewAuthorityMigrationUpgradesHistoricalQueueAndReopens(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 8)
+	store := NewAtPath(dbPath, slog.Default())
+	if _, err := store.PublicationOperations(context.Background(), "project", "", false); err != nil {
+		t.Fatal(err)
+	}
+	var columns, ledgerRows int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_publication_operations') WHERE name IN ('reviewer_kind','review_epoch_event_id','accepted_review_event_id','patch_evidence_id')`).Scan(&columns); err != nil {
+		t.Fatal(err)
+	}
+	artifact := migrationArtifacts[len(migrationArtifacts)-1]
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, artifact.ID, artifact.Checksum).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if columns != 4 || ledgerRows != 1 {
+		t.Fatalf("review authority migration shape columns=%d ledger=%d", columns, ledgerRows)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := NewAtPath(dbPath, slog.Default())
+	defer reopened.Close()
+	if _, err := reopened.PublicationOperations(context.Background(), "project", "", false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublicationReviewAuthorityMigrationRejectsAppliedValidationSchemaDrift(t *testing.T) {
+	tests := []struct {
+		name   string
+		column string
+	}{
+		{name: "reviewer kind", column: "reviewer_kind"},
+		{name: "publication operation", column: "publication_operation_id"},
+		{name: "accepted review event", column: "accepted_review_event_id"},
+		{name: "accepted publication operation", column: "accepted_publication_operation_id"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+			seedOperationsMigrations(t, dbPath, 9)
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`ALTER TABLE daemon_validation_requests RENAME COLUMN ` + tt.column + ` TO ` + tt.column + `_drift`); err != nil {
+				_ = db.Close()
+				t.Fatal(err)
+			}
+			if err = db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			drifted := NewAtPath(dbPath, slog.Default())
+			defer drifted.Close()
+			if _, err = drifted.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), tt.column) {
+				t.Fatalf("schema drift error = %v, want missing %s", err, tt.column)
+			}
+		})
+	}
+}
+
+func TestPublicationReviewAuthorityMigrationRollsBackAtomically(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 8)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TRIGGER reject_publication_review_authority_ledger BEFORE INSERT ON schema_migrations WHEN NEW.id='daemon_operations_0009_publication_review_authority' BEGIN SELECT RAISE(ABORT, 'injected review authority ledger failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	failed := NewAtPath(dbPath, slog.Default())
+	if _, err = failed.PublicationOperations(context.Background(), "project", "", false); err == nil || !strings.Contains(err.Error(), "injected review authority ledger failure") {
+		t.Fatalf("migration error = %v", err)
+	}
+	_ = failed.Close()
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var columns, ledgerRows int
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_publication_operations') WHERE name IN ('reviewer_kind','review_epoch_event_id','accepted_review_event_id','patch_evidence_id')`).Scan(&columns); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='daemon_operations_0009_publication_review_authority'`).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if columns != 0 || ledgerRows != 0 {
+		t.Fatalf("failed review authority migration residue columns=%d ledger=%d", columns, ledgerRows)
+	}
+}
+
+func TestPublicationEvidenceAuthorityMigrationRollsBackAtomically(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 9)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TRIGGER reject_publication_evidence_authority_ledger BEFORE INSERT ON schema_migrations WHEN NEW.id='daemon_operations_0010_publication_evidence_authority' BEGIN SELECT RAISE(ABORT, 'injected publication evidence authority ledger failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	failed := NewAtPath(dbPath, slog.Default())
+	if _, err = failed.PublicationOperations(context.Background(), "project", "", false); err == nil || !strings.Contains(err.Error(), "injected publication evidence authority ledger failure") {
+		t.Fatalf("migration error = %v", err)
+	}
+	_ = failed.Close()
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var oldColumns, newColumns, ledgerRows int
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_publication_operations') WHERE name IN ('actor_kind','accepted_publication_operation_id')`).Scan(&oldColumns); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_publication_operations') WHERE name IN ('reviewer_kind','patch_evidence_id')`).Scan(&newColumns); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='daemon_operations_0010_publication_evidence_authority'`).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if oldColumns != 2 || newColumns != 0 || ledgerRows != 0 {
+		t.Fatalf("failed 0010 residue old=%d new=%d ledger=%d", oldColumns, newColumns, ledgerRows)
 	}
 }
 
@@ -945,6 +1094,74 @@ func seedOperationsMigrations(t *testing.T, dbPath string, count int) {
 		if _, err = db.Exec(`INSERT INTO schema_migrations(id,applied_at,artifact_checksum) VALUES(?, 'historical', ?)`, migration.id, migrationArtifacts[i].Checksum); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestPublicationReviewAuthorityMigrationUpgradesRollsBackAndReopens(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 8)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	_, err = db.Exec(`INSERT INTO daemon_publication_operations(
+		operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,target_id,target_branch,
+		source_revision,base_revision,policy_version,environment_fingerprint,validation_command,coalesce_key,state,created_at,updated_at
+	) VALUES('legacy-publication','project','issue','intent','fingerprint','Reviewer','base','main','source','base','policy','environment','go test ./...','candidate','queued',?,?)`, created, created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TRIGGER reject_publication_authority_ledger BEFORE INSERT ON schema_migrations
+		WHEN NEW.id='daemon_operations_0009_publication_review_authority'
+		BEGIN SELECT RAISE(ABORT,'injected publication authority ledger failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	failed := NewAtPath(dbPath, slog.Default())
+	if _, _, err = failed.PublicationOperation(context.Background(), "legacy-publication"); err == nil || !strings.Contains(err.Error(), "injected publication authority ledger failure") {
+		t.Fatalf("migration rollback error = %v", err)
+	}
+	_ = failed.Close()
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var authorityColumns int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_publication_operations') WHERE name IN ('actor_kind','review_epoch_event_id','accepted_review_event_id','accepted_publication_operation_id')`).Scan(&authorityColumns); err != nil {
+		t.Fatal(err)
+	}
+	if authorityColumns != 0 {
+		t.Fatalf("rolled back migration retained %d authority columns", authorityColumns)
+	}
+	if _, err = db.Exec(`DROP TRIGGER reject_publication_authority_ledger`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded := NewAtPath(dbPath, slog.Default())
+	legacy, found, err := upgraded.PublicationOperation(context.Background(), "legacy-publication")
+	if err != nil || !found {
+		t.Fatalf("upgraded legacy row = (%+v,%t,%v)", legacy, found, err)
+	}
+	if legacy.ReviewerKind != "" || legacy.ReviewEpochEventID != 0 || legacy.AcceptedReviewEventID != 0 || legacy.PatchEvidenceID != "" {
+		t.Fatalf("legacy authority was fabricated: %+v", legacy)
+	}
+	if err := legacy.ValidateIntent(); err == nil {
+		t.Fatal("legacy publication unexpectedly authorized")
+	}
+	if err := upgraded.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := NewAtPath(dbPath, slog.Default())
+	defer reopened.Close()
+	if _, found, err := reopened.PublicationOperation(context.Background(), "legacy-publication"); err != nil || !found {
+		t.Fatalf("idempotent reopen = (found=%t, err=%v)", found, err)
 	}
 }
 

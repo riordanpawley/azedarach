@@ -9,16 +9,37 @@ import (
 )
 
 const (
-	ReportSchema   = "azedarach.test_timing_report.v4"
+	ReportSchema   = "azedarach.test_timing_report.v5"
 	BaselineSchema = "azedarach.test_timing_baseline.v1"
 )
 
 type Profile struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Packages    []string `json:"packages"`
-	GoTestArgs  []string `json:"go_test_args"`
-	CleanCache  bool     `json:"clean_cache"`
+	Name                    string                      `json:"name"`
+	Description             string                      `json:"description"`
+	Packages                []string                    `json:"packages"`
+	GoTestArgs              []string                    `json:"go_test_args"`
+	CleanCache              bool                        `json:"clean_cache"`
+	PackageIsolatedDBClones bool                        `json:"package_isolated_db_clones,omitempty"`
+	PackageCloneAuthorities map[string][]CloneAuthority `json:"package_clone_authorities,omitempty"`
+}
+
+type CloneAuthority string
+
+const (
+	CloneAuthorityUser    CloneAuthority = "user"
+	CloneAuthorityProject CloneAuthority = "project"
+)
+
+type PackageCloneIdentity struct {
+	Package    string   `json:"package"`
+	UserDB     string   `json:"user_db,omitempty"`
+	ProjectDBs []string `json:"project_dbs,omitempty"`
+}
+
+type CloneIsolationEvidence struct {
+	Mode       string                 `json:"mode"`
+	Configured bool                   `json:"configured"`
+	Packages   []PackageCloneIdentity `json:"packages,omitempty"`
 }
 
 type Duration struct {
@@ -49,6 +70,7 @@ type Measurement struct {
 	PeakRSSBytes        int64                   `json:"peak_rss_bytes"`
 	ProcessLoad         ProcessLoadEvidence     `json:"process_load"`
 	ValidationLease     ValidationLeaseEvidence `json:"validation_lease"`
+	CloneIsolation      CloneIsolationEvidence  `json:"clone_isolation"`
 	ExitCode            int                     `json:"exit_code"`
 	Packages            []Duration              `json:"packages"`
 	Tests               []Duration              `json:"tests"`

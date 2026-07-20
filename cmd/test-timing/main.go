@@ -7,8 +7,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/testtiming"
@@ -27,6 +29,12 @@ func main() {
 }
 
 func run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runContext(ctx)
+}
+
+func runContext(ctx context.Context) error {
 	var packages packageList
 	profileName := flag.String("profile", "focused", "profile: "+strings.Join(testtiming.ProfileNames(), ", "))
 	baselinePath := flag.String("baseline", "testdata/test-timing-baseline-2026-07-13.json", "committed baseline and budgets")
@@ -66,10 +74,13 @@ func run() error {
 		if *samples > 1 {
 			sampleDir = filepath.Join(outputDir, fmt.Sprintf("sample-%02d", i))
 		}
-		measurement, err := testtiming.Run(context.Background(), testtiming.RunOptions{Profile: profile, Baseline: baseline, OutputDir: sampleDir, WorkingDir: ".", CheckBudgets: false, PublishValidationEvidence: true})
+		measurement, err := testtiming.Run(ctx, testtiming.RunOptions{Profile: profile, Baseline: baseline, OutputDir: sampleDir, WorkingDir: ".", CheckBudgets: false, PublishValidationEvidence: true})
 		measurements = append(measurements, measurement)
 		if err != nil {
 			runErr = errors.Join(runErr, err)
+		}
+		if ctx.Err() != nil {
+			break
 		}
 	}
 	measurement := measurements[0]
@@ -90,6 +101,10 @@ func run() error {
 	}
 	fmt.Printf("profile=%s wall=%.2fs packages=%d tests=%d failures=%d violations=%d\n", measurement.Profile, measurement.WallSeconds, len(measurement.Packages), len(measurement.Tests), len(measurement.Failures), len(measurement.Comparison.Violations))
 	fmt.Printf("build_cache_namespace=%s before_bytes=%d after_bytes=%d delta_bytes=%d family_bytes=%d decision=%s\n", measurement.BuildCache.Namespace, measurement.BuildCache.Before.Bytes, measurement.BuildCache.After.Bytes, measurement.BuildCache.DeltaBytes, measurement.BuildCache.FamilyBytes, measurement.BuildCache.Decision)
+	fmt.Printf("clone_isolation_mode=%s configured=%t package_identities=%d\n", measurement.CloneIsolation.Mode, measurement.CloneIsolation.Configured, len(measurement.CloneIsolation.Packages))
+	for _, identity := range measurement.CloneIsolation.Packages {
+		fmt.Printf("clone_package=%s user=%s projects=%s\n", identity.Package, identity.UserDB, strings.Join(identity.ProjectDBs, string(os.PathListSeparator)))
+	}
 	if enforce {
 		fmt.Printf("aggregate=median samples=%d\n", *samples)
 	}

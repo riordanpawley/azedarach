@@ -662,7 +662,7 @@ func candidateValidationTicketEnv(env []string, ctx context.Context) []string {
 	filtered := make([]string, 0, len(env)+2)
 	for _, entry := range env {
 		key, _, ok := strings.Cut(entry, "=")
-		if ok && (key == "AZEDARACH_TICKET_ID" || key == "AZEDARACH_ISSUE_ID") {
+		if ok && (key == "AZEDARACH_TICKET_ID" || key == "AZEDARACH_ISSUE_ID" || strings.HasPrefix(key, "AZEDARACH_REVIEW_") || key == "AZEDARACH_REVIEWER_ID" || key == "AZEDARACH_REVIEWER_KIND" || key == "AZEDARACH_PUBLICATION_OPERATION_ID" || key == "AZEDARACH_ACCEPTED_REVIEW_EVENT_ID" || key == "AZEDARACH_ACCEPTED_PUBLICATION_OPERATION_ID") {
 			continue
 		}
 		filtered = append(filtered, entry)
@@ -678,10 +678,21 @@ func candidateValidationTicketEnv(env []string, ctx context.Context) []string {
 			"AZEDARACH_ISSUE_ID=",
 		})
 	}
-	return gitEnvWithOverrides(filtered, []string{
+	overrides := []string{
 		"AZEDARACH_TICKET_ID=" + identity,
 		"AZEDARACH_ISSUE_ID=" + identity,
-	})
+	}
+	if authority, ok := ctx.Value(candidateValidationReviewAuthorityKey{}).(CandidateValidationReviewAuthority); ok {
+		overrides = append(overrides,
+			"AZEDARACH_REVIEWER_ID="+authority.ReviewerID,
+			"AZEDARACH_REVIEWER_KIND="+authority.ReviewerKind,
+			fmt.Sprintf("AZEDARACH_REVIEW_EPOCH_EVENT_ID=%d", authority.ReviewEpochEventID),
+			"AZEDARACH_PUBLICATION_OPERATION_ID="+authority.PublicationOperationID,
+			fmt.Sprintf("AZEDARACH_ACCEPTED_REVIEW_EVENT_ID=%d", authority.AcceptedReviewEventID),
+			"AZEDARACH_ACCEPTED_PUBLICATION_OPERATION_ID="+authority.AcceptedPublicationOperationID,
+		)
+	}
+	return gitEnvWithOverrides(filtered, overrides)
 }
 
 func candidateValidationOutput(stdout, stderr string) string {
