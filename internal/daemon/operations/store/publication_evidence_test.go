@@ -80,6 +80,55 @@ func TestPublicationEvidenceWritesAreImmutableAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestPatchReviewEvidenceReplayRetainsFirstBaseAcrossConcurrentStores(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	storeA := NewAtPath(dbPath, slog.Default())
+	defer storeA.Close()
+	storeB := NewAtPath(dbPath, slog.Default())
+	defer storeB.Close()
+	original := storedPublicationEvidence()
+	if _, err := storeA.RecordPublicationEvidence(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	retry := original
+	retry.BaseRevision = "advanced-base"
+	retry.CreatedAt = original.CreatedAt.Add(time.Hour)
+	got, err := storeB.RecordPublicationEvidence(ctx, retry)
+	if err != nil {
+		t.Fatalf("base-advanced retry: %v", err)
+	}
+	if got.BaseRevision != original.BaseRevision || !got.CreatedAt.Equal(original.CreatedAt) {
+		t.Fatalf("retry replaced first immutable record: got=%+v original=%+v", got, original)
+	}
+	for name, mutate := range map[string]func(*domain.PublicationEvidence){
+		"review_epoch_identity": func(e *domain.PublicationEvidence) { e.EvidenceID = "different-review-epoch" },
+		"source":                func(e *domain.PublicationEvidence) { e.SourceRevision = "different-source" },
+		"reviewer":              func(e *domain.PublicationEvidence) { e.Producer = "reviewer:different" },
+		"digest":                func(e *domain.PublicationEvidence) { e.PatchDigest = "different-digest" },
+		"policy":                func(e *domain.PublicationEvidence) { e.PolicyVersion = "different-policy" },
+		"environment":           func(e *domain.PublicationEvidence) { e.EnvironmentFingerprint = "different-environment" },
+		"coverage":              func(e *domain.PublicationEvidence) { e.Coverage.Paths = []string{"different.go"} },
+		"cost":                  func(e *domain.PublicationEvidence) { e.Cost.Tokens++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			conflict := retry
+			mutate(&conflict)
+			if name == "review_epoch_identity" {
+				// A different epoch has a different deterministic evidence ID and
+				// therefore cannot reuse or overwrite the accepted proof.
+				if _, err := storeB.RecordPublicationEvidence(ctx, conflict); err != nil {
+					t.Fatalf("independent epoch record: %v", err)
+				}
+				return
+			}
+			if _, err := storeB.RecordPublicationEvidence(ctx, conflict); err == nil {
+				t.Fatal("semantic identity mismatch replay succeeded")
+			}
+		})
+	}
+}
+
 func TestPublicationEvidenceReuseRequiresMatchingStoredProof(t *testing.T) {
 	ctx := context.Background()
 	store := NewAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())

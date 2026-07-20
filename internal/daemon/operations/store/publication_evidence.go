@@ -57,7 +57,7 @@ func (s *SQLiteStore) RecordPublicationEvidence(ctx context.Context, evidence do
 	}
 	_ = tx.Rollback()
 	existing, getErr := s.publicationEvidenceByID(ctx, evidence.EvidenceID)
-	if getErr == nil && publicationEvidenceSemanticallyEqual(existing, evidence) {
+	if getErr == nil && (publicationEvidenceSemanticallyEqual(existing, evidence) || domain.SamePatchReviewIdentity(existing, evidence)) {
 		return existing, nil
 	}
 	if getErr == nil {

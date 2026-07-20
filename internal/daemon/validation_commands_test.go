@@ -558,6 +558,9 @@ func TestAcceptedIndependentReviewRecordsPatchEvidenceIdempotently(t *testing.T)
 	}
 	inspection := protocol.OrchestrationReview{IssueID: issueID, ReviewEpochEventID: 17, WorktreePath: repoDir, SourceOID: head, DiffBaseRevision: base}
 	require.NoError(t, d.recordAcceptedPatchReviewEvidence(ctx, "project", "independent-reviewer", inspection))
+	// A publication retry can observe a newer integration base for the exact
+	// accepted source. Reuse must happen before deriving a new base-relative diff.
+	inspection.DiffBaseRevision = head
 	require.NoError(t, d.recordAcceptedPatchReviewEvidence(ctx, "project", "independent-reviewer", inspection))
 	snapshot, err := runtime.store.PublicationEvidenceSnapshot(ctx, "project", issueID)
 	require.NoError(t, err)

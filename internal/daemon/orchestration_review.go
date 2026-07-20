@@ -1625,19 +1625,7 @@ func (d *Daemon) acceptedPatchReviewEvidence(ctx context.Context, projectID, rev
 	if status.HasChanges || status.HasConflicts {
 		return domain.PublicationEvidence{}, fmt.Errorf("accepted patch-review evidence requires a clean conflict-free worktree")
 	}
-	patchDigest, err := d.git.PatchDigest(ctx, worktree, base, head)
-	if err != nil {
-		return domain.PublicationEvidence{}, err
-	}
-	paths, err := d.git.ChangedFilesBetweenRefTrees(ctx, worktree, base, head)
-	if err != nil {
-		return domain.PublicationEvidence{}, err
-	}
 	policy, capability, err := d.publicationEvidenceProjectPolicy(projectID)
-	if err != nil {
-		return domain.PublicationEvidence{}, err
-	}
-	coverage, err := publicationCoverageForPaths(paths, capability)
 	if err != nil {
 		return domain.PublicationEvidence{}, err
 	}
@@ -1652,22 +1640,37 @@ func (d *Daemon) acceptedPatchReviewEvidence(ctx context.Context, projectID, rev
 		return domain.PublicationEvidence{}, err
 	}
 	evidenceID := fmt.Sprintf("review-%x", sha256.Sum256([]byte(strings.Join([]string{projectID, inspection.IssueID, fmt.Sprint(inspection.ReviewEpochEventID), head, strings.ToLower(strings.TrimSpace(reviewerID)), policy.Version}, "\x00"))))
-	evidence := domain.PublicationEvidence{
-		EvidenceID: evidenceID, ProjectID: projectID, IssueID: inspection.IssueID, Layer: domain.PublicationEvidencePatchReview,
-		PatchDigest: patchDigest, SourceRevision: head, BaseRevision: base, Producer: "reviewer:" + strings.TrimSpace(reviewerID),
-		PolicyVersion: policy.Version, EnvironmentFingerprint: environment, Coverage: coverage, CreatedAt: time.Now().UTC(),
-	}
 	snapshot, err := store.PublicationEvidenceSnapshot(ctx, projectID, inspection.IssueID)
 	if err != nil {
 		return domain.PublicationEvidence{}, err
 	}
 	for _, prior := range snapshot.Evidence {
-		if prior.EvidenceID == evidence.EvidenceID {
-			if prior.ProjectID == evidence.ProjectID && prior.IssueID == evidence.IssueID && prior.Layer == evidence.Layer && prior.PatchDigest == evidence.PatchDigest && prior.SourceRevision == evidence.SourceRevision && prior.BaseRevision == evidence.BaseRevision && prior.Producer == evidence.Producer && prior.PolicyVersion == evidence.PolicyVersion && prior.EnvironmentFingerprint == evidence.EnvironmentFingerprint && publicationCoverageEqual(prior.Coverage, evidence.Coverage) {
-				return prior, nil
-			}
-			return domain.PublicationEvidence{}, fmt.Errorf("accepted patch-review evidence %s conflicts with its immutable record", evidence.EvidenceID)
+		if prior.EvidenceID != evidenceID {
+			continue
 		}
+		if prior.ProjectID == projectID && prior.IssueID == inspection.IssueID && prior.Layer == domain.PublicationEvidencePatchReview && prior.SourceRevision == head && prior.Producer == "reviewer:"+strings.TrimSpace(reviewerID) && prior.PolicyVersion == policy.Version && prior.EnvironmentFingerprint == environment {
+			return prior, nil
+		}
+		return domain.PublicationEvidence{}, fmt.Errorf("accepted patch-review evidence %s conflicts with its immutable record", evidenceID)
+	}
+	patchDigest, err := d.git.PatchDigest(ctx, worktree, base, head)
+	if err != nil {
+		return domain.PublicationEvidence{}, err
+	}
+	paths, err := d.git.ChangedFilesBetweenRefTrees(ctx, worktree, base, head)
+	if err != nil {
+		return domain.PublicationEvidence{}, err
+	}
+	coverage, err := publicationCoverageForPaths(paths, capability)
+	if err != nil {
+		return domain.PublicationEvidence{}, err
+	}
+	evidence := domain.PublicationEvidence{
+		EvidenceID: evidenceID, ProjectID: projectID, IssueID: inspection.IssueID, Layer: domain.PublicationEvidencePatchReview,
+		PatchDigest: patchDigest, SourceRevision: head, BaseRevision: base, Producer: "reviewer:" + strings.TrimSpace(reviewerID),
+		PolicyVersion: policy.Version, EnvironmentFingerprint: environment, Coverage: coverage, CreatedAt: time.Now().UTC(),
+	}
+	for _, prior := range snapshot.Evidence {
 		if prior.Layer == domain.PublicationEvidencePatchReview && prior.PatchDigest == evidence.PatchDigest && prior.PolicyVersion == evidence.PolicyVersion && prior.EnvironmentFingerprint == evidence.EnvironmentFingerprint && publicationCoverageEqual(prior.Coverage, evidence.Coverage) {
 			evidence.ReusedFromEvidenceID = prior.EvidenceID
 			break
