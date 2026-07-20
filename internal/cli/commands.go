@@ -235,6 +235,7 @@ type IssueCheckOptions struct {
 }
 
 type IssueCreateOptions struct {
+	IntentKey              string
 	Project                string
 	JSON                   bool
 	Title                  string
@@ -258,6 +259,7 @@ type issueCreateResult struct {
 	CreatedFromID string
 	Deferred      bool
 	Message       string
+	Created       bool
 }
 
 type issueCreatePartialError struct {
@@ -6740,25 +6742,38 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 		}
 	}
 
-	taskID, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (string, error) {
-		return deps.DaemonClient.CreateTask(callCtx, daemonclient.TaskCreateParams{
+	createResponse, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskIDResponse, error) {
+		var createdFromID *naming.IssueID
+		if strings.TrimSpace(opts.IntentKey) != "" && opts.AutoCreatedFromIssueID != nil && strings.TrimSpace(*opts.AutoCreatedFromIssueID) != "" {
+			parsed, parseErr := naming.ParseIssueID(strings.TrimSpace(*opts.AutoCreatedFromIssueID))
+			if parseErr != nil {
+				return daemonclient.TaskIDResponse{}, parseErr
+			}
+			createdFromID = &parsed
+		}
+		return deps.DaemonClient.CreateTaskWithResult(callCtx, daemonclient.TaskCreateParams{
+			IntentKey:       strings.TrimSpace(opts.IntentKey),
 			Title:           opts.Title,
 			Description:     opts.Description,
 			Type:            opts.Type,
 			Priority:        opts.Priority,
 			Lifecycle:       opts.Lifecycle,
 			ParentID:        parentID,
+			CreatedFromID:   createdFromID,
 			Implementations: dedupeOrderedIDs(implementations),
 		})
 	})
 	if err != nil {
 		return issueCreateResult{}, fmt.Errorf("failed to create issue: %w", err)
 	}
+	taskID := createResponse.TaskID.String()
 
 	createdFromIDValue := ""
 	projectIDValue := strings.TrimSpace(deps.ProjectID)
-	if opts.AutoCreatedFromIssueID != nil && strings.TrimSpace(*opts.AutoCreatedFromIssueID) != "" {
+	if opts.AutoCreatedFromIssueID != nil {
 		createdFromIDValue = strings.TrimSpace(*opts.AutoCreatedFromIssueID)
+	}
+	if strings.TrimSpace(opts.IntentKey) == "" && createdFromIDValue != "" {
 		createdIssueID, parseErr := naming.ParseIssueID(taskID)
 		if parseErr != nil {
 			return issueCreateResult{}, fmt.Errorf("failed to parse created issue id %s: %w", formatProjectIssueRef(projectIDValue, taskID), parseErr)
@@ -6824,6 +6839,7 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 		CreatedFromID: createdFromIDValue,
 		Deferred:      opts.Deferred,
 		Message:       message,
+		Created:       createResponse.Created,
 	}, nil
 }
 

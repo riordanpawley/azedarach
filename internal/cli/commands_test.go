@@ -6254,7 +6254,7 @@ func TestParseIssueCreateArgs(t *testing.T) {
 
 func TestParseIssueSplitArgsDefaultsParentFromEnv(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-parent")
-	opts, err := ParseIssueSplitArgs([]string{"--description", "do this elsewhere", "--priority", "P1", "Child work"})
+	opts, err := ParseIssueSplitArgs([]string{"--intent-key", "split-invocation-1", "--description", "do this elsewhere", "--priority", "P1", "Child work"})
 	if err != nil {
 		t.Fatalf("ParseIssueSplitArgs error = %v", err)
 	}
@@ -6263,6 +6263,14 @@ func TestParseIssueSplitArgsDefaultsParentFromEnv(t *testing.T) {
 	}
 	if opts.Priority != domain.P1 || !opts.PriorityExplicit {
 		t.Fatalf("priority = %s explicit=%v, want P1 explicit", opts.Priority, opts.PriorityExplicit)
+	}
+}
+
+func TestParseIssueSplitArgsRequiresExplicitInvocationIdentity(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-parent")
+	_, err := ParseIssueSplitArgs([]string{"Child work"})
+	if err == nil || !strings.Contains(err.Error(), "missing split intent key") {
+		t.Fatalf("error = %v, want explicit split intent identity requirement", err)
 	}
 }
 
@@ -9878,8 +9886,10 @@ func TestIssueCreateCommandReportsPartialSuccessWhenCreatedFromEdgeFails(t *test
 func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T) {
 	root := naming.IssueID("az-parent")
 	child := naming.IssueID("az-child")
+	secondChild := naming.IssueID("az-child-2")
 	var requests []protocol.RequestEnvelope
 	var createReq daemonclient.TaskCreateParams
+	createCalls := 0
 	var intentReq protocol.OrchestrationIntentRequest
 	taskListCalls := 0
 	deps := &Dependencies{
@@ -9893,9 +9903,13 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 				requests = append(requests, req)
 				switch req.Command {
 				case daemonclient.CommandTaskGraphReadiness:
+					requestedChild := child
+					if createReq.IntentKey == "split-invocation-2" {
+						requestedChild = secondChild
+					}
 					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
 						RootIssueID: root.String(),
-						Runnable:    []string{child.String()},
+						Runnable:    []string{requestedChild.String()},
 						Blocked:     map[string]string{},
 					}), nil
 				case protocol.CommandOrchestrationIntent:
@@ -9906,11 +9920,11 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 						Scope:     intentReq.Scope,
 						Kind:      protocol.OrchestrationIntentStart,
 						IntentKey: intentReq.IntentKey,
-						Requested: []string{child.String()},
-						Started:   []string{child.String()},
+						Requested: intentReq.IssueIDs,
+						Started:   intentReq.IssueIDs,
 						Launched: []protocol.OrchestrationLaunch{{
-							IssueID:        child.String(),
-							SessionID:      child.String(),
+							IssueID:        intentReq.IssueIDs[0],
+							SessionID:      intentReq.IssueIDs[0],
 							OperationID:    "op-split",
 							OperationState: string(protocol.OperationStateQueued),
 						}},
@@ -9975,6 +9989,22 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 							Type:            domain.TypeTask,
 							Implementations: []string{"go-bubbletea"},
 						}}
+					case secondChild:
+						tasks = []domain.Task{{
+							ID:       secondChild,
+							Title:    "Child work",
+							Status:   domain.StatusOpen,
+							Priority: domain.P2,
+							Type:     domain.TypeTask,
+							ParentID: &root,
+						}, {
+							ID:              root,
+							Title:           "Parent",
+							Status:          domain.StatusInProgress,
+							Priority:        domain.P1,
+							Type:            domain.TypeTask,
+							Implementations: []string{"go-bubbletea"},
+						}}
 					default:
 						t.Fatalf("unexpected task.get_many id: %+v", getManyReq.TaskIDs)
 					}
@@ -9987,13 +10017,17 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 					if err := json.Unmarshal(req.Body, &createReq); err != nil {
 						t.Fatalf("decode create request: %v", err)
 					}
-					return responseWithJSON(req, map[string]string{"task_id": child.String()}), nil
+					createCalls++
+					if createReq.IntentKey == "split-invocation-2" {
+						return responseWithJSON(req, daemonclient.TaskIDResponse{TaskID: secondChild, Created: true}), nil
+					}
+					return responseWithJSON(req, daemonclient.TaskIDResponse{TaskID: child, Created: createCalls == 1}), nil
 				case daemonclient.CommandTaskDependencyAdd:
 					var depReq daemonclient.TaskDependencyParams
 					if err := json.Unmarshal(req.Body, &depReq); err != nil {
 						t.Fatalf("decode dependency request: %v", err)
 					}
-					if depReq.TaskID != child || depReq.DependsOnID != root || depReq.Type != string(domain.DependencyCreatedIn) {
+					if (depReq.TaskID != child && depReq.TaskID != secondChild) || depReq.DependsOnID != root || depReq.Type != string(domain.DependencyCreatedIn) {
 						t.Fatalf("dependency request = %+v, want child created-in root", depReq)
 					}
 					return responseWithJSON(req, map[string]any{}), nil
@@ -10005,11 +10039,16 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 						"worktrees": []map[string]string{
 							{"issue_id": root.String(), "path": "/repo-az-parent", "branch": "user/az-parent/parent-work"},
 							{"issue_id": child.String(), "path": "/repo-az-child", "branch": "user/az-child/child-work"},
+							{"issue_id": secondChild.String(), "path": "/repo-az-child-2", "branch": "user/az-child-2/child-work"},
 						},
 					}), nil
 				case daemonclient.CommandTaskMergeBaseTarget:
+					mergeChild := child
+					if createReq.IntentKey == "split-invocation-2" {
+						mergeChild = secondChild
+					}
 					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
-						IssueID:        child.String(),
+						IssueID:        mergeChild.String(),
 						TargetID:       root.String(),
 						Branch:         "user/az-parent/parent-work",
 						WorktreePath:   "/repo-az-parent",
@@ -10039,6 +10078,7 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	output := captureStdout(t, func() error {
 		return IssueSplitCommand(deps, IssueSplitOptions{
 			ParentIssueID: root.String(),
+			IntentKey:     "split-invocation-1",
 			Title:         "Child work",
 			Type:          domain.TypeTask,
 			Priority:      domain.P2,
@@ -10056,11 +10096,17 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	if createReq.ParentID == nil || *createReq.ParentID != root {
 		t.Fatalf("create parent = %+v, want %s", createReq.ParentID, root)
 	}
+	if createReq.IntentKey == "" || createReq.CreatedFromID == nil || *createReq.CreatedFromID != root {
+		t.Fatalf("create idempotency request = %+v, want stable intent and atomic created-in parent", createReq)
+	}
 	if !reflect.DeepEqual(createReq.Implementations, []string{"go-bubbletea"}) {
 		t.Fatalf("create implementations = %+v, want inherited parent impl", createReq.Implementations)
 	}
 	if intentReq.Kind != protocol.OrchestrationIntentStart || !reflect.DeepEqual(intentReq.IssueIDs, []string{child.String()}) {
 		t.Fatalf("intent = %+v", intentReq)
+	}
+	if intentReq.IntentKey != "ticket-split-start:"+createReq.IntentKey {
+		t.Fatalf("start intent = %q, want split-derived key for %q", intentReq.IntentKey, createReq.IntentKey)
 	}
 	if intentReq.BaseBranch != "user/az-parent/parent-work" {
 		t.Fatalf("intent base_branch = %q, want parent worktree branch", intentReq.BaseBranch)
@@ -10079,6 +10125,7 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	textOutput := captureStdout(t, func() error {
 		return IssueSplitCommand(deps, IssueSplitOptions{
 			ParentIssueID: root.String(),
+			IntentKey:     "split-invocation-1",
 			Title:         "Child work",
 			Type:          domain.TypeTask,
 			Priority:      domain.P2,
@@ -10087,8 +10134,32 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	if !strings.Contains(textOutput, "`az ticket close` owns") || !strings.Contains(textOutput, "az ticket close --id "+child.String()) {
 		t.Fatalf("split output missing canonical ticket close guidance: %s", textOutput)
 	}
+	if !strings.Contains(textOutput, "Reused canonical child issue: "+child.String()) {
+		t.Fatalf("split replay output missing canonical child disposition: %s", textOutput)
+	}
 	if strings.Contains(textOutput, "az issue close") {
 		t.Fatalf("split output contains legacy issue close guidance: %s", textOutput)
+	}
+
+	secondOutput := captureStdout(t, func() error {
+		return IssueSplitCommand(deps, IssueSplitOptions{
+			ParentIssueID: root.String(),
+			IntentKey:     "split-invocation-2",
+			Title:         "Child work",
+			Type:          domain.TypeTask,
+			Priority:      domain.P2,
+			JSON:          true,
+		})
+	})
+	var secondResult issueSplitResult
+	if err := json.Unmarshal([]byte(secondOutput), &secondResult); err != nil {
+		t.Fatalf("decode second invocation output: %v\n%s", err, secondOutput)
+	}
+	if secondResult.ChildIssueID != secondChild.String() || !secondResult.Created {
+		t.Fatalf("second identical invocation result = %+v, want distinct newly created child %s", secondResult, secondChild)
+	}
+	if secondResult.IntentKey != "split-invocation-2" || secondResult.ChildIssueID == result.ChildIssueID {
+		t.Fatalf("distinct invocation identity did not produce a distinct canonical child: first=%+v second=%+v", result, secondResult)
 	}
 }
 

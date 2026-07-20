@@ -21,6 +21,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
+	opstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -978,6 +979,149 @@ func TestTerminalSessionStartFailurePreservesClaimForLiveRuntime(t *testing.T) {
 	}
 	if task.Ownership == nil || task.Ownership.OwnerID != "orchestrator" {
 		t.Fatalf("live runtime lost orchestration claim: %+v", task.Ownership)
+	}
+}
+
+func TestCompletedStartReplayRequeuesCrashGapWithMissingOperation(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Worker", Status: domain.StatusOpen, Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested, err := client.QueueRequestedOrchestrationStart(ctx, "project", issueID, "split-retry", "orchestrator", "dedupe", "digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.UpdateRequestedOrchestrationStart(ctx, requested, "completed", "complete", nil); err != nil {
+		t.Fatal(err)
+	}
+	requested.State = "completed"
+	attempt, err := client.BeginOrchestrationStart(ctx, "project", issueID, "split-retry", "orchestrator", "dedupe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CompleteOrchestrationStart(ctx, attempt, "lost-operation"); err != nil {
+		t.Fatal(err)
+	}
+	attempt.State, attempt.OperationID = "submitted", "lost-operation"
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	d := &Daemon{
+		cfg:                   Config{RepoDir: repoDir, Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{"project": client},
+		operationRuntime:      runtime,
+		tmux:                  tmux.NewClient(&sessionStartCompensationTmuxRunner{live: false}, slog.Default()),
+	}
+	reuse, _, err := (daemonOrchestrationAuthority{daemon: d}).reconcileCompletedOrchestrationStart(ctx, "project", protocol.OrchestrationIntentRequest{RepoDir: repoDir}, requested, attempt)
+	if err != nil || reuse {
+		t.Fatalf("reconcile reuse=%v err=%v, want durable requeue", reuse, err)
+	}
+	gotAttempt, err := client.OrchestrationStartAttempt(ctx, "project", issueID, "split-retry")
+	if err != nil || gotAttempt.State != "compensated" {
+		t.Fatalf("attempt=%+v err=%v, want compensated", gotAttempt, err)
+	}
+	pending, err := client.PendingRequestedOrchestrationStarts(ctx, "project")
+	if err != nil || len(pending) != 1 || pending[0].IssueID != issueID || pending[0].Phase != "retry_terminal_operation" {
+		t.Fatalf("pending=%+v err=%v, want exact retry queued", pending, err)
+	}
+}
+
+func TestCompletedStartReplayDurablyRepairsLiveRuntime(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Worker", Status: domain.StatusOpen, Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested, err := client.QueueRequestedOrchestrationStart(ctx, "project", issueID, "split-live", "orchestrator", "dedupe", "digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.UpdateRequestedOrchestrationStart(ctx, requested, "completed", "complete", nil); err != nil {
+		t.Fatal(err)
+	}
+	requested.State = "completed"
+	attempt, err := client.BeginOrchestrationStart(ctx, "project", issueID, "split-live", "orchestrator", "dedupe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CompleteOrchestrationStart(ctx, attempt, "lost-operation"); err != nil {
+		t.Fatal(err)
+	}
+	attempt.State, attempt.OperationID = "submitted", "lost-operation"
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	runner := &sessionStartCompensationTmuxRunner{live: true}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}, operationRuntime: runtime, tmux: tmux.NewClient(runner, slog.Default())}
+	authority := daemonOrchestrationAuthority{daemon: d}
+	reuse, state, err := authority.reconcileCompletedOrchestrationStart(ctx, "project", protocol.OrchestrationIntentRequest{RepoDir: repoDir}, requested, attempt)
+	if err != nil || !reuse || state != string(protocol.OperationStateDone) {
+		t.Fatalf("first reconcile reuse=%v state=%q err=%v", reuse, state, err)
+	}
+	pending, err := client.PendingRequestedOrchestrationStarts(ctx, "project")
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending=%+v err=%v, want durably completed", pending, err)
+	}
+	stored, err := client.QueueRequestedOrchestrationStart(ctx, "project", issueID, "split-live", "orchestrator", "dedupe", "digest")
+	if err != nil || stored.Phase != "runtime_recovered" {
+		t.Fatalf("stored request=%+v err=%v", stored, err)
+	}
+	runner.live = false
+	reuse, state, err = authority.reconcileCompletedOrchestrationStart(ctx, "project", protocol.OrchestrationIntentRequest{RepoDir: repoDir}, stored, attempt)
+	if err != nil || !reuse || state != string(protocol.OperationStateDone) {
+		t.Fatalf("restart reconcile reuse=%v state=%q err=%v", reuse, state, err)
+	}
+}
+
+func TestCompletedStartReplayDurablyRepairsLiveRuntimeAfterTerminalOperation(t *testing.T) {
+	for _, operationState := range []opstore.State{opstore.StateFailed, opstore.StateCancelled} {
+		t.Run(string(operationState), func(t *testing.T) {
+			ctx := context.Background()
+			repoDir := t.TempDir()
+			client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+			t.Cleanup(func() { _ = client.CloseDB() })
+			issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Worker", Status: domain.StatusOpen, Type: domain.TypeTask})
+			if err != nil {
+				t.Fatal(err)
+			}
+			requested, err := client.QueueRequestedOrchestrationStart(ctx, "project", issueID, "split-"+string(operationState), "orchestrator", "dedupe", "digest")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := client.UpdateRequestedOrchestrationStart(ctx, requested, "completed", "complete", nil); err != nil {
+				t.Fatal(err)
+			}
+			requested.State = "completed"
+			attempt, err := client.BeginOrchestrationStart(ctx, "project", issueID, requested.IntentKey, "orchestrator", "dedupe")
+			if err != nil {
+				t.Fatal(err)
+			}
+			operationID := "terminal-" + string(operationState)
+			if err := client.CompleteOrchestrationStart(ctx, attempt, operationID); err != nil {
+				t.Fatal(err)
+			}
+			attempt.State, attempt.OperationID = "submitted", operationID
+			runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+			t.Cleanup(func() { _ = runtime.Close() })
+			now := time.Now().UTC()
+			if _, err := runtime.store.Create(ctx, opstore.CreateParams{OperationID: operationID, ProjectID: "project", IssueID: issueID, Kind: "session.start", DedupeKey: "dedupe", ResourceKeys: []string{"session:" + issueID}, State: operationState, SubmittedAt: now, FinishedAt: &now}); err != nil {
+				t.Fatal(err)
+			}
+			d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}, operationRuntime: runtime, tmux: tmux.NewClient(&sessionStartCompensationTmuxRunner{live: true}, slog.Default())}
+			reuse, state, err := (daemonOrchestrationAuthority{daemon: d}).reconcileCompletedOrchestrationStart(ctx, "project", protocol.OrchestrationIntentRequest{RepoDir: repoDir}, requested, attempt)
+			if err != nil || !reuse || state != string(protocol.OperationStateDone) {
+				t.Fatalf("reconcile reuse=%v state=%q err=%v", reuse, state, err)
+			}
+			stored, err := client.QueueRequestedOrchestrationStart(ctx, "project", issueID, requested.IntentKey, "orchestrator", "dedupe", "digest")
+			if err != nil || stored.Phase != "runtime_recovered" {
+				t.Fatalf("stored request=%+v err=%v", stored, err)
+			}
+		})
 	}
 }
 

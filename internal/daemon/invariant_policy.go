@@ -38,6 +38,7 @@ const (
 	daemonInvariantTaskContextRisk      daemonInvariantID = "task.context_risk_closeout"
 	daemonInvariantTaskMergeBaseTarget  daemonInvariantID = "task.merge_base_target"
 	daemonInvariantTaskFollowOnMerge    daemonInvariantID = "task.follow_on_merge_candidates"
+	daemonInvariantTaskSplitIntent      daemonInvariantID = "task.split_intent"
 	daemonInvariantTaskPublicationQueue daemonInvariantID = "task.publication_queue"
 	daemonInvariantWorkerObservation    daemonInvariantID = "worker.observation_projection"
 	daemonInvariantInteractionWaiting   daemonInvariantID = "interaction.waiting_human"
@@ -88,6 +89,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantTaskContextRisk:              daemonInvariantSourceProjection,
 	daemonInvariantTaskMergeBaseTarget:          daemonInvariantSourceProjection,
 	daemonInvariantTaskFollowOnMerge:            daemonInvariantSourceProjection,
+	daemonInvariantTaskSplitIntent:              daemonInvariantSourceHybrid,
 	daemonInvariantWorkerObservation:            daemonInvariantSourceHybrid,
 	daemonInvariantRuntimeKnownProjectIDs:       daemonInvariantSourceProjection,
 	daemonInvariantCrossProjectViews:            daemonInvariantSourceProjection,

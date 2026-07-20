@@ -69,6 +69,7 @@ type TaskEventsPage = protocol.TaskEventsPage
 
 // TaskCreateParams contains the payload used to create a task through the shared daemon client.
 type TaskCreateParams struct {
+	IntentKey       string               `json:"intent_key,omitempty"`
 	Title           string               `json:"title"`
 	Description     string               `json:"description"`
 	Type            domain.TaskType      `json:"type"`
@@ -83,6 +84,7 @@ type TaskCreateParams struct {
 	Acceptance      string               `json:"acceptance,omitempty"`
 	Estimate        *int                 `json:"estimate,omitempty"`
 	ParentID        *naming.IssueID      `json:"parent_id,omitempty"`
+	CreatedFromID   *naming.IssueID      `json:"created_from_id,omitempty"`
 }
 
 // TaskUpdateParams contains the payload used to update task details through the shared daemon client.
@@ -417,7 +419,8 @@ type TaskDependencyRemoveParams struct {
 
 // TaskIDResponse is returned by commands that allocate a new task identifier.
 type TaskIDResponse struct {
-	TaskID naming.IssueID `json:"task_id"`
+	TaskID  naming.IssueID `json:"task_id"`
+	Created bool           `json:"created,omitempty"`
 }
 
 // TaskSnapshot captures a task list snapshot and the revision it was read at.
@@ -997,14 +1000,21 @@ func boardSnapshotProjectionToDomain(payload protocol.BoardSnapshotPayload) doma
 
 // CreateTask creates a task through the daemon client boundary.
 func (c *Client) CreateTask(ctx context.Context, params TaskCreateParams) (string, error) {
+	result, err := c.CreateTaskWithResult(ctx, params)
+	return result.TaskID.String(), err
+}
+
+// CreateTaskWithResult returns whether this request allocated the task or
+// replayed a canonical task bound to the supplied intent key.
+func (c *Client) CreateTaskWithResult(ctx context.Context, params TaskCreateParams) (TaskIDResponse, error) {
 	var resp TaskIDResponse
 	if err := c.commandJSON(ctx, CommandTaskCreate, params, &resp); err != nil {
-		return "", err
+		return TaskIDResponse{}, err
 	}
 	if resp.TaskID == "" {
-		return "", fmt.Errorf("%s returned empty task id", CommandTaskCreate)
+		return TaskIDResponse{}, fmt.Errorf("%s returned empty task id", CommandTaskCreate)
 	}
-	return resp.TaskID.String(), nil
+	return resp, nil
 }
 
 // UpdateTaskStatus updates a task's status through the daemon client boundary.

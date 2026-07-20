@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2030,6 +2031,7 @@ func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvel
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
 	var cmd struct {
+		IntentKey       string               `json:"intent_key,omitempty"`
 		Title           string               `json:"title"`
 		Description     string               `json:"description"`
 		Type            domain.TaskType      `json:"type"`
@@ -2044,6 +2046,7 @@ func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvel
 		Acceptance      string               `json:"acceptance,omitempty"`
 		Estimate        *int                 `json:"estimate,omitempty"`
 		ParentID        *string              `json:"parent_id,omitempty"`
+		CreatedFromID   *string              `json:"created_from_id,omitempty"`
 	}
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -2057,7 +2060,8 @@ func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvel
 			"parent_id", cmd.ParentID,
 		)
 	}
-	task, err := issueClient.CreateWithRuntime(ctx, projectID, issues.CreateTaskParams{
+	params := issues.CreateTaskParams{
+		IntentKey:       strings.TrimSpace(cmd.IntentKey),
 		Title:           cmd.Title,
 		Description:     cmd.Description,
 		Type:            cmd.Type,
@@ -2072,24 +2076,58 @@ func (d *Daemon) handleTaskCreate(ctx context.Context, req protocol.RequestEnvel
 		Acceptance:      cmd.Acceptance,
 		Estimate:        cmd.Estimate,
 		ParentID:        cmd.ParentID,
-	})
+		CreatedFromID:   cmd.CreatedFromID,
+	}
+	created := true
+	var task domain.Task
+	var err error
+	if params.IntentKey != "" {
+		if source := sourceForInvariant(daemonInvariantTaskSplitIntent); source != daemonInvariantSourceHybrid {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("unsupported task split invariant source: %s", source)), nil
+		}
+		digestInput, marshalErr := json.Marshal(struct {
+			Title, Description, Type, Priority, Status, Lifecycle, Assignee, Design, Notes, Acceptance, ParentID, CreatedFromID string
+			Labels, Implementations                                                                                             []string
+			Estimate                                                                                                            *int
+		}{cmd.Title, cmd.Description, string(cmd.Type), fmt.Sprint(cmd.Priority), string(cmd.Status), string(cmd.Lifecycle), cmd.Assignee, cmd.Design, cmd.Notes, cmd.Acceptance, optionalString(cmd.ParentID), optionalString(cmd.CreatedFromID), cmd.Labels, cmd.Implementations, cmd.Estimate})
+		if marshalErr != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, marshalErr.Error()), nil
+		}
+		params.RequestDigest = fmt.Sprintf("%x", sha256.Sum256(digestInput))
+		task, created, err = issueClient.CreateIdempotentWithRuntime(ctx, projectID, params)
+	} else {
+		task, err = issueClient.CreateWithRuntime(ctx, projectID, params)
+	}
 	if err != nil {
 		if issues.IsSQLiteBusy(err) {
 			return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+		}
+		if errors.Is(err, domain.ErrConflict) {
+			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	taskID := task.ID.String()
 	body, _ := json.Marshal(struct {
-		TaskID string `json:"task_id"`
-	}{TaskID: taskID})
+		TaskID  string `json:"task_id"`
+		Created bool   `json:"created"`
+	}{TaskID: taskID, Created: created})
 	resp.Body = body
-	resp.Revision = d.nextRevision(projectID)
-	d.publishTaskEvent(req, protocol.EventTaskCreated, resp.Revision, taskEventBodyFromTask(projectID, task))
+	if created {
+		resp.Revision = d.nextRevision(projectID)
+		d.publishTaskEvent(req, protocol.EventTaskCreated, resp.Revision, taskEventBodyFromTask(projectID, task))
+	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task create completed", "project_id", projectID, "task_id", taskID, "revision", resp.Revision)
 	}
 	return resp, nil
+}
+
+func optionalString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
 }
 
 func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
