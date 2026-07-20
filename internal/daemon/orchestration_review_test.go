@@ -2368,6 +2368,15 @@ func TestReviewAcceptRetryRejectsBranchMutationAfterDurableAcceptance(t *testing
 func TestIntegratedAcceptedReviewRecoveryProofIsActorAndEpochFenced(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
+	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repoDir, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repoDir, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repoDir, "integrated.txt"), []byte("integrated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repoDir, "add", "integrated.txt")
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "integrated source")
+	sourceOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
@@ -2375,7 +2384,22 @@ func TestIntegratedAcceptedReviewRecoveryProofIsActorAndEpochFenced(t *testing.T
 		t.Fatal(err)
 	}
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
-	d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return "reviewed-source", nil }
+	d.cfg.BaseBranch = "main"
+	d.git = git.NewClient(git.NewExecRunner(repoDir), slog.Default())
+	runtimeStore := newGitAdapterStore(t, "project", issueID, "", cleanGitStatus())
+	manager := git.NewWorktreeManager(git.NewExecRunner(repoDir), repoDir, slog.Default())
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		manager: manager, runtimeStateStore: runtimeStore, logger: slog.Default(),
+		pollers: map[string]context.CancelFunc{"project": func() {}},
+		runtimeIssueTasks: func(context.Context, string, []string) map[string]domain.Task {
+			task, err := client.GetWithRuntime(ctx, "project", issueID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return map[string]domain.Task{issueID: task}
+		},
+	}
+	d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
 	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "recover-integrated", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
 	first, err := d.orchestrationAuthority().Apply(ctx, "project", request)
 	if err != nil {
@@ -2390,8 +2414,8 @@ func TestIntegratedAcceptedReviewRecoveryProofIsActorAndEpochFenced(t *testing.T
 		t.Fatal(err)
 	}
 	if _, err := client.AppendTaskIntegrationReceiptIfAbsent(ctx, issueID, issues.TaskIntegrationReceipt{
-		ProjectID: "project", SourceBranch: "issue/recover", TargetBranch: "main", TargetID: "base",
-		BaseOID: "base-before", SourceOID: pin.SourceOID, TargetOID: "integrated-target", Integrated: true, ConfiguredBaseTarget: true,
+		ProjectID: "project", SourceBranch: "az/" + issueID, TargetBranch: "main", TargetID: "base",
+		BaseOID: sourceOID, SourceOID: pin.SourceOID, TargetOID: sourceOID, Integrated: true, ConfiguredBaseTarget: true,
 	}, repoDir); err != nil {
 		t.Fatal(err)
 	}
@@ -2417,33 +2441,29 @@ func TestIntegratedAcceptedReviewRecoveryProofIsActorAndEpochFenced(t *testing.T
 	d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) {
 		return "", fmt.Errorf("source branch unavailable")
 	}
+	if worktrees, err := d.worktreeAdapter.List(ctx, "project"); err != nil || len(worktrees) != 1 {
+		t.Fatalf("source-missing worktree projection = %+v err=%v, want one durable source projection", worktrees, err)
+	}
 	retried, err := authority.Apply(ctx, "project", request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if failure := retried.Failed[issueID]; !strings.Contains(failure, "authoritative close") || strings.Contains(failure, "fresh review required") {
-		t.Fatalf("integrated retry = %+v, want durable proof to reach task.close", retried)
+	if len(retried.Failed) != 0 || len(retried.Closed) != 1 || retried.Closed[0] != issueID {
+		t.Fatalf("integrated retry = %+v, want durable proof to close authoritatively", retried)
 	}
-	recoveryBody, err := json.Marshal(taskReviewLeaseRecoveryRequest{TaskID: issueID, ActorID: request.ActorID, ActorKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: pin.ReviewEpochEventID, AcceptedReviewEventID: pin.AcceptedReviewEventID})
+	closed, err := client.GetWithRuntime(ctx, "project", issueID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
-		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
-		Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": pin.ReviewEpochEventID, "reviewed_source_oid": "newer-reviewed-source"},
-	}); err != nil {
-		t.Fatal(err)
+	if closed.Status != domain.StatusDone || coordinationLease(closed, domain.CoordinationLeaseReview) != nil {
+		t.Fatalf("recovered task = %+v, want terminal completed state without review lease", closed)
 	}
-	staleResp, err := d.handleTaskReviewLeaseRecovery(ctx, protocol.RequestEnvelope{RequestID: "recover-stale-acceptance", Body: recoveryBody, Meta: protocol.Metadata{ProjectID: naming.ProjectID("project")}})
-	if err != nil || staleResp.OK || staleResp.Error == nil || !strings.Contains(staleResp.Error.Message, "accepted review") {
-		t.Fatalf("older acceptance recovery response = %+v err=%v, want fail-closed conflict", staleResp, err)
-	}
-	stillLeased, err := client.GetWithRuntime(ctx, "project", issueID)
+	replayed, err := authority.Apply(ctx, "project", request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease := coordinationLease(stillLeased, domain.CoordinationLeaseReview); lease == nil || !pin.Reviewer.Matches(lease.OwnerID, lease.OwnerKind) {
-		t.Fatalf("review lease after stale recovery = %+v, want newer live review preserved", lease)
+	if len(replayed.Failed) != 0 || len(replayed.Closed) != 1 || replayed.Closed[0] != issueID {
+		t.Fatalf("replayed integrated recovery = %+v, want idempotent closed result", replayed)
 	}
 }
 

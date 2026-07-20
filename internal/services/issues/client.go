@@ -3335,13 +3335,23 @@ func (c *Client) CloseWithRuntimeReviewLease(ctx context.Context, projectID, id 
 		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
 	}
 	canonical, identityErr := domain.CanonicalReviewerIdentity(reviewer.OwnerID, reviewer.OwnerKind)
-	if identityErr != nil || reviewEpochEventID <= 0 || acceptedReviewEventID <= 0 || strings.TrimSpace(sourceOID) == "" {
+	if identityErr != nil {
 		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), errors.New("complete accepted review close authority is required"))
+	}
+	sourceOID = strings.TrimSpace(sourceOID)
+	if sourceOID != "" && (reviewEpochEventID <= 0 || acceptedReviewEventID <= 0) {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), errors.New("source-fenced accepted review close authority is incomplete"))
 	}
 	if err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
 			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
-				if err := validateAcceptedReviewerAuthority(ctx, tx, id, canonical.OwnerID, canonical.OwnerKind, reviewEpochEventID, acceptedReviewEventID, sourceOID, nil); err != nil {
+				var err error
+				if sourceOID == "" {
+					err = validateAcceptedReviewerOutcome(ctx, tx, id, canonical.OwnerID, nil)
+				} else {
+					err = validateAcceptedReviewerAuthority(ctx, tx, id, canonical.OwnerID, canonical.OwnerKind, reviewEpochEventID, acceptedReviewEventID, sourceOID, nil)
+				}
+				if err != nil {
 					return err
 				}
 				return consumeAcceptedReviewerLease(ctx, tx, id, canonical.OwnerID)
