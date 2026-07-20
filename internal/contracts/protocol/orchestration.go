@@ -304,7 +304,7 @@ type OrchestrationReviewPass struct {
 	Matrix              domain.WorkerEvidenceReviewMatrix `json:"matrix"`
 	ExtraPassReason     string                            `json:"extra_pass_reason,omitempty"`
 	AffectedInvariants  []string                          `json:"affected_invariants,omitempty"`
-	BroaderInvalidation bool                              `json:"broader_invalidation,omitempty"`
+	BroaderInvalidation *bool                             `json:"broader_invalidation"`
 }
 
 type OrchestrationIntentResult struct {

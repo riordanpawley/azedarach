@@ -94,3 +94,25 @@ func TestProtocolV61PreservesCombinedOrchestrationViewProjectionDecisionLearning
 		t.Fatalf("orchestrator stop precondition omitted from request: %s", encoded)
 	}
 }
+
+func TestOrchestrationReviewPassPreservesBroaderInvalidationPresence(t *testing.T) {
+	broaderInvalidation := false
+	encoded, err := json.Marshal(OrchestrationReviewPass{BroaderInvalidation: &broaderInvalidation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shape map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &shape); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(shape["broader_invalidation"]); got != "false" {
+		t.Fatalf("broader_invalidation = %s, want explicit false", got)
+	}
+	var omitted OrchestrationReviewPass
+	if err := json.Unmarshal([]byte(`{}`), &omitted); err != nil {
+		t.Fatal(err)
+	}
+	if omitted.BroaderInvalidation != nil {
+		t.Fatalf("omitted broader_invalidation = %v, want nil", *omitted.BroaderInvalidation)
+	}
+}

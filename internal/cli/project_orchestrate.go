@@ -168,8 +168,10 @@ func OrchestrateReviewCommand(deps *Dependencies, opts OrchestrateReviewOptions)
 		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
 			return fmt.Errorf("decode --review-pass: %w", err)
 		}
-		if opts.Action == "return" && (strings.TrimSpace(parsed.Verdict) != "returned" || strings.TrimSpace(parsed.Angle) == "" || strings.TrimSpace(parsed.Matrix.Type) == "" || len(parsed.Matrix.CoveredCells)+len(parsed.Matrix.SkippedCells) == 0 || parsed.ReusedLayers == nil || parsed.AffectedInvariants == nil) {
-			return fmt.Errorf("--review-pass must record returned verdict, angle, reused layers, affected invariants, and covered or deliberately skipped matrix cells")
+		if opts.Action == "return" {
+			if err := validateReturnedReviewPass(parsed); err != nil {
+				return err
+			}
 		}
 		for _, skipped := range parsed.Matrix.SkippedCells {
 			if strings.TrimSpace(skipped.Cell) == "" || strings.TrimSpace(skipped.Reason) == "" {
@@ -218,6 +220,22 @@ func OrchestrateReviewCommand(deps *Dependencies, opts OrchestrateReviewOptions)
 	}
 	if len(result.Failed) > 0 || len(result.Pending) > 0 || len(result.Skipped) > 0 {
 		return fmt.Errorf("review %s incomplete; retry the same decision with --intent-key %s", opts.Action, result.IntentKey)
+	}
+	return nil
+}
+
+func containsNonEmptyString(values []string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func validateReturnedReviewPass(reviewPass protocol.OrchestrationReviewPass) error {
+	if strings.TrimSpace(reviewPass.Verdict) != "returned" || strings.TrimSpace(reviewPass.Angle) == "" || strings.TrimSpace(reviewPass.Matrix.Type) == "" || len(reviewPass.Matrix.CoveredCells)+len(reviewPass.Matrix.SkippedCells) == 0 || reviewPass.ReusedLayers == nil || !containsNonEmptyString(reviewPass.AffectedInvariants) || reviewPass.BroaderInvalidation == nil {
+		return fmt.Errorf("--review-pass must record returned verdict, angle, reused layers, affected invariants, explicit broader_invalidation, and covered or deliberately skipped matrix cells")
 	}
 	return nil
 }

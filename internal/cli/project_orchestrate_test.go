@@ -65,7 +65,7 @@ func TestParseOrchestrateReviewArgsEnforcesDecisionShape(t *testing.T) {
 	if accept.Action != "accept" || accept.RootIssueID != "az-root" || accept.IntentKey != "accept-1" || !accept.JSON || len(accept.IssueIDs) != 2 || accept.IssueIDs[0] != "az-1" {
 		t.Fatalf("accept options = %+v", accept)
 	}
-	returned, err := ParseOrchestrateReviewArgs("return", []string{"--issue", "az-2", "--finding", "fix race", "--finding", "add regression", "--severity", "medium", "--review-pass", `{"verdict":"returned","angle":"concurrency","affected_invariants":[],"matrix":{"type":"stateful","covered_cells":["recovery"],"skipped_cells":[]}}`, "--restart-worker"})
+	returned, err := ParseOrchestrateReviewArgs("return", []string{"--issue", "az-2", "--finding", "fix race", "--finding", "add regression", "--severity", "medium", "--review-pass", `{"verdict":"returned","angle":"concurrency","affected_invariants":["task.publication_queue"],"broader_invalidation":false,"matrix":{"type":"stateful","covered_cells":["recovery"],"skipped_cells":[]}}`, "--restart-worker"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +85,34 @@ func TestParseOrchestrateReviewArgsEnforcesDecisionShape(t *testing.T) {
 		if _, err := ParseOrchestrateReviewArgs(tt.action, tt.args); err == nil {
 			t.Fatalf("ParseOrchestrateReviewArgs(%q, %v) succeeded", tt.action, tt.args)
 		}
+	}
+}
+
+func TestValidateReturnedReviewPassRequiresPresenceAndAffectedInvariant(t *testing.T) {
+	noBroaderInvalidation := false
+	valid := protocol.OrchestrationReviewPass{
+		Verdict: "returned", Angle: "state", ReusedLayers: []string{},
+		AffectedInvariants: []string{"task.publication_queue"}, BroaderInvalidation: &noBroaderInvalidation,
+		Matrix: domain.WorkerEvidenceReviewMatrix{Type: "stateful", CoveredCells: []string{"recovery"}},
+	}
+	if err := validateReturnedReviewPass(valid); err != nil {
+		t.Fatalf("valid review pass: %v", err)
+	}
+	missingJudgment := valid
+	missingJudgment.BroaderInvalidation = nil
+	if err := validateReturnedReviewPass(missingJudgment); err == nil {
+		t.Fatal("missing broader_invalidation succeeded")
+	}
+	emptyInvariants := valid
+	emptyInvariants.AffectedInvariants = []string{}
+	if err := validateReturnedReviewPass(emptyInvariants); err == nil {
+		t.Fatal("empty affected_invariants succeeded")
+	}
+	broaderInvalidation := valid
+	broader := true
+	broaderInvalidation.BroaderInvalidation = &broader
+	if err := validateReturnedReviewPass(broaderInvalidation); err != nil {
+		t.Fatalf("explicit broader invalidation must remain recordable: %v", err)
 	}
 }
 

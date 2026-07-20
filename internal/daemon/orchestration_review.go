@@ -72,6 +72,12 @@ func validateOrchestrationReviewIntent(request protocol.OrchestrationIntentReque
 		if total > 3000 {
 			return fmt.Errorf("review findings exceed the 3000 character delivery limit")
 		}
+		if request.ReviewPass == nil || request.ReviewPass.BroaderInvalidation == nil {
+			return fmt.Errorf("review-return intent requires an explicit broader-invalidation judgment")
+		}
+		if len(uniqueNonEmpty(request.ReviewPass.AffectedInvariants)) == 0 {
+			return fmt.Errorf("review-return intent requires at least one affected invariant")
+		}
 		return nil
 	default:
 		return fmt.Errorf("unsupported orchestration intent %q", request.Kind)
@@ -1923,7 +1929,7 @@ func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context
 		metadata["review_matrix"] = request.ReviewPass.Matrix
 		metadata["review_extra_pass_reason"] = strings.TrimSpace(request.ReviewPass.ExtraPassReason)
 		metadata["review_affected_invariants"] = uniqueNonEmpty(request.ReviewPass.AffectedInvariants)
-		metadata["review_broader_invalidation"] = request.ReviewPass.BroaderInvalidation
+		metadata["review_broader_invalidation"] = *request.ReviewPass.BroaderInvalidation
 	}
 	fingerprint := reviewRequestFingerprint(request)
 	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}, NewestFirst: true})
