@@ -225,7 +225,8 @@ func TestTerminalizeAcceptedReviewPublicationAtomicallySupersedesExactEpoch(t *t
 			if err != nil {
 				t.Fatal(err)
 			}
-			op := domain.PublicationOperation{OperationID: "publication-" + string(state), ProjectID: "project", IssueID: issueID, IntentKey: "intent", RequestFingerprint: "fingerprint", ActorID: "reviewer", ReviewerKind: "orchestrator", ReviewEpochEventID: 17, AcceptedReviewEventID: 19, PatchEvidenceID: "patch-evidence", TargetID: "base", TargetBranch: "main", SourceRevision: "source", BaseRevision: "base", ValidationCommand: "npm test", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC()}
+			operationID := "publication-" + string(state)
+			op := domain.PublicationOperation{OperationID: operationID, ProjectID: "project", IssueID: issueID, IntentKey: "intent", RequestFingerprint: "fingerprint", ActorID: "reviewer", ReviewerKind: "orchestrator", ReviewEpochEventID: 17, AcceptedReviewEventID: 19, PatchEvidenceID: "patch-evidence", AcceptedPublicationOperationID: operationID, TargetID: "base", TargetBranch: "main", SourceRevision: "source", BaseRevision: "base", ValidationCommand: "npm test", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC()}
 			stored, _, err := queue.EnqueuePublication(ctx, op, "candidate-"+string(state))
 			if err != nil {
 				t.Fatal(err)
@@ -252,6 +253,7 @@ func TestTerminalizeAcceptedReviewPublicationAtomicallySupersedesExactEpoch(t *t
 				"epoch":           func(candidate *domain.PublicationOperation) { candidate.ReviewEpochEventID++ },
 				"accepted-review": func(candidate *domain.PublicationOperation) { candidate.AcceptedReviewEventID++ },
 				"patch-evidence":  func(candidate *domain.PublicationOperation) { candidate.PatchEvidenceID = "other-patch" },
+				"accepted-root":   func(candidate *domain.PublicationOperation) { candidate.AcceptedPublicationOperationID = "other-root" },
 			} {
 				t.Run("rejects-"+name+"-mismatch", func(t *testing.T) {
 					mismatched := claimed

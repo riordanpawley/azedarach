@@ -299,8 +299,9 @@ If any are missing, keep issue state `in_progress` or `open`.
 11. Ordinary validation and orchestration may run `just build`; it must remain
     isolated to `.tmp/az-test` and must not create, replace, or delete
     `bin/az`/`bin/azd`. Automated agents and project orchestration must not run
-    `just build-install-run` unless the user explicitly requests a production
-    rebuild/relink from the primary worktree, because that recipe intentionally
+    `just build-install` or `just build-install-run` unless the user explicitly
+    requests a production rebuild/relink from the primary worktree, because those
+    recipes intentionally
     installs a serialized, atomically switched `az`/`azd` generation and rejects
     linked worktrees. Installed command links must resolve only inside the stable
     install directory and never back into any Git worktree.
@@ -325,7 +326,7 @@ If any are missing, keep issue state `in_progress` or `open`.
 - `.envrc` keeps `GOPATH` and module downloads shared under the primary repo's `.azedarach/go/path`, but assigns build output to `.azedarach/go/caches/v1/<normal|race|coverage>/<main|issue-ID>`. It exports `-trimpath` through `GOFLAGS`; `AZEDARACH_GO_CACHE_ROOT` and `AZEDARACH_GOCACHE` may only restate their derived daemon-authoritative locations and are rejected when they redirect outside the project layout. `AZEDARACH_GOPATH` remains an explicit local module-download override.
 - Managed validators hold the repository-family Go cache lock shared while supported cache maintenance holds it exclusively. Managed `caches/v1` accounting defaults to a 50 GiB soft warning plus a 70 GiB hard refusal (binary GiB); separately inventoried legacy caches do not count toward either threshold. Override exact bytes with `AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES` and `AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES`; opt into selected-namespace maintenance with `AZEDARACH_GO_CACHE_AUTO_MAINTAIN=1`.
 - Canonical `just merge-gate` and `just review-gate` hold daemon-owned publication leases across their complete build/test/boundary sequences, and start immediately rather than waiting behind development or timing-capacity work. Ordinary builds, named test profiles, raw Go commands, benchmarks, race diagnostics, and boundary checks run outside daemon admission with worktree-isolated caches. Only `just test-ci-timing` uses capacity admission and waits for unleased Go work to quiesce; its overlap evidence is authoritative only on the controlled runner. Inspect live ownership without compiling Go via `just validation-status` or `just validation-watch`.
-- Production installation from the primary `main` worktree outranks development validation admission. `just build-install-run` must serialize against another production installer, but it must never wait for active shared or aggregate validation. A validation that overlaps a production install is noncanonical and must be rerun; production build, atomic install, daemon restart, and TUI availability proceed normally.
+- Production installation from the primary `main` worktree outranks development validation admission. `just build-install` and `just build-install-run` must serialize against another production installer, but they must never wait for active shared or aggregate validation. A validation that overlaps a production install is noncanonical and must be rerun; production build, atomic install, daemon restart, and TUI availability proceed normally.
 - Use `just go-cache-inventory` before legacy cleanup. `just go-cache-clean-legacy --confirm` uses supported Go cleanup for legacy build caches; add `--include-gopath-modcache` only to remove the legacy module download cache. It never removes legacy GOPATH binaries or other user files.
 - After `direnv allow`, use normal `go ...` commands from repo root without per-command env prefixes.
 

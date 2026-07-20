@@ -273,7 +273,7 @@ func TestTypedGitMergeRootToBaseRejectsStalePublicationBindingBeforeMutation(t *
 	operation := domain.PublicationOperation{
 		OperationID: "publication-stale-binding", ProjectID: f.projectID, IssueID: rootID, IntentKey: "accepted-root",
 		RequestFingerprint: "fingerprint", ActorID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator,
-		ReviewEpochEventID: 1, AcceptedReviewEventID: 2, PatchEvidenceID: "publication-stale-binding", TargetID: "base", TargetBranch: "main",
+		ReviewEpochEventID: 1, AcceptedReviewEventID: 2, PatchEvidenceID: "publication-stale-binding", AcceptedPublicationOperationID: "publication-stale-binding", TargetID: "base", TargetBranch: "main",
 		SourceRevision: sourceOID, BaseRevision: "stale-base", ValidationCommand: "consumer verify", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
 	}
 	store, err := f.daemon.publicationStoreForProject(f.projectID)

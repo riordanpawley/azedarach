@@ -1211,6 +1211,36 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 	}
 	defer func() { _ = tx.Rollback() }()
 	logicalID := logicalSessionIntentID(session)
+	if targetTable == sessionStateTable {
+		var physicalOwner Session
+		var roleRaw, scopeKindRaw, updatedAtRaw string
+		err := tx.QueryRowContext(ctx, `SELECT session_id,issue_id,role,scope_kind,scope_id,state,updated_at
+			FROM `+sessionStateTable+` WHERE project_id=? AND session_id=?`, projectID, session.ID).
+			Scan(&physicalOwner.ID, &physicalOwner.IssueID, &roleRaw, &scopeKindRaw, &physicalOwner.ScopeID, &physicalOwner.State, &updatedAtRaw)
+		if err == nil {
+			physicalOwner.Role = SessionRole(roleRaw)
+			physicalOwner.ScopeKind = SessionScopeKind(scopeKindRaw)
+			physicalOwner.UpdatedAt, err = parseRuntimeStateTime(updatedAtRaw)
+			if err != nil {
+				return fmt.Errorf("parse physical session owner freshness for %s/%s: %w", projectID, session.ID, err)
+			}
+			if logicalSessionIntentID(physicalOwner) != logicalID {
+				switch {
+				case rootedOrchestratorSessionIntent(session) && matchingRootedWorkerIntent(session, physicalOwner):
+					// The rooted transition below atomically retires the legacy worker.
+				case rootedOrchestratorSessionIntent(physicalOwner) && matchingRootedWorkerIntent(physicalOwner, session):
+					// A stale daemon may replay the retired worker after rooted ownership
+					// has committed. The physical owner is authoritative regardless of
+					// the replay's timestamp, so convergence is an idempotent no-op.
+					return tx.Commit()
+				default:
+					return fmt.Errorf("upsert session state %s/%s: physical runtime is owned by %s/%s scope %s", projectID, session.ID, physicalOwner.Role, physicalOwner.ScopeKind, physicalOwner.ScopeID)
+				}
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("read physical session owner for %s/%s: %w", projectID, session.ID, err)
+		}
+	}
 	var currentState SessionState
 	var currentUpdatedAtRaw string
 	if err := tx.QueryRowContext(ctx, `SELECT state,updated_at FROM `+targetTable+` WHERE project_id=? AND logical_id=?`, projectID, logicalID).Scan(&currentState, &currentUpdatedAtRaw); err == nil {

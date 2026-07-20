@@ -5,6 +5,9 @@ default:
 build-install-run *ARGS:
     ./scripts/build-install-run.sh {{ARGS}}
 
+build-install:
+    ./scripts/build-install-run.sh --no-run
+
 jaeger-inventory:
     ./scripts/jaeger-local.sh inventory
 
@@ -138,7 +141,7 @@ clean:
     rm -rf .tmp/az-test/ .tmp/cli-smoke/ coverage.out coverage.html
 
 install:
-    @echo "Refusing unpaired install: run 'just build-install-run --no-run' from the primary worktree" >&2
+    @echo "Refusing unpaired install: run 'just build-install' from the primary worktree" >&2
     @exit 1
 
 lint:

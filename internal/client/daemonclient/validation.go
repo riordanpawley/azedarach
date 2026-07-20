@@ -46,6 +46,14 @@ func (c *Client) ValidationStatus(ctx context.Context) (protocol.ValidationStatu
 	return out, nil
 }
 
+func (c *Client) ValidationArtifactRead(ctx context.Context, req protocol.ValidationArtifactReadRequest) (protocol.ValidationArtifactReadResponse, error) {
+	var out protocol.ValidationArtifactReadResponse
+	if err := c.commandJSON(ctx, protocol.CommandValidationArtifactRead, req, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
 func (c *Client) PublicationEvidenceRecord(ctx context.Context, req protocol.PublicationEvidenceRecordRequest) (protocol.PublicationEvidenceRecordResponse, error) {
 	var out protocol.PublicationEvidenceRecordResponse
 	if err := c.commandJSON(ctx, protocol.CommandPublicationEvidenceRecord, req, &out); err != nil {

@@ -2737,11 +2737,11 @@ func TestRuntimeStateStoreRootedTransitionRejectsStaleWorkerAcrossStores(t *test
 	}
 	staleWorker.State = SessionStatePaused
 	staleWorker.UpdatedAt = now.Add(2 * time.Second)
-	if err := second.UpsertSessionState(ctx, "p", staleWorker); err == nil {
-		t.Fatal("stale worker writer recreated a second role for rooted runtime")
+	if err := second.UpsertSessionState(ctx, "p", staleWorker); err != nil {
+		t.Fatalf("stale worker replay should converge as an idempotent no-op: %v", err)
 	}
 	rows, err := second.ListSessionIntentStates(ctx, "p")
-	if err != nil || len(rows) != 1 || !rootedOrchestratorSessionIntent(rows[0]) {
+	if err != nil || len(rows) != 1 || !rootedOrchestratorSessionIntent(rows[0]) || rows[0].State != rooted.State || !rows[0].UpdatedAt.Equal(rooted.UpdatedAt) {
 		t.Fatalf("final intents=%+v err=%v", rows, err)
 	}
 }

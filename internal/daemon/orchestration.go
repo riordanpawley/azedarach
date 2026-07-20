@@ -1556,6 +1556,14 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	if issueClient == nil {
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("issue store unavailable")
 	}
+	requestedTasks := make([]domain.Task, 0, len(result.Requested))
+	for _, issueID := range result.Requested {
+		task, taskErr := issueClient.GetWithRuntime(ctx, projectID, issueID)
+		if taskErr != nil {
+			return protocol.OrchestrationIntentResult{}, fmt.Errorf("load bounded worker result input for %s: %w", issueID, taskErr)
+		}
+		requestedTasks = append(requestedTasks, task)
+	}
 	requestedIntents := make([]issues.RequestedOrchestrationStart, 0, len(result.Requested))
 	requestDigest, err := orchestrationStartRequestDigest(request, result.Requested)
 	if err != nil {
@@ -1582,6 +1590,10 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 					return protocol.OrchestrationIntentResult{}, fmt.Errorf("record queued orchestration start phase: %w", updateErr)
 				}
 				result.Pending = append(result.Pending, protocol.OrchestrationPending{IssueID: requested.IssueID, Phase: phase, Message: err.Error(), Retryable: true})
+			}
+			result.Results, err = buildOrchestrationResultSummaries(result, requestedTasks, domain.WorkflowRoleWorker, nil)
+			if err != nil {
+				return protocol.OrchestrationIntentResult{}, err
 			}
 			return result, nil
 		}
@@ -1718,7 +1730,71 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	if err := completeRequestedOrchestrationStarts(ctx, issueClient, requestedIntents, nil); err != nil {
 		return protocol.OrchestrationIntentResult{}, err
 	}
+	result.Results, err = buildOrchestrationResultSummaries(result, scopeTasks, domain.WorkflowRoleWorker, nil)
+	if err != nil {
+		return protocol.OrchestrationIntentResult{}, err
+	}
 	return result, nil
+}
+
+func buildOrchestrationResultSummaries(result protocol.OrchestrationIntentResult, tasks []domain.Task, defaultRole domain.WorkflowRole, revisions map[string]string) ([]protocol.WorkflowPhaseResult, error) {
+	taskByID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		taskByID[task.ID.String()] = task
+	}
+	returned := workflowStringSet(result.Returned)
+	closed := workflowStringSet(result.Closed)
+	started := workflowStringSet(result.Started)
+	out := make([]protocol.WorkflowPhaseResult, 0, len(result.Requested))
+	for _, issueID := range result.Requested {
+		task, ok := taskByID[issueID]
+		if !ok {
+			return nil, fmt.Errorf("bounded %s result input unavailable for %s", defaultRole, issueID)
+		}
+		role := defaultRole
+		if defaultRole == domain.WorkflowRoleWorker && task.Type == domain.TypeEpic {
+			role = domain.WorkflowRoleIntegrator
+		}
+		status, outcome, failure := "skipped", result.Skipped[issueID], result.Failed[issueID]
+		if failure != "" {
+			status = "failed"
+		} else if pendingForIssue(result.Pending, issueID) {
+			status = "pending"
+		} else if _, ok := started[issueID]; ok {
+			status = "started"
+		} else if _, ok := returned[issueID]; ok {
+			status = "returned"
+		} else if _, ok := closed[issueID]; ok {
+			status = "completed"
+		}
+		revision := domain.WorkflowIssueContextRevision(task)
+		if exact := strings.TrimSpace(revisions[issueID]); exact != "" {
+			revision = exact
+		}
+		summary, err := domain.BuildWorkflowResultSummary(domain.WorkflowResultInput{Role: role, IssueID: issueID, SourceRevision: revision, Status: status, Outcome: outcome, FailureSummary: failure})
+		if err != nil {
+			return nil, fmt.Errorf("build bounded %s result for %s: %w", role, issueID, err)
+		}
+		out = append(out, protocol.WorkflowPhaseResult{IssueID: issueID, Summary: summary})
+	}
+	return out, nil
+}
+
+func pendingForIssue(values []protocol.OrchestrationPending, issueID string) bool {
+	for _, value := range values {
+		if naming.IssueIDsEqual(value.IssueID, issueID) {
+			return true
+		}
+	}
+	return false
+}
+
+func workflowStringSet(values []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		out[value] = struct{}{}
+	}
+	return out
 }
 
 func completeRequestedOrchestrationStarts(ctx context.Context, issueClient *issues.Client, requestedIntents []issues.RequestedOrchestrationStart, cause error) error {
