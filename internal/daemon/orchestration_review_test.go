@@ -2365,6 +2365,67 @@ func TestReviewAcceptRetryRejectsBranchMutationAfterDurableAcceptance(t *testing
 	}
 }
 
+func TestIntegratedAcceptedReviewRecoveryProofIsActorAndEpochFenced(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return "reviewed-source", nil }
+	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "recover-integrated", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	first, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(first.Failed[issueID], "authoritative close") {
+		t.Fatalf("first acceptance = %+v, want accepted-close retry state", first)
+	}
+	authority := daemonOrchestrationAuthority{daemon: d}
+	pin, err := authority.acceptedReviewPinForIntent(ctx, "project", issueID, request, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendTaskIntegrationReceiptIfAbsent(ctx, issueID, issues.TaskIntegrationReceipt{
+		ProjectID: "project", SourceBranch: "issue/recover", TargetBranch: "main", TargetID: "base",
+		BaseOID: "base-before", SourceOID: pin.SourceOID, TargetOID: "integrated-target", Integrated: true, ConfiguredBaseTarget: true,
+	}, repoDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := authority.validateIntegratedAcceptedReviewRecovery(ctx, "project", issueID, pin); err != nil {
+		t.Fatalf("exact recovery proof: %v", err)
+	}
+	wrongOwner := pin
+	wrongOwner.Reviewer.OwnerID = "other-reviewer"
+	if err := authority.validateIntegratedAcceptedReviewRecovery(ctx, "project", issueID, wrongOwner); err == nil || !strings.Contains(err.Error(), "reviewer lease") {
+		t.Fatalf("wrong-owner recovery error = %v, want reviewer lease fence", err)
+	}
+	wrongEpoch := pin
+	wrongEpoch.ReviewEpochEventID++
+	if err := authority.validateIntegratedAcceptedReviewRecovery(ctx, "project", issueID, wrongEpoch); err == nil || !strings.Contains(err.Error(), "accepted review actor, epoch") {
+		t.Fatalf("wrong-epoch recovery error = %v, want accepted-review provenance fence", err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
+		Payload: map[string]any{"actor_id": request.ActorID, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request), "outcome": string(domain.ReviewOutcomeIntegrationFailed), "failure": "source branch unavailable"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) {
+		return "", fmt.Errorf("source branch unavailable")
+	}
+	retried, err := authority.Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failure := retried.Failed[issueID]; !strings.Contains(failure, "authoritative close") || strings.Contains(failure, "fresh review required") {
+		t.Fatalf("integrated retry = %+v, want durable proof to reach task.close", retried)
+	}
+}
+
 func TestReviewAcceptTerminalCloseBlocksEvidenceMutationWhileReviewerLeaseIsFenced(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
