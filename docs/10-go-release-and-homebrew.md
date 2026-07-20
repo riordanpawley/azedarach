@@ -29,6 +29,14 @@ This repository now ships the Go implementation as the canonical `az` CLI.
    - Successful immutable generations are retained across later installs so
      long-lived clients keep access to their paired daemon. Do not manually
      remove generation directories while clients from them may still run.
+   - The global daemon remains pinned to its immutable `az`/`azd` generation,
+     but daemon-created worker, orchestrator, and advisor shells replace that
+     generation's PATH entry with the installer control directory. Bare `az`
+     and `azd` in those shells therefore follow the next atomic
+     `.azedarach-current` switch without restarting the shell. Sessions created
+     by an older daemon may still carry a retained generation PATH;
+     `command -v az` diagnoses that state honestly, and re-entering through the stable
+     installed control link refreshes it.
 3. If an older worktree-targeting symlink exists, migrate it to the stable,
    paired generation layout with the local helper:
    - `just build-install-run --no-run`

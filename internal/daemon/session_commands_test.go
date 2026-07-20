@@ -9861,9 +9861,10 @@ func TestBuildSessionLaunchCommandIncludesInitCommandsAndIssueEnv(t *testing.T) 
 	}
 }
 
-func TestGlobalSessionLaunchUsesInheritedPathForAgentAndChildren(t *testing.T) {
+func TestGlobalSessionLaunchUsesStableControlPathForAgentAndChildren(t *testing.T) {
 	base := t.TempDir()
-	generationDir := filepath.Join(base, "install", ".azedarach-generations", "generation.fresh")
+	installDir := filepath.Join(base, "install")
+	generationDir := filepath.Join(installDir, ".azedarach-generations", "generation.fresh")
 	staleBin := filepath.Join(base, "repo", "bin")
 	toolBin := filepath.Join(base, "tools")
 	for _, dir := range []string{generationDir, staleBin, toolBin} {
@@ -9885,6 +9886,12 @@ func TestGlobalSessionLaunchUsesInheritedPathForAgentAndChildren(t *testing.T) {
 	for _, binary := range []string{"az", "azd"} {
 		writeExecutable(filepath.Join(staleBin, binary), `printf 'STALE|%s|%s\n' "$0" "$*" >> "$TRACE"
 `)
+		if err := os.Symlink(filepath.Join(".azedarach-current", binary), filepath.Join(installDir, binary)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(".azedarach-generations", "generation.fresh"), filepath.Join(installDir, ".azedarach-current")); err != nil {
+		t.Fatal(err)
 	}
 	writeExecutable(filepath.Join(toolBin, "codex"), `az prime
 az ticket get djm
@@ -9894,6 +9901,7 @@ wait
 `)
 
 	inheritedPath := strings.Join([]string{generationDir, staleBin, toolBin, "/usr/bin", "/bin"}, string(os.PathListSeparator))
+	t.Setenv("PATH", inheritedPath)
 	d := &Daemon{cfg: Config{
 		CLITool:                 "codex",
 		SessionShell:            "/bin/sh",
@@ -9911,7 +9919,7 @@ wait
 		d.sessionLaunchStartupExportCommands(daemonProjectRuntimeConfig{}, issueResourceLifecycleContext{}),
 	)
 	cmd := exec.Command("/bin/sh", "-c", command)
-	cmd.Env = append(os.Environ(), "PATH="+inheritedPath, "TRACE="+tracePath)
+	cmd.Env = append(os.Environ(), "PATH="+d.daemonScopeTmuxEnvironment()["PATH"], "TRACE="+tracePath)
 	cmd.Stdin = strings.NewReader("az fallback-shell\nazd fallback-shell\nexit\n")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("managed session launch failed: %v\n%s\ncommand=%s", err, output, command)
@@ -9925,14 +9933,14 @@ wait
 		t.Fatalf("trace used stale repository binary:\n%s", trace)
 	}
 	for _, want := range []string{
-		"installed-az|" + filepath.Join(generationDir, "az") + "|prime",
-		"installed-az|" + filepath.Join(generationDir, "az") + "|ticket get djm",
-		"installed-az|" + filepath.Join(generationDir, "az") + "|sync-init",
-		"installed-azd|" + filepath.Join(generationDir, "azd") + "|version",
-		"installed-az|" + filepath.Join(generationDir, "az") + "|version",
-		"installed-az|" + filepath.Join(generationDir, "az") + "|ai hook run --agent=codex session_end",
-		"installed-az|" + filepath.Join(generationDir, "az") + "|fallback-shell",
-		"installed-azd|" + filepath.Join(generationDir, "azd") + "|fallback-shell",
+		"installed-az|" + filepath.Join(installDir, "az") + "|prime",
+		"installed-az|" + filepath.Join(installDir, "az") + "|ticket get djm",
+		"installed-az|" + filepath.Join(installDir, "az") + "|sync-init",
+		"installed-azd|" + filepath.Join(installDir, "azd") + "|version",
+		"installed-az|" + filepath.Join(installDir, "az") + "|version",
+		"installed-az|" + filepath.Join(installDir, "az") + "|ai hook run --agent=codex session_end",
+		"installed-az|" + filepath.Join(installDir, "az") + "|fallback-shell",
+		"installed-azd|" + filepath.Join(installDir, "azd") + "|fallback-shell",
 	} {
 		if !strings.Contains(trace, want) {
 			t.Fatalf("trace missing %q:\n%s", want, trace)
@@ -9940,6 +9948,67 @@ wait
 	}
 	if strings.Contains(command, "export PATH=") {
 		t.Fatalf("launch command injects PATH policy: %s", command)
+	}
+}
+
+func TestManagedSessionPathFollowsInSessionControlLinkSwitch(t *testing.T) {
+	base := t.TempDir()
+	installDir := filepath.Join(base, "install")
+	oldGeneration := filepath.Join(installDir, ".azedarach-generations", "generation.old")
+	newGeneration := filepath.Join(installDir, ".azedarach-generations", "generation.new")
+	for _, generation := range []string{oldGeneration, newGeneration} {
+		if err := os.MkdirAll(generation, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, binary := range []string{"az", "azd"} {
+		for generation, label := range map[string]string{oldGeneration: "old", newGeneration: "new"} {
+			body := "#!/bin/sh\nprintf '" + label + "-" + binary + "\\n'\n"
+			if err := os.WriteFile(filepath.Join(generation, binary), []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink(filepath.Join(".azedarach-current", binary), filepath.Join(installDir, binary)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	control := filepath.Join(installDir, ".azedarach-current")
+	if err := os.Symlink(filepath.Join(".azedarach-generations", "generation.old"), control); err != nil {
+		t.Fatal(err)
+	}
+
+	inherited := oldGeneration + string(os.PathListSeparator) + "/usr/bin:/bin"
+	t.Setenv("PATH", inherited)
+	d := &Daemon{cfg: Config{ManagedGenerationBinDir: oldGeneration}}
+	sessionPath := d.daemonScopeTmuxEnvironment()["PATH"]
+	if sessionPath != appconfig.ManagedSessionPath(inherited, oldGeneration) {
+		t.Fatalf("session PATH = %q, want stable control path derived from %q", sessionPath, inherited)
+	}
+	run := func(binary string) string {
+		t.Helper()
+		cmd := exec.Command("/bin/sh", "-c", binary)
+		cmd.Env = append(os.Environ(), "PATH="+sessionPath)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("run %s: %v (%s)", binary, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	if got := run("az"); got != "old-az" {
+		t.Fatalf("az before switch = %q, want old-az", got)
+	}
+	nextControl := control + ".next"
+	if err := os.Symlink(filepath.Join(".azedarach-generations", "generation.new"), nextControl); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(nextControl, control); err != nil {
+		t.Fatal(err)
+	}
+	if got := run("az"); got != "new-az" {
+		t.Fatalf("az after switch = %q, want new-az", got)
+	}
+	if got := run("azd"); got != "new-azd" {
+		t.Fatalf("azd after switch = %q, want new-azd", got)
 	}
 }
 

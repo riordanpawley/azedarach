@@ -139,6 +139,50 @@ func PrependPathEntry(pathValue, entry string) string {
 	return strings.Join(entries, string(os.PathListSeparator))
 }
 
+// ManagedSessionPath replaces an immutable managed daemon generation entry
+// with its installer-owned control directory. Long-lived interactive sessions
+// therefore follow later atomic .azedarach-current switches, while the daemon
+// process itself remains pinned to its exact coherent generation.
+//
+// Paths that do not contain generationDir are returned unchanged. This keeps
+// unmanaged and explicitly worktree-scoped environments out of managed-install
+// policy.
+func ManagedSessionPath(pathValue, generationDir string) string {
+	generationDir = strings.TrimSpace(generationDir)
+	if generationDir == "" {
+		return pathValue
+	}
+	installDir := filepath.Dir(filepath.Dir(generationDir))
+	entries := filepath.SplitList(pathValue)
+	found := false
+	for _, entry := range entries {
+		if strings.TrimSpace(entry) != "" && samePathEntry(entry, generationDir) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return pathValue
+	}
+
+	out := make([]string, 0, len(entries))
+	insertedControl := false
+	for _, entry := range entries {
+		if strings.TrimSpace(entry) != "" && samePathEntry(entry, generationDir) {
+			if !insertedControl {
+				out = append(out, installDir)
+				insertedControl = true
+			}
+			continue
+		}
+		if strings.TrimSpace(entry) != "" && samePathEntry(entry, installDir) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return strings.Join(out, string(os.PathListSeparator))
+}
+
 func samePathEntry(left, right string) bool {
 	identity := func(path string) string {
 		path = filepath.Clean(path)

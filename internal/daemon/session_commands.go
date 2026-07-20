@@ -6269,7 +6269,13 @@ func (d *Daemon) daemonScopeTmuxEnvironment() map[string]string {
 	if d != nil && d.cfg.ScopedRuntime {
 		scope = "worktree"
 	}
-	return map[string]string{"AZEDARACH_DAEMON_SCOPE": scope}
+	environment := map[string]string{"AZEDARACH_DAEMON_SCOPE": scope}
+	if d != nil && !d.cfg.ScopedRuntime && strings.TrimSpace(d.cfg.ManagedGenerationBinDir) != "" {
+		if sessionPath := appconfig.ManagedSessionPath(os.Getenv("PATH"), d.cfg.ManagedGenerationBinDir); sessionPath != os.Getenv("PATH") {
+			environment["PATH"] = sessionPath
+		}
+	}
+	return environment
 }
 
 const initialPromptShellVariable = "__AZEDARACH_INITIAL_PROMPT"
