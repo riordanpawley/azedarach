@@ -69,11 +69,11 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 				t.Fatalf("validation authority migration checksum = %q", checksum)
 			}
 			var authorityColumns int
-			if err = store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_validation_requests') WHERE name IN ('scope','purpose','execution','authoritative_request_id','compatibility_key','isolation_mode','environment_fingerprint','override_kind','override_actor','override_reason','issue_priority','priority_bypass_count')`).Scan(&authorityColumns); err != nil {
+			if err = store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_validation_requests') WHERE name IN ('scope','purpose','execution','authoritative_request_id','compatibility_key','isolation_mode','environment_fingerprint','override_kind','override_actor','override_reason','issue_priority','priority_bypass_count','reviewer_kind','publication_operation_id','accepted_review_event_id','accepted_publication_operation_id')`).Scan(&authorityColumns); err != nil {
 				t.Fatal(err)
 			}
-			if authorityColumns != 12 {
-				t.Fatalf("validation authority columns = %d, want 12", authorityColumns)
+			if authorityColumns != 16 {
+				t.Fatalf("validation authority columns = %d, want 16", authorityColumns)
 			}
 			var objects, afterOperations int
 			if err = store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN (
@@ -949,6 +949,41 @@ func TestPublicationReviewAuthorityMigrationUpgradesHistoricalQueueAndReopens(t 
 	defer reopened.Close()
 	if _, err := reopened.PublicationOperations(context.Background(), "project", "", false); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPublicationReviewAuthorityMigrationRejectsAppliedValidationSchemaDrift(t *testing.T) {
+	tests := []struct {
+		name   string
+		column string
+	}{
+		{name: "reviewer kind", column: "reviewer_kind"},
+		{name: "publication operation", column: "publication_operation_id"},
+		{name: "accepted review event", column: "accepted_review_event_id"},
+		{name: "accepted publication operation", column: "accepted_publication_operation_id"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+			seedOperationsMigrations(t, dbPath, 9)
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`ALTER TABLE daemon_validation_requests RENAME COLUMN ` + tt.column + ` TO ` + tt.column + `_drift`); err != nil {
+				_ = db.Close()
+				t.Fatal(err)
+			}
+			if err = db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			drifted := NewAtPath(dbPath, slog.Default())
+			defer drifted.Close()
+			if _, err = drifted.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), tt.column) {
+				t.Fatalf("schema drift error = %v, want missing %s", err, tt.column)
+			}
+		})
 	}
 }
 

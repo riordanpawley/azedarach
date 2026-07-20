@@ -63,6 +63,11 @@ test-integration:
 test-migration-clone:
     just test-timing migration-clone
 
+# Safely discover, online-backup, and validate the root user database plus every
+# existing registered project database. Candidate code opens clones only.
+test-migration-clone-real:
+    ./scripts/test-real-database-migration-clones.sh
+
 test-race:
     just test-timing race
 

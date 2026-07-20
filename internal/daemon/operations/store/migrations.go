@@ -214,7 +214,11 @@ func validateValidationLeaseSchema(ctx context.Context, db *sql.DB) error {
 			"command text not null",
 			"source_revision text not null",
 			"reviewer_id text not null default ''",
+			"reviewer_kind text not null default ''",
 			"review_epoch_event_id integer not null default 0 check (review_epoch_event_id >= 0)",
+			"publication_operation_id text not null default ''",
+			"accepted_review_event_id integer not null default 0 check (accepted_review_event_id >= 0)",
+			"accepted_publication_operation_id text not null default ''",
 			"scope text not null default 'ticket' check (scope in ('repository','ticket'))",
 			"purpose text not null default 'legacy' check (purpose in ('legacy','capacity','development','push_gate','review_evidence'))",
 			"execution text not null default 'executed' check (execution in ('executed','joined','reused','skipped'))",
@@ -293,6 +297,20 @@ func validateValidationLeaseSchema(ctx context.Context, db *sql.DB) error {
 			if !strings.Contains(normalized, fragment) {
 				return fmt.Errorf("validation lease schema drift: %s %s is missing %q", object.typeName, object.name, fragment)
 			}
+		}
+	}
+	for _, column := range []string{
+		"reviewer_kind",
+		"publication_operation_id",
+		"accepted_review_event_id",
+		"accepted_publication_operation_id",
+	} {
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('daemon_validation_requests') WHERE name=?`, column).Scan(&count); err != nil {
+			return fmt.Errorf("validate validation lease column %s: %w", column, err)
+		}
+		if count != 1 {
+			return fmt.Errorf("validation lease schema drift: table daemon_validation_requests is missing exact column %q", column)
 		}
 	}
 	return nil
