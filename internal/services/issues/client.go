@@ -3778,6 +3778,7 @@ func latestTrustedReviewOutcomeForCurrentEpoch(ctx context.Context, tx *sql.Tx, 
 func (c *Client) releaseOwnership(ctx context.Context, issueID string, params OwnershipClaimParams) error {
 	issueID = strings.TrimSpace(issueID)
 	actorID := strings.TrimSpace(params.OwnerID)
+	actorKind := strings.TrimSpace(params.OwnerKind)
 	if actorID == "" {
 		actorID = strings.TrimSpace(params.ReleasedBy)
 	}
@@ -3787,6 +3788,9 @@ func (c *Client) releaseOwnership(ctx context.Context, issueID string, params Ow
 	}
 	if !purpose.Valid() {
 		return c.wrapError("release-ownership", issueID, fmt.Errorf("invalid ownership purpose %q", purpose))
+	}
+	if params.ExpectedReviewAdmission != nil && purpose != domain.CoordinationLeaseReview {
+		return c.wrapError("release-ownership", issueID, errors.New("review admission pin requires review lease purpose"))
 	}
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
 		db, err := c.dbHandle()
@@ -3807,6 +3811,11 @@ func (c *Client) releaseOwnership(ctx context.Context, issueID string, params Ow
 		if err != nil {
 			return c.wrapError("release-ownership", issueID, err)
 		}
+		if params.ExpectedReviewAdmission != nil {
+			if err := validateReviewAdmissionPin(ctx, tx, issueID, *params.ExpectedReviewAdmission); err != nil {
+				return c.wrapError("release-ownership", issueID, err)
+			}
+		}
 		now := time.Now().UTC()
 		var lease *domain.CoordinationLease
 		lease, err = coordinationLeaseForUpdate(ctx, tx, issueID, purpose)
@@ -3815,6 +3824,9 @@ func (c *Client) releaseOwnership(ctx context.Context, issueID string, params Ow
 		}
 		if lease != nil && !lease.IsExpired(now) && !strings.EqualFold(lease.OwnerID, actorID) && !params.Force {
 			return c.wrapError("release-ownership", issueID, fmt.Errorf("%w: %s lease owned by %s", domain.ErrConflict, purpose, lease.OwnerID))
+		}
+		if lease != nil && !lease.IsExpired(now) && actorKind != "" && !strings.EqualFold(lease.OwnerKind, actorKind) && !params.Force {
+			return c.wrapError("release-ownership", issueID, fmt.Errorf("%w: %s lease owner kind is %s", domain.ErrConflict, purpose, lease.OwnerKind))
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases WHERE issue_id = ? AND purpose = ?`, issueID, purpose); err != nil {
 			return c.wrapError("release-ownership", issueID, err)

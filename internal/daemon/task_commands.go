@@ -2197,6 +2197,14 @@ type taskOwnershipRequest struct {
 	Purpose   domain.CoordinationLeasePurpose `json:"purpose,omitempty"`
 }
 
+type taskReviewLeaseRecoveryRequest struct {
+	TaskID                string `json:"task_id"`
+	ActorID               string `json:"actor_id"`
+	ActorKind             string `json:"actor_kind"`
+	ReviewEpochEventID    int64  `json:"review_epoch_event_id"`
+	AcceptedReviewEventID int64  `json:"accepted_review_event_id"`
+}
+
 func (d *Daemon) handleTaskOwnershipClaim(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	projectID := d.projectID(req.Meta)
 	var cmd taskOwnershipRequest
@@ -2238,6 +2246,39 @@ func (d *Daemon) handleTaskOwnershipRelease(ctx context.Context, req protocol.Re
 		OwnerID: cmd.OwnerID,
 		Force:   cmd.Force,
 		Purpose: cmd.Purpose,
+	})
+	if err != nil {
+		return d.errorResponse(req, taskOwnershipErrorCode(err), err.Error()), nil
+	}
+	return d.taskOwnershipMutationResponse(req, projectID, task)
+}
+
+func (d *Daemon) handleTaskReviewLeaseRecovery(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	projectID := d.projectID(req.Meta)
+	var cmd taskReviewLeaseRecoveryRequest
+	if err := json.Unmarshal(req.Body, &cmd); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
+	}
+	reviewer, err := domain.CanonicalReviewerIdentity(cmd.ActorID, cmd.ActorKind)
+	if err != nil || cmd.ReviewEpochEventID <= 0 || cmd.AcceptedReviewEventID <= 0 {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "review lease recovery requires typed actor, review epoch event, and accepted review event"), nil
+	}
+	authority := daemonOrchestrationAuthority{daemon: d}
+	pin, err := authority.integratedAcceptedReviewRecoveryPin(ctx, projectID, cmd.TaskID, reviewer, cmd.ReviewEpochEventID, cmd.AcceptedReviewEventID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
+	}
+	issueClient := d.issueClientForProject(projectID)
+	admission, err := issueClient.CaptureReviewAdmissionPin(ctx, cmd.TaskID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("capture current review epoch: %v", err)), nil
+	}
+	if admission.ReviewEpochEventID != pin.ReviewEpochEventID {
+		return d.errorResponse(req, protocol.ErrorCodeConflict, "review request epoch changed before recovery"), nil
+	}
+	task, err := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, cmd.TaskID, issues.OwnershipClaimParams{
+		OwnerID: reviewer.OwnerID, OwnerKind: reviewer.OwnerKind, Purpose: domain.CoordinationLeaseReview,
+		ExpectedReviewAdmission: &admission,
 	})
 	if err != nil {
 		return d.errorResponse(req, taskOwnershipErrorCode(err), err.Error()), nil

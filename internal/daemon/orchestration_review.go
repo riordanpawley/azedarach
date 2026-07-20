@@ -1114,6 +1114,35 @@ func (a daemonOrchestrationAuthority) validateIntegratedAcceptedReviewRecovery(c
 	return fmt.Errorf("no authoritative post-accept integration receipt matches reviewed source %s", pin.SourceOID)
 }
 
+func (a daemonOrchestrationAuthority) integratedAcceptedReviewRecoveryPin(ctx context.Context, projectID, issueID string, reviewer domain.ReviewerIdentity, reviewEpochEventID, acceptedReviewEventID int64) (acceptedReviewPin, error) {
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return acceptedReviewPin{}, fmt.Errorf("issue store unavailable")
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}, NewestFirst: true})
+	if err != nil {
+		return acceptedReviewPin{}, fmt.Errorf("read accepted review proof: %w", err)
+	}
+	for _, event := range events {
+		outcome, trusted := domain.TrustedReviewOutcome(event)
+		if event.ID != acceptedReviewEventID || !trusted || outcome != domain.ReviewOutcomeAccepted {
+			continue
+		}
+		pin := acceptedReviewPin{
+			Reviewer: reviewer, ReviewEpochEventID: reviewEpochEventID, AcceptedReviewEventID: acceptedReviewEventID,
+			SourceOID: strings.TrimSpace(observationPayloadString(event.Payload, "reviewed_source_oid")),
+		}
+		if pin.SourceOID == "" {
+			return acceptedReviewPin{}, fmt.Errorf("accepted review event %d has no reviewed source", acceptedReviewEventID)
+		}
+		if err := a.validateIntegratedAcceptedReviewRecovery(ctx, projectID, issueID, pin); err != nil {
+			return acceptedReviewPin{}, err
+		}
+		return pin, nil
+	}
+	return acceptedReviewPin{}, fmt.Errorf("exact accepted review event %d is unavailable", acceptedReviewEventID)
+}
+
 // activeValidationReviewReturn preserves the formal review outcome when the
 // canonical aggregate gate assigned during the current review-request epoch
 // moves the worker back to active before reporting a failure. The durable gate

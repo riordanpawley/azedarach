@@ -2424,6 +2424,25 @@ func TestIntegratedAcceptedReviewRecoveryProofIsActorAndEpochFenced(t *testing.T
 	if failure := retried.Failed[issueID]; !strings.Contains(failure, "authoritative close") || strings.Contains(failure, "fresh review required") {
 		t.Fatalf("integrated retry = %+v, want durable proof to reach task.close", retried)
 	}
+	recoveryBody, err := json.Marshal(taskReviewLeaseRecoveryRequest{TaskID: issueID, ActorID: request.ActorID, ActorKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: pin.ReviewEpochEventID, AcceptedReviewEventID: pin.AcceptedReviewEventID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryResp, err := d.handleTaskReviewLeaseRecovery(ctx, protocol.RequestEnvelope{RequestID: "recover-review", Body: recoveryBody, Meta: protocol.Metadata{ProjectID: naming.ProjectID("project")}})
+	if err != nil || !recoveryResp.OK {
+		message := ""
+		if recoveryResp.Error != nil {
+			message = recoveryResp.Error.Message
+		}
+		t.Fatalf("typed recovery response = %+v message=%q err=%v", recoveryResp, message, err)
+	}
+	recovered, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease := coordinationLease(recovered, domain.CoordinationLeaseReview); lease != nil {
+		t.Fatalf("review lease after typed recovery = %+v, want released", lease)
+	}
 }
 
 func TestReviewAcceptTerminalCloseBlocksEvidenceMutationWhileReviewerLeaseIsFenced(t *testing.T) {

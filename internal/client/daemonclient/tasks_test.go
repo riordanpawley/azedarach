@@ -84,6 +84,27 @@ func (t *taskRecordingTransport) Subscribe(context.Context, string, uint64) (<-c
 	return nil, errors.New("not implemented")
 }
 
+func TestRecoverTaskReviewLeaseUsesTypedDaemonCommand(t *testing.T) {
+	transport := &taskRecordingTransport{replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		if req.Command != CommandTaskRecoverReviewLease {
+			t.Fatalf("command = %q, want %q", req.Command, CommandTaskRecoverReviewLease)
+		}
+		assertTaskProjectID(t, req, "project")
+		var body TaskReviewLeaseRecoveryRequest
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.TaskID != "az-1" || body.ActorID != "reviewer" || body.ActorKind != "orchestrator" || body.ReviewEpochEventID != 41 || body.AcceptedReviewEventID != 52 {
+			t.Fatalf("request = %+v", body)
+		}
+		return responseWithJSON(t, req, domain.Task{ID: naming.IssueID("az-1")}), nil
+	}}
+	client := New(transport).WithProjectID("project")
+	if _, err := client.RecoverTaskReviewLease(context.Background(), "az-1", TaskReviewLeaseRecoveryRequest{ActorID: "reviewer", ActorKind: "orchestrator", ReviewEpochEventID: 41, AcceptedReviewEventID: 52}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func mustMarshalTaskSnapshotPayload(t *testing.T, protocolVersion protocol.Version, projectID string, revision uint64, tasks []domain.Task) []byte {
 	t.Helper()
 	body, err := json.Marshal(protocol.TaskListSnapshotPayload{
