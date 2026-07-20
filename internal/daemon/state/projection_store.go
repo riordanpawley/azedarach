@@ -999,6 +999,7 @@ type WorktreeStateWriter interface {
 	UpsertWorktreeState(context.Context, WorktreeState) error
 	DeleteWorktreeState(context.Context, string, string) error
 	ReplaceWorktreeStates(context.Context, string, []WorktreeState) error
+	TouchWorktreeStates(context.Context, string, time.Time) error
 	UpsertWorktreeStateGitStatus(context.Context, string, string, json.RawMessage, time.Time) error
 }
 
@@ -2447,6 +2448,29 @@ func (s *RuntimeStateStore) deleteWorktreeStateLocked(ctx context.Context, proje
 func (s *RuntimeStateStore) ReplaceWorktreeStates(ctx context.Context, projectID string, worktreeStates []WorktreeState) error {
 	return s.withRetryingWriteLock(ctx, "replace_worktree_states", func(writeCtx context.Context) error {
 		return s.replaceWorktreeStatesLocked(writeCtx, projectID, worktreeStates)
+	})
+}
+
+// TouchWorktreeStates records a successful unchanged inventory observation in
+// one statement without rewriting every projected worktree identity.
+func (s *RuntimeStateStore) TouchWorktreeStates(ctx context.Context, projectID string, observedAt time.Time) error {
+	return s.withRetryingWriteLock(ctx, "touch_worktree_states", func(writeCtx context.Context) error {
+		db, err := s.dbHandle()
+		if err != nil {
+			return err
+		}
+		projectID = normalizedProjectID(projectID)
+		if observedAt.IsZero() {
+			observedAt = time.Now().UTC()
+		}
+		if _, err := db.ExecContext(writeCtx, `
+			UPDATE `+worktreeStateTable+`
+			SET updated_at = ?
+			WHERE project_id = ?
+		`, observedAt.UTC().Format(time.RFC3339Nano), projectID); err != nil {
+			return fmt.Errorf("touch worktree state rows %s: %w", projectID, err)
+		}
+		return nil
 	})
 }
 

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -832,6 +833,408 @@ func TestRuntimeProjectionWriterCoalescesProjectionBurstsByIssue(t *testing.T) {
 	}
 
 	assertNoRuntimeProjectionEvent(t, ch, 50*time.Millisecond)
+}
+
+func TestRuntimeProjectionWriterSkipsUnchangedGitStatusRematerialization(t *testing.T) {
+	ctx := context.Background()
+	store := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	const (
+		projectID = "proj-unchanged-git"
+		issueID   = "az-unchanged"
+		worktree  = "/tmp/repo-unchanged"
+	)
+	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   issueID,
+		Path:      worktree,
+		Branch:    "branch",
+		UpdatedAt: time.Unix(1, 0).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		cfg:                 Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": store},
+	}
+	var hydrateCalls atomic.Int32
+	task := domain.Task{ID: naming.IssueID(issueID), Title: "unchanged", Status: domain.StatusInProgress, Type: domain.TypeTask}
+	reader := newProjectReadMaterializer(projectID, nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		hydrateCalls.Add(1)
+		return tasks, nil
+	})
+	tasks := map[string]domain.Task{issueID: task}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(tasks, tasks)
+	reader.replaceBootstrap(tasks, tasks, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	d.materializers = map[string]*projectReadMaterializer{projectID: reader}
+	status := &git.GitStatus{Modified: []string{"changed.go"}, HasChanges: true, GitAdditions: 2}
+	rawStatus, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousObservation := time.Unix(2, 0).UTC()
+	if err := store.UpsertWorktreeStateGitStatus(ctx, projectID, issueID, rawStatus, previousObservation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newRuntimeProjectionWriter(d).PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktree, status, true, false); err != nil {
+		t.Fatal(err)
+	}
+	projection, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, issueID)
+	if err != nil || !found || projection.GitStatusUpdated == nil {
+		t.Fatalf("unchanged status projection = %+v found=%t err=%v", projection, found, err)
+	}
+	if !projection.GitStatusUpdated.After(previousObservation) {
+		t.Fatalf("unchanged status did not advance observation heartbeat: got=%v previous=%v", projection.GitStatusUpdated, previousObservation)
+	}
+	if got := hydrateCalls.Load(); got != 0 {
+		t.Fatalf("unchanged status rematerialized runtime: hydration calls=%d", got)
+	}
+}
+
+func TestRuntimeProjectionWriterCoalescesUnchangedWorktreeSnapshot(t *testing.T) {
+	ctx := context.Background()
+	store := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	const (
+		projectID = "proj-unchanged-worktree"
+		issueID   = "az-unchanged"
+	)
+	original := time.Unix(1, 0).UTC()
+	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   issueID,
+		Path:      "/tmp/repo-unchanged",
+		Branch:    "branch",
+		UpdatedAt: original,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		cfg:                 Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": store},
+	}
+	var hydrateCalls atomic.Int32
+	task := domain.Task{ID: naming.IssueID(issueID), Title: "unchanged", Status: domain.StatusInProgress, Type: domain.TypeTask}
+	reader := newProjectReadMaterializer(projectID, nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		hydrateCalls.Add(1)
+		return tasks, nil
+	})
+	tasks := map[string]domain.Task{issueID: task}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(tasks, tasks)
+	reader.replaceBootstrap(tasks, tasks, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	d.materializers = map[string]*projectReadMaterializer{projectID: reader}
+	observedAt := original.Add(time.Hour)
+	if err := newRuntimeProjectionWriter(d).ReplaceWorktreeProjectionSnapshot(ctx, projectID, []daemonstate.WorktreeState{{
+		ProjectID: projectID,
+		IssueID:   issueID,
+		Path:      "/tmp/repo-unchanged",
+		Branch:    "branch",
+		UpdatedAt: observedAt,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	row, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, issueID)
+	if err != nil || !found {
+		t.Fatalf("worktree projection = %+v found=%t err=%v", row, found, err)
+	}
+	if !row.UpdatedAt.Equal(observedAt) {
+		t.Fatalf("unchanged snapshot heartbeat = %v, want=%v", row.UpdatedAt, observedAt)
+	}
+	if got := hydrateCalls.Load(); got != 0 {
+		t.Fatalf("unchanged worktree snapshot rematerialized runtime: hydration calls=%d", got)
+	}
+}
+
+func TestRuntimeProjectionWriterRetriesFailedRefreshForUnchangedWorktreeSnapshot(t *testing.T) {
+	ctx := context.Background()
+	store := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	const (
+		projectID = "proj-worktree-refresh-retry"
+		issueID   = "az-worktree-refresh-retry"
+	)
+	task := domain.Task{ID: naming.IssueID(issueID), Title: "retry unchanged worktree", Status: domain.StatusInProgress, Type: domain.TypeTask}
+	var hydrateCalls atomic.Int32
+	reader := newProjectReadMaterializer(projectID, nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		if hydrateCalls.Add(1) == 1 {
+			return nil, errors.New("injected worktree hydration failure")
+		}
+		return tasks, nil
+	})
+	tasks := map[string]domain.Task{issueID: task}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(tasks, tasks)
+	reader.replaceBootstrap(tasks, tasks, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	d := &Daemon{
+		cfg:                 Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": store},
+		materializers:       map[string]*projectReadMaterializer{projectID: reader},
+	}
+	rows := []daemonstate.WorktreeState{{
+		ProjectID: projectID, IssueID: issueID, Path: "/tmp/repo-worktree-refresh-retry", Branch: "branch", UpdatedAt: time.Unix(1, 0).UTC(),
+	}}
+	writer := newRuntimeProjectionWriter(d)
+	if err := writer.ReplaceWorktreeProjectionSnapshot(ctx, projectID, rows); err != nil {
+		t.Fatal(err)
+	}
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "injected worktree hydration failure") {
+		t.Fatalf("health after failed refresh = %q", got)
+	}
+	rows[0].UpdatedAt = time.Unix(2, 0).UTC()
+	if err := writer.ReplaceWorktreeProjectionSnapshot(ctx, projectID, rows); err != nil {
+		t.Fatal(err)
+	}
+	if got := hydrateCalls.Load(); got != 2 {
+		t.Fatalf("hydration calls = %d, want failed attempt plus unchanged retry", got)
+	}
+	if got := reader.snapshotMetadata().Health; got != "healthy" {
+		t.Fatalf("health after unchanged retry = %q, want healthy", got)
+	}
+}
+
+func TestRuntimeProjectionWriterRetriesFailedRefreshForUnchangedGitStatus(t *testing.T) {
+	ctx := context.Background()
+	store := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	const (
+		projectID = "proj-git-refresh-retry"
+		issueID   = "az-git-refresh-retry"
+		worktree  = "/tmp/repo-git-refresh-retry"
+	)
+	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID, IssueID: issueID, Path: worktree, Branch: "branch", UpdatedAt: time.Unix(1, 0).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{ID: naming.IssueID(issueID), Title: "retry unchanged git", Status: domain.StatusInProgress, Type: domain.TypeTask}
+	reader := newProjectReadMaterializer(projectID, nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
+	tasks := map[string]domain.Task{issueID: task}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(tasks, tasks)
+	reader.replaceBootstrap(tasks, tasks, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	d := &Daemon{
+		cfg:                 Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": store},
+		materializers:       map[string]*projectReadMaterializer{projectID: reader},
+	}
+	var syncCalls atomic.Int32
+	d.projectReadUserProjectionSync = func(context.Context, string, []string) error {
+		if syncCalls.Add(1) == 1 {
+			return errors.New("injected git user projection sync failure")
+		}
+		return nil
+	}
+	status := &git.GitStatus{Modified: []string{"changed.go"}, HasChanges: true, GitAdditions: 2}
+	writer := newRuntimeProjectionWriter(d)
+	if _, err := writer.PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktree, status, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "injected git user projection sync failure") {
+		t.Fatalf("health after failed refresh = %q", got)
+	}
+	if _, err := writer.PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktree, status, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := syncCalls.Load(); got != 2 {
+		t.Fatalf("user projection sync calls = %d, want failed attempt plus unchanged retry", got)
+	}
+	if got := reader.snapshotMetadata().Health; got != "healthy" {
+		t.Fatalf("health after unchanged retry = %q, want healthy", got)
+	}
+}
+
+func TestRuntimeProjectionWriterDoesNotOverlapUnchangedRefreshRetry(t *testing.T) {
+	ctx := context.Background()
+	store := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	const (
+		projectID = "proj-refresh-retry-pending"
+		issueID   = "az-refresh-retry-pending"
+	)
+	task := domain.Task{ID: naming.IssueID(issueID), Title: "coalesce pending retry", Status: domain.StatusInProgress, Type: domain.TypeTask}
+	var hydrateCalls atomic.Int32
+	retryEntered := make(chan struct{})
+	releaseRetry := make(chan struct{})
+	reader := newProjectReadMaterializer(projectID, nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		switch hydrateCalls.Add(1) {
+		case 1:
+			return nil, errors.New("injected initial hydration failure")
+		case 2:
+			close(retryEntered)
+			<-releaseRetry
+		}
+		return tasks, nil
+	})
+	tasks := map[string]domain.Task{issueID: task}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(tasks, tasks)
+	reader.replaceBootstrap(tasks, tasks, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	d := &Daemon{
+		cfg:                 Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": store},
+		materializers:       map[string]*projectReadMaterializer{projectID: reader},
+	}
+	rows := []daemonstate.WorktreeState{{
+		ProjectID: projectID, IssueID: issueID, Path: "/tmp/repo-refresh-retry-pending", Branch: "branch", UpdatedAt: time.Unix(1, 0).UTC(),
+	}}
+	writer := newRuntimeProjectionWriter(d)
+	if err := writer.ReplaceWorktreeProjectionSnapshot(ctx, projectID, rows); err != nil {
+		t.Fatal(err)
+	}
+	rows[0].UpdatedAt = time.Unix(2, 0).UTC()
+	retryDone := make(chan error, 1)
+	go func() { retryDone <- writer.ReplaceWorktreeProjectionSnapshot(ctx, projectID, rows) }()
+	<-retryEntered
+	rows[0].UpdatedAt = time.Unix(3, 0).UTC()
+	if err := writer.ReplaceWorktreeProjectionSnapshot(ctx, projectID, rows); err != nil {
+		t.Fatal(err)
+	}
+	if got := hydrateCalls.Load(); got != 2 {
+		t.Fatalf("hydration calls with retry pending = %d, want no overlapping third attempt", got)
+	}
+	close(releaseRetry)
+	if err := <-retryDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := reader.snapshotMetadata().Health; got != "healthy" {
+		t.Fatalf("health after pending retry = %q, want healthy", got)
+	}
+}
+
+func TestRuntimeProjectionWriterRetainsFailedRefreshRetryAcrossCanonicalReplacement(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(t *testing.T, d *Daemon, reader *projectReadMaterializer, store *daemonstate.RuntimeStateStore, task domain.Task)
+	}{
+		{
+			name: "degraded hydration",
+			run: func(t *testing.T, d *Daemon, reader *projectReadMaterializer, _ *daemonstate.RuntimeStateStore, task domain.Task) {
+				var hydrateCalls atomic.Int32
+				reader.hydrate = func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+					if hydrateCalls.Add(1) == 1 {
+						return nil, errors.New("injected degraded refresh failure")
+					}
+					return tasks, nil
+				}
+				rows := []daemonstate.WorktreeState{{
+					ProjectID: d.canonicalProjectID("project"), IssueID: task.ID.String(), Path: "/tmp/canonical-retry", Branch: "branch", UpdatedAt: time.Unix(1, 0).UTC(),
+				}}
+				writer := newRuntimeProjectionWriter(d)
+				if err := writer.ReplaceWorktreeProjectionSnapshot(context.Background(), "project", rows); err != nil {
+					t.Fatal(err)
+				}
+				assertCanonicalReplacementRetainsRefreshFailure(t, reader, task, "injected degraded refresh failure")
+				rows[0].UpdatedAt = time.Unix(2, 0).UTC()
+				if err := writer.ReplaceWorktreeProjectionSnapshot(context.Background(), "project", rows); err != nil {
+					t.Fatal(err)
+				}
+				if got := hydrateCalls.Load(); got != 2 {
+					t.Fatalf("hydration calls = %d, want failed refresh plus identical replay", got)
+				}
+			},
+		},
+		{
+			name: "user projection sync",
+			run: func(t *testing.T, d *Daemon, reader *projectReadMaterializer, store *daemonstate.RuntimeStateStore, task domain.Task) {
+				const worktree = "/tmp/canonical-git-retry"
+				if err := store.UpsertWorktreeState(context.Background(), daemonstate.WorktreeState{
+					ProjectID: "project", IssueID: task.ID.String(), Path: worktree, Branch: "branch", UpdatedAt: time.Unix(1, 0).UTC(),
+				}); err != nil {
+					t.Fatal(err)
+				}
+				var syncCalls atomic.Int32
+				d.projectReadUserProjectionSync = func(context.Context, string, []string) error {
+					if syncCalls.Add(1) == 1 {
+						return errors.New("injected canonical sync failure")
+					}
+					return nil
+				}
+				status := &git.GitStatus{Modified: []string{"changed.go"}, HasChanges: true}
+				writer := newRuntimeProjectionWriter(d)
+				if _, err := writer.PersistGitStatusProjectionAndPublish(context.Background(), "project", task.ID.String(), worktree, status, true, false); err != nil {
+					t.Fatal(err)
+				}
+				assertCanonicalReplacementRetainsRefreshFailure(t, reader, task, "injected canonical sync failure")
+				if _, err := writer.PersistGitStatusProjectionAndPublish(context.Background(), "project", task.ID.String(), worktree, status, true, false); err != nil {
+					t.Fatal(err)
+				}
+				if got := syncCalls.Load(); got != 2 {
+					t.Fatalf("user projection sync calls = %d, want failed refresh plus identical replay", got)
+				}
+			},
+		},
+		{
+			name: "in flight hydration",
+			run: func(t *testing.T, d *Daemon, reader *projectReadMaterializer, _ *daemonstate.RuntimeStateStore, task domain.Task) {
+				refreshEntered := make(chan struct{})
+				releaseRefresh := make(chan struct{})
+				var hydrateCalls atomic.Int32
+				reader.hydrate = func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+					if hydrateCalls.Add(1) == 1 {
+						close(refreshEntered)
+						<-releaseRefresh
+					}
+					return tasks, nil
+				}
+				rows := []daemonstate.WorktreeState{{
+					ProjectID: "project", IssueID: task.ID.String(), Path: "/tmp/canonical-pending-retry", Branch: "branch", UpdatedAt: time.Unix(1, 0).UTC(),
+				}}
+				writer := newRuntimeProjectionWriter(d)
+				refreshDone := make(chan error, 1)
+				go func() { refreshDone <- writer.ReplaceWorktreeProjectionSnapshot(context.Background(), "project", rows) }()
+				<-refreshEntered
+				task.Title = "replacement during refresh"
+				if _, err := reader.applyCanonical(context.Background(), productionMaterializerBatch(t, task, reader.snapshotMetadata().DeliveryCursor)); err != nil {
+					t.Fatalf("apply canonical replacement: %v", err)
+				}
+				close(releaseRefresh)
+				if err := <-refreshDone; err != nil {
+					t.Fatal(err)
+				}
+				if got := reader.snapshotMetadata().Health; !strings.Contains(got, "canonical generation advanced") {
+					t.Fatalf("health after superseded in-flight refresh = %q, want retryable generation failure", got)
+				}
+				rows[0].UpdatedAt = time.Unix(2, 0).UTC()
+				if err := writer.ReplaceWorktreeProjectionSnapshot(context.Background(), "project", rows); err != nil {
+					t.Fatal(err)
+				}
+				if got := hydrateCalls.Load(); got != 2 {
+					t.Fatalf("hydration calls = %d, want superseded refresh plus identical replay", got)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newRuntimeProjectionStore(t)
+			t.Cleanup(func() { _ = store.Close() })
+			task := domain.Task{ID: naming.IssueID("az-canonical-refresh-retry"), Title: "before replacement", Status: domain.StatusInProgress, Type: domain.TypeTask}
+			tasks := map[string]domain.Task{task.ID.String(): task}
+			issueKeys, runtimeKeys := checkpointMaterializedTasks(tasks, tasks)
+			reader := newProjectReadMaterializer("project", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
+			reader.replaceBootstrap(tasks, tasks, materializedMetadata(0, 0, issueProjectionProjector(), nil, issueKeys.sum(), runtimeKeys.sum(), "healthy"), issueKeys, runtimeKeys)
+			d := &Daemon{
+				cfg:                 Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+				runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": store},
+				materializers:       map[string]*projectReadMaterializer{"project": reader},
+			}
+			tc.run(t, d, reader, store, task)
+			if got := reader.snapshotMetadata().Health; got != "healthy" {
+				t.Fatalf("health after identical replay = %q, want healthy", got)
+			}
+		})
+	}
+}
+
+func assertCanonicalReplacementRetainsRefreshFailure(t *testing.T, reader *projectReadMaterializer, task domain.Task, failure string) {
+	t.Helper()
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, failure) {
+		t.Fatalf("health after failed refresh = %q, want %q", got, failure)
+	}
+	task.Title = "after canonical replacement"
+	if _, err := reader.applyCanonical(context.Background(), productionMaterializerBatch(t, task, reader.snapshotMetadata().DeliveryCursor)); err != nil {
+		t.Fatalf("apply canonical replacement: %v", err)
+	}
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, failure) {
+		t.Fatalf("health after canonical replacement = %q, want retained %q", got, failure)
+	}
 }
 
 func TestRuntimeProjectionCoalescingDoesNotDelayNonProjectionEvents(t *testing.T) {
