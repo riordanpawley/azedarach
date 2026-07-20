@@ -919,7 +919,7 @@ func TestConcurrentPartialOverlapPublishesOnlySettledOwnedKeys(t *testing.T) {
 }
 
 func TestCanonicalChangeRetiresOnlyAffectedRuntimeHealth(t *testing.T) {
-	for _, operation := range []string{"delete", "replace"} {
+	for _, operation := range []string{"delete", "replace", "terminal-replace"} {
 		for _, unrelatedFailure := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/unrelated=%t", operation, unrelatedFailure), func(t *testing.T) {
 				const (
@@ -951,6 +951,9 @@ func TestCanonicalChangeRetiresOnlyAffectedRuntimeHealth(t *testing.T) {
 				} else {
 					replacement := canonical[issueA]
 					replacement.Title = "A replaced"
+					if operation == "terminal-replace" {
+						replacement.Status = domain.StatusDone
+					}
 					batch = productionMaterializerBatch(t, replacement, 0)
 				}
 				if _, err := reader.applyCanonicalBatch(context.Background(), batch); err != nil {
@@ -994,6 +997,59 @@ func TestCanonicalChangeRetiresOnlyAffectedRuntimeHealth(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestClosedIssueRuntimeRefreshSkipsHydrationAndRecoversHealth(t *testing.T) {
+	const (
+		closedID = "closed"
+		activeID = "active"
+	)
+	closed := domain.Task{ID: closedID, Title: "closed", Status: domain.StatusDone, Type: domain.TypeBug}
+	active := domain.Task{ID: activeID, Title: "active", Status: domain.StatusInProgress, Type: domain.TypeBug}
+	canonicalByID := map[string]domain.Task{closedID: closed, activeID: active}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonicalByID, canonicalByID)
+	var hydrateCalls atomic.Int32
+	reader := newProjectReadMaterializer("project", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		hydrateCalls.Add(1)
+		if len(tasks) != 1 || tasks[0].ID.String() != activeID {
+			return nil, fmt.Errorf("hydration tasks = %+v, want active issue only", tasks)
+		}
+		tasks[0].HasTmuxSession = true
+		return tasks, nil
+	})
+	reader.replaceBootstrap(canonicalByID, canonicalByID, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	failed := reader.beginAuthoritativeReadRefreshForIssues(authoritativeReadRefreshRuntime, []string{closedID})
+	reader.finishAuthoritativeReadRefresh(failed, errors.New("orphan cleanup timed out"))
+
+	var synced []string
+	d := &Daemon{
+		cfg:           Config{},
+		materializers: map[string]*projectReadMaterializer{"project": reader},
+		projectReadUserProjectionSync: func(_ context.Context, _ string, issueIDs []string) error {
+			synced = append(synced, issueIDs...)
+			return nil
+		},
+	}
+	if err := d.refreshActiveProjectReadRuntimeForIssues(context.Background(), "project", reader, []string{closedID, activeID}); err != nil {
+		t.Fatalf("refresh closed issue: %v", err)
+	}
+	if got := hydrateCalls.Load(); got != 1 {
+		t.Fatalf("mixed runtime hydration calls = %d, want 1", got)
+	}
+	if !reflect.DeepEqual(synced, []string{activeID, closedID}) {
+		t.Fatalf("mixed canonical sync = %v, want [%s %s]", synced, activeID, closedID)
+	}
+	if got := reader.snapshotMetadata().Health; got != "healthy" {
+		t.Fatalf("health after closed issue refresh = %q, want healthy", got)
+	}
+	tasks, _ := reader.snapshot()
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	if !byID[activeID].HasTmuxSession || byID[closedID].HasTmuxSession {
+		t.Fatalf("mixed runtime snapshot = %+v, want hydrated active and canonical closed", byID)
 	}
 }
 
