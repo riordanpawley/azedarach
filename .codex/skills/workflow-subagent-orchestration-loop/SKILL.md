@@ -33,6 +33,16 @@ Act like a persistent orchestration loop:
 
 Do not stop because the work became large. Break it apart and continue.
 
+## Terminal Persistence Contract
+
+When the user gives a terminal instruction such as `finish`, `drain`, `keep orchestrating`, `do not stop`, or `until no open/active tickets remain`:
+
+- keep the orchestration turn active until the authoritative completion check passes or a genuine human authority, intent, risk, or dependency gap blocks all useful progress
+- do not yield a final response because workers, reviewers, tests, publications, or capacity are busy; report progress in commentary and continue the loop
+- use bounded waits or durable event/watch cursors instead of tight polling, and act immediately when state changes
+- before any final response, inspect the authoritative completion state; open work means continue, not summarize-and-stop
+- if the environment forces a turn boundary, persist an exact continuation checkpoint and arrange automatic resumption rather than treating the checkpoint as a handoff to the human
+
 ## Ralph Loop
 
 Run this loop continuously:

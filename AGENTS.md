@@ -105,6 +105,14 @@ fd "filename" -t f internal cmd
 - Track any non-trivial work in issues.
 - Do non-trivial implementation in the issue worktree/session, not directly in the main worktree; migrate any accidental main-worktree changes into the issue worktree before cleaning main.
 
+## Terminal Orchestration Persistence (Critical)
+
+1. A terminal instruction such as `finish`, `drain`, `keep orchestrating`, `do not stop`, or `until no open/active tickets remain` creates a continuous execution contract. Keep running the inspect -> start/review/integrate -> verify loop until the authoritative completion check passes or a genuine human authority/intent/risk gap prevents further progress.
+2. Do not send a final response or end the active orchestration turn merely because workers, reviewers, validations, publications, or capacity slots are still busy. Busy external work is an expected loop state, not a stopping condition. Use commentary for progress and continue monitoring and acting on state changes.
+3. During quiescence, avoid tight polling. Use bounded waits or durable watch/event cursors, then immediately process every newly actionable transition. While waiting, perform non-conflicting preparation, review, blocker diagnosis, or capacity planning when useful work exists.
+4. Before any final response, run the authoritative scope completion check. If it reports open issues, active sessions, pending reviews, interactions, or operations, continue the loop unless the same genuine blocker has met the explicit blocked-escalation threshold.
+5. A routine progress summary is never a substitute for continuation. If an execution environment forces a turn boundary while completion is false, persist an exact continuation checkpoint and resume automatically; do not present the checkpoint as task completion or hand control back for ordinary permission to continue.
+
 ## Spec Documentation Workflow
 
 - Use `az spec read --json` for stored requirement/link data.
