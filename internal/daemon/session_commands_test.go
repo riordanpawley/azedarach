@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -430,7 +431,7 @@ func TestCodexAppServerLaunchUsesStockRemoteTUIAndSupervisedResume(t *testing.T)
 		t.Fatalf("supervisor shell syntax: %v\n%s\n%s", err, out, supervisor)
 	}
 	trace := filepath.Join(t.TempDir(), "trace")
-	fakeCodex := `codex() { printf '%s|%s\n' "$*" "$PWD" >> "$TRACE"; case "$*" in "mcp get --json floop") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon start") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon restart") return 0 ;; "--remote unix://") return 1 ;; "resume --remote unix:// --last") return 0 ;; *) return 2 ;; esac; }; `
+	fakeCodex := `codex() { printf '%s|%s\n' "$*" "$PWD" >> "$TRACE"; case "$*" in "mcp get --json floop") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon start") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon version") return 1 ;; "-c mcp_servers.floop.required=false app-server daemon restart") return 0 ;; "--remote unix://") return 1 ;; "resume --remote unix:// --last") return 0 ;; *) return 2 ;; esac; }; `
 	cmd := exec.Command("sh", "-c", fakeCodex+supervisor)
 	cmd.Env = append(os.Environ(), "TRACE="+trace)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -451,6 +452,65 @@ func TestCodexAppServerLaunchUsesStockRemoteTUIAndSupervisedResume(t *testing.T)
 	}
 	if strings.Contains(supervisor, "kill ") {
 		t.Fatalf("supervisor directly terminates processes instead of preserving native daemon ownership: %s", supervisor)
+	}
+}
+
+func TestCodexAppServerRecoveryCoordinatesConcurrentSupervisors(t *testing.T) {
+	stableDir := t.TempDir()
+	supervisor := codexAppServerSupervisedCommand("codex", stableDir, "codex first", "codex resume")
+	trace := filepath.Join(t.TempDir(), "trace")
+	healthy := filepath.Join(t.TempDir(), "healthy")
+	fakeCodex := `codex() {
+  case "$*" in
+    "mcp get --json floop"|"-c mcp_servers.floop.required=false app-server daemon start") return 0 ;;
+    "-c mcp_servers.floop.required=false app-server daemon version") [ -f "$HEALTHY" ] ;;
+    "-c mcp_servers.floop.required=false app-server daemon restart") printf 'restart\n' >> "$TRACE"; touch "$HEALTHY" ;;
+    "first") return 1 ;;
+    "resume") return 0 ;;
+    *) return 2 ;;
+  esac
+}; `
+	commands := []*exec.Cmd{exec.Command("sh", "-c", fakeCodex+supervisor), exec.Command("sh", "-c", fakeCodex+supervisor)}
+	outputs := make([]bytes.Buffer, len(commands))
+	for i, cmd := range commands {
+		cmd.Env = append(os.Environ(), "TRACE="+trace, "HEALTHY="+healthy)
+		cmd.Stdout = &outputs[i]
+		cmd.Stderr = &outputs[i]
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, cmd := range commands {
+		if err := cmd.Wait(); err != nil {
+			t.Fatalf("concurrent supervisor: %v\n%s", err, outputs[i].Bytes())
+		}
+	}
+	data, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(data), "restart\n"); got != 1 {
+		t.Fatalf("restart count = %d, want one globally coordinated recovery; trace=%q", got, data)
+	}
+}
+
+func TestCodexAppServerSupervisorRefusesGlobalControlFromWorktreeScopedDaemon(t *testing.T) {
+	stableDir := t.TempDir()
+	trace := filepath.Join(t.TempDir(), "trace")
+	supervisor := codexAppServerSupervisedCommand("codex", stableDir, "codex first", "codex resume")
+	cmd := exec.Command("sh", "-c", `codex() { printf '%s\n' "$*" >> "$TRACE"; }; `+supervisor)
+	cmd.Env = append(os.Environ(), "TRACE="+trace, "AZEDARACH_DAEMON_SCOPE=worktree")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("worktree-scoped supervisor unexpectedly succeeded: %s", output)
+	}
+	if !strings.Contains(string(output), "refusing to control the user-global Codex app-server") {
+		t.Fatalf("worktree-scoped supervisor output = %q, want honest refusal", output)
+	}
+	if data, readErr := os.ReadFile(trace); readErr == nil && len(data) != 0 {
+		t.Fatalf("worktree-scoped supervisor invoked Codex: %q", data)
+	} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatal(readErr)
 	}
 }
 

@@ -6231,7 +6231,14 @@ func codexAppServerSupervisedCommand(tool, stableDir, firstCommand, resumeComman
 		return "(cd " + singleQuoteForShell(stableDir) + " && " + tool + " " + codexFloopFailOpenConfigExpansion + " app-server daemon " + action + " >/dev/null)"
 	}
 	startDaemon := managedDaemon("start")
+	healthDaemon := managedDaemon("version")
 	restartDaemon := managedDaemon("restart")
+	recoveryLock := filepath.Join(stableDir, "codex-app-server-recovery.lock")
+	recoverDaemon := "__az_codex_recovery_lock=" + singleQuoteForShell(recoveryLock) + "; " +
+		"while ! mkdir \"$__az_codex_recovery_lock\" 2>/dev/null; do sleep 1; done; " +
+		"trap 'rmdir \"$__az_codex_recovery_lock\" 2>/dev/null' EXIT HUP INT TERM; " +
+		"if ! " + healthDaemon + "; then " + restartDaemon + " || exit $?; fi; " +
+		"rmdir \"$__az_codex_recovery_lock\" 2>/dev/null; trap - EXIT HUP INT TERM"
 	steps := []string{
 		"__az_codex_remote_started=$(date +%s)",
 		"if [ \"$__az_codex_remote_first\" -eq 1 ]; then __az_codex_remote_first=0; " + firstCommand + "; else " + resumeCommand + "; fi",
@@ -6240,10 +6247,11 @@ func codexAppServerSupervisedCommand(tool, stableDir, firstCommand, resumeComman
 		"__az_codex_remote_elapsed=$(($(date +%s)-__az_codex_remote_started))",
 		"if [ \"$__az_codex_remote_elapsed\" -lt 5 ]; then __az_codex_remote_failures=$((__az_codex_remote_failures+1)); else __az_codex_remote_failures=1; fi",
 		"[ \"$__az_codex_remote_failures\" -ge 3 ] && exit \"$__az_codex_remote_status\"",
-		restartDaemon + " || exit $?",
+		recoverDaemon,
 		"sleep 1",
 	}
-	return codexFloopFailOpenProbe(tool) + "; " + startDaemon + " || exit $?; __az_codex_remote_first=1; __az_codex_remote_failures=0; while :; do " + strings.Join(steps, "; ") + "; done"
+	scopeGuard := "case ${AZEDARACH_DAEMON_SCOPE:-global} in worktree|scoped|local) echo 'refusing to control the user-global Codex app-server from a worktree-scoped Azedarach daemon' >&2; exit 1;; esac"
+	return scopeGuard + "; " + codexFloopFailOpenProbe(tool) + "; " + startDaemon + " || exit $?; __az_codex_remote_first=1; __az_codex_remote_failures=0; while :; do " + strings.Join(steps, "; ") + "; done"
 }
 
 const initialPromptShellVariable = "__AZEDARACH_INITIAL_PROMPT"
