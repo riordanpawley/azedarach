@@ -3834,6 +3834,12 @@ func TestSessionStartWithStartWorkFalseSkipsLaunchCommand(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID := "proj"
+	installDir := filepath.Join(t.TempDir(), "install")
+	managedDir := filepath.Join(installDir, ".azedarach-generations", "generation.current")
+	if err := os.MkdirAll(managedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", managedDir+string(os.PathListSeparator)+"/usr/bin:/bin")
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir .azedarach: %v", err)
 	}
@@ -3863,11 +3869,12 @@ func TestSessionStartWithStartWorkFalseSkipsLaunchCommand(t *testing.T) {
 
 	d := &Daemon{
 		cfg: Config{
-			RepoDir:      repoDir,
-			BaseBranch:   "main",
-			CLITool:      "codex",
-			SessionShell: "zsh",
-			Logger:       slog.Default(),
+			RepoDir:                 repoDir,
+			BaseBranch:              "main",
+			CLITool:                 "codex",
+			SessionShell:            "zsh",
+			ManagedGenerationBinDir: managedDir,
+			Logger:                  slog.Default(),
 		},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		issues:       issuesClient,
@@ -3923,6 +3930,16 @@ func TestSessionStartWithStartWorkFalseSkipsLaunchCommand(t *testing.T) {
 	}
 	if strings.Contains(contextExport, " codex") {
 		t.Fatalf("context export = %q, start_work=false must not launch codex", contextExport)
+	}
+	wantPathArg := "PATH=" + installDir + string(os.PathListSeparator) + "/usr/bin:/bin"
+	newSessionHasStablePath := false
+	for _, command := range tmuxRunner.commands {
+		if len(command) > 0 && command[0] == "new-session" && slices.Contains(command, wantPathArg) {
+			newSessionHasStablePath = true
+		}
+	}
+	if !newSessionHasStablePath {
+		t.Fatalf("tmux-only new-session commands = %#v, want environment argument %q", tmuxRunner.commands, wantPathArg)
 	}
 
 	var payload struct {
