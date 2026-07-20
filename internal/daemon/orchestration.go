@@ -354,38 +354,167 @@ func orchestrationSnapshotRuntimeIssueIDs(snapshot protocol.OrchestrationSnapsho
 }
 
 func applyOrchestratorContinuationProjection(snapshot *protocol.OrchestrationSnapshot, lease daemonstate.OrchestratorScopeLease) {
-	if snapshot == nil || lease.Identity.Scope.Kind != domain.OrchestrationScopeRooted || !rootedOrchestratorContinuationRequired(false, *snapshot) {
+	if snapshot == nil {
 		return
 	}
+	action, actionable := orchestratorActionableContinuation(lease.Identity.Scope, *snapshot)
+	if !actionable {
+		return
+	}
+	setOrchestratorContinuationProjection(snapshot, lease.Identity.Scope, action)
+}
+
+func setOrchestratorContinuationProjection(snapshot *protocol.OrchestrationSnapshot, scope domain.OrchestrationScope, action orchestratorActionableState) {
 	snapshot.ContinuationRequired = true
-	snapshot.ContinuationReason = "root complete-check has not passed while direct nested roots still require orchestration"
-	snapshot.ContinuationContract = orchestratorContinuationPrompt(lease, snapshot.NestedRoots)
+	snapshot.ContinuationReason = action.Reason
+	snapshot.ContinuationContract = orchestratorContinuationPrompt(scope, action)
 }
 
 func rootedOrchestratorContinuationRequired(completeCheckPassed bool, snapshot protocol.OrchestrationSnapshot) bool {
-	if completeCheckPassed || len(snapshot.Interactions) > 0 {
+	if completeCheckPassed {
 		return false
 	}
-	for _, nested := range snapshot.NestedRoots {
-		if !slices.Contains(nested.ExclusionReasons, "lifecycle-backlog") {
-			return true
-		}
-	}
-	return false
+	_, actionable := orchestratorActionableContinuation(domain.OrchestrationScope{Kind: domain.OrchestrationScopeRooted}, snapshot)
+	return actionable
 }
 
-func orchestratorContinuationPrompt(lease daemonstate.OrchestratorScopeLease, nested []protocol.OrchestrationNestedRoot) string {
-	ids := make([]string, 0, len(nested))
-	for _, item := range nested {
-		if slices.Contains(item.ExclusionReasons, "lifecycle-backlog") {
+type orchestratorActionableState struct {
+	Kind     string   `json:"kind"`
+	Reason   string   `json:"reason"`
+	IssueIDs []string `json:"issue_ids"`
+	Revision string   `json:"revision"`
+}
+
+func orchestratorActionableContinuation(scope domain.OrchestrationScope, snapshot protocol.OrchestrationSnapshot) (orchestratorActionableState, bool) {
+	type reviewRevision struct {
+		IssueID string `json:"issue_id"`
+		Epoch   int64  `json:"epoch"`
+		Digest  string `json:"digest"`
+		Head    string `json:"head"`
+	}
+	type nestedRevision struct {
+		IssueID     string `json:"issue_id"`
+		Status      string `json:"status"`
+		IssueStatus string `json:"issue_status"`
+		Failure     string `json:"failure,omitempty"`
+	}
+	type blockerRevision struct {
+		IssueID  string `json:"issue_id"`
+		Sequence int64  `json:"sequence"`
+	}
+	reviews := make([]reviewRevision, 0, len(snapshot.ReviewQueue))
+	issueIDs := make([]string, 0, len(snapshot.ReviewQueue)+len(snapshot.Runnable)+len(snapshot.NestedRoots)+len(snapshot.ActionableBlockers))
+	for _, review := range snapshot.ReviewQueue {
+		if !review.Actionable {
 			continue
 		}
-		if id := strings.TrimSpace(item.IssueID); id != "" {
-			ids = append(ids, id)
+		reviews = append(reviews, reviewRevision{IssueID: review.IssueID, Epoch: review.ReviewEpochEventID, Digest: review.EvidenceDigest, Head: review.HeadRevision})
+		issueIDs = append(issueIDs, review.IssueID)
+	}
+	runnable := append([]string(nil), snapshot.Runnable...)
+	if scope.Kind == domain.OrchestrationScopeProject {
+		// Project-scope starts and candidate routing are daemon-owned. The model
+		// is needed only for bounded review judgment.
+		runnable = nil
+	} else {
+		issueIDs = append(issueIDs, runnable...)
+	}
+	nested := make([]nestedRevision, 0, len(snapshot.NestedRoots))
+	if scope.Kind == domain.OrchestrationScopeRooted {
+		for _, item := range snapshot.NestedRoots {
+			if slices.Contains(item.ExclusionReasons, "lifecycle-backlog") || item.Status == "active" {
+				continue
+			}
+			failure := ""
+			if item.StartFailure != nil {
+				failure = item.StartFailure.OperationID + ":" + item.StartFailure.OperationState + ":" + item.StartFailure.Message
+			}
+			nested = append(nested, nestedRevision{IssueID: item.IssueID, Status: item.Status, IssueStatus: item.IssueStatus, Failure: failure})
+			issueIDs = append(issueIDs, item.IssueID)
 		}
 	}
-	sort.Strings(ids)
-	return fmt.Sprintf("Persistent parent orchestration wake (root=%s cursor=%d). Continue now: consume `az orchestrate watch --root %s --since %d --jsonl`; coordinate only direct nested roots [%s] without flattening their descendants; review and integrate accepted epic results; advance cross-epic dependencies; repeat status/start/watch/review until `az orchestrate complete-check --root %s` passes, then validate and set the root in_review for human handoff. Do not emit a handoff response while this continuation remains required.", lease.Identity.Scope.RootIssueID, lease.Cursor, lease.Identity.Scope.RootIssueID, lease.Cursor, strings.Join(ids, ","), lease.Identity.Scope.RootIssueID)
+	blockers := make([]blockerRevision, 0, len(snapshot.ActionableBlockers))
+	seenBlockers := make(map[string]struct{}, len(snapshot.ActionableBlockers))
+	addBlocker := func(issueID string, sequence int64) {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" || sequence <= 0 {
+			return
+		}
+		key := fmt.Sprintf("%s\x00%d", issueID, sequence)
+		if _, duplicate := seenBlockers[key]; duplicate {
+			return
+		}
+		seenBlockers[key] = struct{}{}
+		blockers = append(blockers, blockerRevision{IssueID: issueID, Sequence: sequence})
+		issueIDs = append(issueIDs, issueID)
+	}
+	for _, blocker := range snapshot.ActionableBlockers {
+		addBlocker(blocker.IssueID, blocker.EventID)
+	}
+	sort.Slice(reviews, func(i, j int) bool {
+		if reviews[i].IssueID != reviews[j].IssueID {
+			return reviews[i].IssueID < reviews[j].IssueID
+		}
+		if reviews[i].Epoch != reviews[j].Epoch {
+			return reviews[i].Epoch < reviews[j].Epoch
+		}
+		if reviews[i].Digest != reviews[j].Digest {
+			return reviews[i].Digest < reviews[j].Digest
+		}
+		return reviews[i].Head < reviews[j].Head
+	})
+	sort.Strings(runnable)
+	sort.Slice(nested, func(i, j int) bool {
+		if nested[i].IssueID != nested[j].IssueID {
+			return nested[i].IssueID < nested[j].IssueID
+		}
+		if nested[i].Status != nested[j].Status {
+			return nested[i].Status < nested[j].Status
+		}
+		if nested[i].IssueStatus != nested[j].IssueStatus {
+			return nested[i].IssueStatus < nested[j].IssueStatus
+		}
+		return nested[i].Failure < nested[j].Failure
+	})
+	sort.Slice(blockers, func(i, j int) bool {
+		if blockers[i].IssueID != blockers[j].IssueID {
+			return blockers[i].IssueID < blockers[j].IssueID
+		}
+		return blockers[i].Sequence < blockers[j].Sequence
+	})
+	if len(reviews) == 0 && len(runnable) == 0 && len(nested) == 0 && len(blockers) == 0 {
+		return orchestratorActionableState{}, false
+	}
+	sort.Strings(issueIDs)
+	issueIDs = slices.Compact(issueIDs)
+	signature := struct {
+		Scope    domain.OrchestrationScope `json:"scope"`
+		Reviews  []reviewRevision          `json:"reviews,omitempty"`
+		Runnable []string                  `json:"runnable,omitempty"`
+		Nested   []nestedRevision          `json:"nested,omitempty"`
+		Blockers []blockerRevision         `json:"blockers,omitempty"`
+	}{Scope: scope, Reviews: reviews, Runnable: runnable, Nested: nested, Blockers: blockers}
+	encoded, _ := json.Marshal(signature)
+	digest := sha256.Sum256(encoded)
+	kind, reason := "coordinate", "actionable orchestration projection transition"
+	if len(reviews) > 0 {
+		kind, reason = "review", "revision-bound review judgment is ready"
+	} else if len(runnable) > 0 {
+		kind, reason = "start", "direct runnable work is ready"
+	} else if len(nested) > 0 {
+		kind, reason = "nested-root", "direct nested-root coordination is ready"
+	} else if len(blockers) > 0 {
+		kind, reason = "blocked", "new worker blocker requires coordination"
+	}
+	return orchestratorActionableState{Kind: kind, Reason: reason, IssueIDs: issueIDs, Revision: fmt.Sprintf("%x", digest[:12])}, true
+}
+
+func orchestratorContinuationPrompt(scope domain.OrchestrationScope, action orchestratorActionableState) string {
+	rootFlag := ""
+	if scope.Kind == domain.OrchestrationScopeRooted {
+		rootFlag = " --root " + scope.RootIssueID.String()
+	}
+	return fmt.Sprintf("Actionable orchestration transition (scope=%s revision=%s kind=%s issues=[%s]). Inspect the current bounded snapshot with `az orchestrate status%s --json --summary`, make only the immediate judgment or mutation it requires, then yield when no immediate action remains. Do not run a continuous watch or poll inside this model turn; the daemon will deliver one new continuation when the scope's actionable projection changes.", scope.Kind, action.Revision, action.Kind, strings.Join(action.IssueIDs, ","), rootFlag)
 }
 
 func (d *Daemon) resolveOrchestratorSession(ctx context.Context, projectID, sessionID string) (daemonstate.OrchestratorScopeLease, bool, error) {
@@ -757,6 +886,17 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 		snapshot.Scope, snapshot.Roots, snapshot.GeneratedAt = identity.Scope, []string{root}, time.Now().UTC()
 		a.enrichStewardshipContext(ctx, projectID, &snapshot)
 		tasks := materializedParentChildClosure(materializedTasks, root)
+		workerIDs := make([]string, 0, len(snapshot.WorkerObservations))
+		for _, observation := range snapshot.WorkerObservations {
+			workerIDs = append(workerIDs, observation.IssueID)
+		}
+		if len(workerIDs) > 0 {
+			observationCapture, captureErr := issueClient.CaptureProjectIssueObservationEvents(ctx, workerIDs, 1, 20)
+			if captureErr != nil {
+				return protocol.OrchestrationSnapshot{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, fmt.Errorf("capture rooted blocker projection: %w", captureErr))
+			}
+			snapshot.ActionableBlockers = actionableWorkerBlockersForIssues(workerIDs, observationCapture.StewardshipByIssue)
+		}
 		snapshot.PublicationQueue = publicationOperationsForTasks(snapshot.PublicationQueue, tasks)
 		if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, tasks); err != nil {
 			return protocol.OrchestrationSnapshot{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, err)
@@ -823,6 +963,7 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("capture project readiness context: %w", err)
 	}
 	snapshot.RecentEvents = projectRecentObservationEvents(projectTasks, readinessContext.stewardshipByIssue)
+	snapshot.ActionableBlockers = projectActionableWorkerBlockers(projectRoots, readinessContext.stewardshipByIssue)
 	for _, rootTask := range candidateRoots {
 		root := rootTask.ID.String()
 		snapshot.Roots = append(snapshot.Roots, root)
@@ -1013,6 +1154,34 @@ func finalizeOrchestrationSnapshotSource(snapshot *protocol.OrchestrationSnapsho
 	normalized.Revision = 0
 	normalized.Source.SemanticChecksum = ""
 	snapshot.Source.SemanticChecksum = checksumJSON(normalized)
+}
+
+func projectActionableWorkerBlockers(roots []domain.Task, eventsByIssue map[string][]domain.IssueObservationEvent) []protocol.OrchestrationActionableBlocker {
+	issueIDs := make([]string, 0, len(roots))
+	for _, root := range roots {
+		issueIDs = append(issueIDs, root.ID.String())
+	}
+	return actionableWorkerBlockersForIssues(issueIDs, eventsByIssue)
+}
+
+func actionableWorkerBlockersForIssues(issueIDs []string, eventsByIssue map[string][]domain.IssueObservationEvent) []protocol.OrchestrationActionableBlocker {
+	blockers := make([]protocol.OrchestrationActionableBlocker, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" {
+			continue
+		}
+		last := daemonWorkerObservationLastEvent(eventsByIssue[issueID], nil)
+		if last == nil || last.Seq <= 0 {
+			continue
+		}
+		projectedType, visible := projectStewardshipEventType(domain.IssueObservationEventType(last.Type))
+		if visible && projectedType == "worker-blocked" {
+			blockers = append(blockers, protocol.OrchestrationActionableBlocker{IssueID: issueID, EventID: last.Seq})
+		}
+	}
+	sort.Slice(blockers, func(i, j int) bool { return blockers[i].IssueID < blockers[j].IssueID })
+	return blockers
 }
 
 func projectRecentObservationEvents(tasks []domain.Task, eventsByIssue map[string][]domain.IssueObservationEvent) []protocol.MailEvent {
@@ -1387,6 +1556,14 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	if issueClient == nil {
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("issue store unavailable")
 	}
+	requestedTasks := make([]domain.Task, 0, len(result.Requested))
+	for _, issueID := range result.Requested {
+		task, taskErr := issueClient.GetWithRuntime(ctx, projectID, issueID)
+		if taskErr != nil {
+			return protocol.OrchestrationIntentResult{}, fmt.Errorf("load bounded worker result input for %s: %w", issueID, taskErr)
+		}
+		requestedTasks = append(requestedTasks, task)
+	}
 	requestedIntents := make([]issues.RequestedOrchestrationStart, 0, len(result.Requested))
 	requestDigest, err := orchestrationStartRequestDigest(request, result.Requested)
 	if err != nil {
@@ -1413,6 +1590,10 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 					return protocol.OrchestrationIntentResult{}, fmt.Errorf("record queued orchestration start phase: %w", updateErr)
 				}
 				result.Pending = append(result.Pending, protocol.OrchestrationPending{IssueID: requested.IssueID, Phase: phase, Message: err.Error(), Retryable: true})
+			}
+			result.Results, err = buildOrchestrationResultSummaries(result, requestedTasks, domain.WorkflowRoleWorker, nil)
+			if err != nil {
+				return protocol.OrchestrationIntentResult{}, err
 			}
 			return result, nil
 		}
@@ -1549,7 +1730,71 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	if err := completeRequestedOrchestrationStarts(ctx, issueClient, requestedIntents, nil); err != nil {
 		return protocol.OrchestrationIntentResult{}, err
 	}
+	result.Results, err = buildOrchestrationResultSummaries(result, scopeTasks, domain.WorkflowRoleWorker, nil)
+	if err != nil {
+		return protocol.OrchestrationIntentResult{}, err
+	}
 	return result, nil
+}
+
+func buildOrchestrationResultSummaries(result protocol.OrchestrationIntentResult, tasks []domain.Task, defaultRole domain.WorkflowRole, revisions map[string]string) ([]protocol.WorkflowPhaseResult, error) {
+	taskByID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		taskByID[task.ID.String()] = task
+	}
+	returned := workflowStringSet(result.Returned)
+	closed := workflowStringSet(result.Closed)
+	started := workflowStringSet(result.Started)
+	out := make([]protocol.WorkflowPhaseResult, 0, len(result.Requested))
+	for _, issueID := range result.Requested {
+		task, ok := taskByID[issueID]
+		if !ok {
+			return nil, fmt.Errorf("bounded %s result input unavailable for %s", defaultRole, issueID)
+		}
+		role := defaultRole
+		if defaultRole == domain.WorkflowRoleWorker && task.Type == domain.TypeEpic {
+			role = domain.WorkflowRoleIntegrator
+		}
+		status, outcome, failure := "skipped", result.Skipped[issueID], result.Failed[issueID]
+		if failure != "" {
+			status = "failed"
+		} else if pendingForIssue(result.Pending, issueID) {
+			status = "pending"
+		} else if _, ok := started[issueID]; ok {
+			status = "started"
+		} else if _, ok := returned[issueID]; ok {
+			status = "returned"
+		} else if _, ok := closed[issueID]; ok {
+			status = "completed"
+		}
+		revision := domain.WorkflowIssueContextRevision(task)
+		if exact := strings.TrimSpace(revisions[issueID]); exact != "" {
+			revision = exact
+		}
+		summary, err := domain.BuildWorkflowResultSummary(domain.WorkflowResultInput{Role: role, IssueID: issueID, SourceRevision: revision, Status: status, Outcome: outcome, FailureSummary: failure})
+		if err != nil {
+			return nil, fmt.Errorf("build bounded %s result for %s: %w", role, issueID, err)
+		}
+		out = append(out, protocol.WorkflowPhaseResult{IssueID: issueID, Summary: summary})
+	}
+	return out, nil
+}
+
+func pendingForIssue(values []protocol.OrchestrationPending, issueID string) bool {
+	for _, value := range values {
+		if naming.IssueIDsEqual(value.IssueID, issueID) {
+			return true
+		}
+	}
+	return false
+}
+
+func workflowStringSet(values []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		out[value] = struct{}{}
+	}
+	return out
 }
 
 func completeRequestedOrchestrationStarts(ctx context.Context, issueClient *issues.Client, requestedIntents []issues.RequestedOrchestrationStart, cause error) error {

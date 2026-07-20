@@ -61,4 +61,7 @@ func TestRenderRootUsageUsesCanonicalTicketFlags(t *testing.T) {
 			t.Fatalf("root_usage contains legacy ticket flag %q: %q", legacy, output)
 		}
 	}
+	if !strings.Contains(output, "Optional external observer only") || strings.Contains(output, "Leave compact orchestrate watch running") {
+		t.Fatalf("root_usage retained model-mediated watch guidance: %q", output)
+	}
 }

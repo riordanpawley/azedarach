@@ -231,9 +231,41 @@ func (d *Daemon) enqueueAcceptedReviewPublication(ctx context.Context, projectID
 	}
 	stored, _, err := store.EnqueuePublication(ctx, operation, publicationCoalesceKey(operation))
 	if err != nil {
-		return domain.PublicationOperation{}, err
+		if !errors.Is(err, domain.ErrConflict) {
+			return domain.PublicationOperation{}, err
+		}
+		stored, err = d.recoverAcceptedReviewPublication(ctx, store, operation, pin)
+		if err != nil {
+			return domain.PublicationOperation{}, err
+		}
 	}
 	return d.startAcceptedReviewPublication(ctx, stored)
+}
+
+func (d *Daemon) recoverAcceptedReviewPublication(ctx context.Context, store *operationstore.SQLiteStore, prepared domain.PublicationOperation, pin acceptedReviewPin) (domain.PublicationOperation, error) {
+	rootID := strings.TrimSpace(pin.AcceptedPublicationOperationID)
+	if rootID == "" {
+		rootID = prepared.OperationID
+	}
+	predecessor, found, err := store.PublicationOperation(ctx, rootID)
+	if err != nil || !found {
+		return domain.PublicationOperation{}, fmt.Errorf("recover accepted publication root %s: found=%t: %w", rootID, found, err)
+	}
+	if predecessor.ProjectID != prepared.ProjectID || predecessor.IssueID != prepared.IssueID || predecessor.SourceRevision != prepared.SourceRevision || predecessor.AcceptedReviewEventID != pin.AcceptedReviewEventID || predecessor.ReviewEpochEventID != pin.ReviewEpochEventID || predecessor.AcceptedPublicationOperationID != rootID || !pin.Reviewer.Matches(predecessor.ActorID, predecessor.ReviewerKind) {
+		return domain.PublicationOperation{}, fmt.Errorf("accepted publication root %s authority changed", rootID)
+	}
+	if !predecessor.State.Terminal() {
+		return predecessor, nil
+	}
+	if predecessor.State == domain.PublicationOperationMerged {
+		return predecessor, nil
+	}
+	replacement := refreshedPublicationOperationAttempt(predecessor, prepared.BaseRevision, prepared.ValidationCommand, prepared.PolicyVersion, prepared.EnvironmentFingerprint)
+	stored, _, err := store.EnqueuePublication(ctx, replacement, publicationCoalesceKey(replacement))
+	if err != nil {
+		return domain.PublicationOperation{}, fmt.Errorf("recover terminal accepted publication %s: %w", rootID, err)
+	}
+	return stored, nil
 }
 
 func (d *Daemon) acceptAndEnqueueReviewPublication(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, pin acceptedReviewPin, inspection protocol.OrchestrationReview) (domain.PublicationOperation, error) {
@@ -292,6 +324,7 @@ func (d *Daemon) acceptAndEnqueueReviewPublication(ctx context.Context, projectI
 		return domain.PublicationOperation{}, err
 	}
 	operation.OperationID = receipt.PublicationOperationID
+	operation.AcceptedPublicationOperationID = receipt.PublicationOperationID
 	operation.AcceptedReviewEventID = receipt.EventID
 	read := func(_ string, readCtx context.Context, projectID, operationID string) (domain.PublicationOperation, bool, error) {
 		return store.PublicationOperation(readCtx, operationID)
@@ -345,11 +378,12 @@ func (d *Daemon) prepareAcceptedReviewPublication(ctx context.Context, projectID
 			return domain.PublicationOperation{}, err
 		}
 	}
+	operationID := publicationOperationIdentity(projectID, issueID, request.IntentKey)
 	operation := domain.PublicationOperation{
-		OperationID: publicationOperationIdentity(projectID, issueID, request.IntentKey), ProjectID: projectID,
+		OperationID: operationID, ProjectID: projectID,
 		IssueID: issueID, IntentKey: request.IntentKey, RequestFingerprint: reviewRequestFingerprint(request),
 		ActorID: reviewer.OwnerID, ReviewerKind: reviewer.OwnerKind, ReviewEpochEventID: pin.ReviewEpochEventID, AcceptedReviewEventID: pin.AcceptedReviewEventID,
-		PatchEvidenceID: publicationOperationIdentity(projectID, issueID, request.IntentKey), TargetID: "base", TargetBranch: target.Branch,
+		PatchEvidenceID: operationID, AcceptedPublicationOperationID: operationID, TargetID: "base", TargetBranch: target.Branch,
 		SourceRevision: pin.SourceOID, BaseRevision: strings.TrimSpace(baseRevision), PolicyVersion: policyVersion,
 		EnvironmentFingerprint: publicationEnvironmentFingerprint(projectCfg), ValidationCommand: gateCommand, EvidenceSource: pin.EvidenceSource, EvidenceEventID: pin.EvidenceEventID,
 		EvidenceSeq: pin.EvidenceSeq, EvidenceDigest: pin.EvidenceDigest, State: domain.PublicationOperationQueued,
@@ -661,7 +695,7 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	ctx = git.WithCandidateValidationReviewAuthority(ctx, git.CandidateValidationReviewAuthority{
 		ReviewerID: operation.ActorID, ReviewerKind: operation.ReviewerKind,
 		ReviewEpochEventID: operation.ReviewEpochEventID, PublicationOperationID: operation.OperationID,
-		AcceptedReviewEventID: operation.AcceptedReviewEventID, AcceptedPublicationOperationID: operation.OperationID,
+		AcceptedReviewEventID: operation.AcceptedReviewEventID, AcceptedPublicationOperationID: operation.AcceptedPublicationOperationID,
 	})
 	ctx = git.WithCandidateValidationAdmission(ctx, d.publicationCandidateAdmission(operation.ProjectID, operationID, claimToken, claimTTL))
 
@@ -669,7 +703,7 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 		Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: operation.IntentKey, ActorID: operation.ActorID,
 		IssueIDs: []string{operation.IssueID}, RepoDir: d.resolveRepoDirForProjectExact(operation.ProjectID),
 	}
-	pin := acceptedReviewPin{Reviewer: domain.ReviewerIdentity{OwnerID: operation.ActorID, OwnerKind: operation.ReviewerKind}, ReviewEpochEventID: operation.ReviewEpochEventID, AcceptedReviewEventID: operation.AcceptedReviewEventID, AcceptedPublicationOperationID: operation.OperationID, SourceOID: operation.SourceRevision, EvidenceSource: operation.EvidenceSource, EvidenceEventID: operation.EvidenceEventID, EvidenceSeq: operation.EvidenceSeq, EvidenceDigest: operation.EvidenceDigest}
+	pin := acceptedReviewPin{Reviewer: domain.ReviewerIdentity{OwnerID: operation.ActorID, OwnerKind: operation.ReviewerKind}, ReviewEpochEventID: operation.ReviewEpochEventID, AcceptedReviewEventID: operation.AcceptedReviewEventID, AcceptedPublicationOperationID: operation.AcceptedPublicationOperationID, SourceOID: operation.SourceRevision, EvidenceSource: operation.EvidenceSource, EvidenceEventID: operation.EvidenceEventID, EvidenceSeq: operation.EvidenceSeq, EvidenceDigest: operation.EvidenceDigest}
 	result := protocol.OrchestrationIntentResult{Scope: request.Scope, Kind: request.Kind, IntentKey: request.IntentKey, Requested: []string{operation.IssueID}}
 	operation, err = d.renewPublicationClaim(context.Background(), store, operationID, claimToken, claimTTL)
 	if err != nil {
@@ -797,7 +831,7 @@ func (d *Daemon) validatePublicationReviewAuthority(ctx context.Context, operati
 	}
 	for _, event := range events {
 		outcome, trusted := domain.TrustedReviewOutcome(event)
-		if event.ID == operation.AcceptedReviewEventID && trusted && outcome == domain.ReviewOutcomeAccepted && strings.EqualFold(observationPayloadString(event.Payload, "actor_id"), operation.ActorID) && observationPayloadString(event.Payload, "publication_operation_id") == operation.OperationID && reviewPayloadInt64(event.Payload["review_epoch_event_id"]) == operation.ReviewEpochEventID {
+		if event.ID == operation.AcceptedReviewEventID && trusted && outcome == domain.ReviewOutcomeAccepted && strings.EqualFold(observationPayloadString(event.Payload, "actor_id"), operation.ActorID) && observationPayloadString(event.Payload, "publication_operation_id") == operation.AcceptedPublicationOperationID && reviewPayloadInt64(event.Payload["review_epoch_event_id"]) == operation.ReviewEpochEventID {
 			return nil
 		}
 	}

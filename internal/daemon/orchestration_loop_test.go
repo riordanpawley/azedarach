@@ -3,16 +3,63 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
+
+func TestProjectOrchestratorReviewWakeUsesDurableInputAndCoalescesEquivalentState(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+	const projectID, sessionID = "project", "project-orchestrator"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[sessionID] = true
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.runtimeStoresByProject = map[string]*daemonstate.RuntimeStateStore{projectID: store}
+	d.tmux = tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	identity, _ := domain.NewOrchestratorIdentity(projectID, domain.ProjectOrchestrationScope())
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).Acquire(ctx, identity, sessionID, d.tmux.HasSession); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, identity.Scope, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	seedReadyAgentInput(t, d, runner, projectID, sessionID)
+	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.inputPayloads) != 1 {
+		t.Fatalf("project review continuation payloads = %d, want exactly 1", len(runner.inputPayloads))
+	}
+	prompt := runner.inputPayloads[0]
+	if !strings.Contains(prompt, "scope=project") || !strings.Contains(prompt, "kind=review") || !strings.Contains(prompt, issueID) {
+		t.Fatalf("project review prompt = %q", prompt)
+	}
+	if strings.Contains(prompt, "orchestrate watch") {
+		t.Fatalf("project review prompt retained model watch: %q", prompt)
+	}
+}
 
 func TestProjectOrchestratorLoopPrioritizesReviewAndPersistsCursor(t *testing.T) {
 	ctx := context.Background()

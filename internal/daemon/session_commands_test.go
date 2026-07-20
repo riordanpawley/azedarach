@@ -857,6 +857,9 @@ func (r *worktreeCreateRunner) Run(_ context.Context, args ...string) (string, e
 		r.statusCalls++
 		return r.porcelainStatus, nil
 	}
+	if len(args) >= 5 && args[0] == "-C" && args[1] == r.worktreePath && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD" {
+		return "fixture-head-revision\n", nil
+	}
 	if len(args) >= 3 && args[0] == "worktree" && args[1] == "add" && args[2] == "-b" {
 		r.worktreeAddCalls++
 		r.worktreeRemoved = false
@@ -2012,6 +2015,7 @@ func seedReadyAgentInput(t *testing.T, d *Daemon, runner *sessionStartTmuxRunner
 		runner.inputPayloads = append(runner.inputPayloads, payload)
 	}}
 	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, receiver, "test-daemon")
+	d.agentInput.deliveryEligible = d.agentInputDeliveryEligible
 }
 
 func seedManagedRestartIdentity(t *testing.T, d *Daemon, runner *sessionStartTmuxRunner, projectID, sessionID string) func(context.Context, []string) error {
@@ -10524,6 +10528,51 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 	}
 }
 
+func TestBuildStartWorkPromptWithContextCarriesBoundedExactRevisionPacket(t *testing.T) {
+	task := domain.Task{
+		ID: naming.IssueID("npm-42"), Title: "Portable worker", Type: domain.TypeTask,
+		Description: "Run npm test", Acceptance: "Default and non-Azedarach fixtures pass",
+		Notes: "raw transcript and token=never-include",
+	}
+	prompt, err := buildStartWorkPromptWithContext(task, "candidate-deadbeef", true, "root-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := "Bounded semantic workflow context (authoritative for this phase; do not reconstruct it from inherited transcript or workflow scrollback):\n"
+	index := strings.Index(prompt, marker)
+	if index < 0 {
+		t.Fatalf("prompt has no bounded context packet: %s", prompt)
+	}
+	var packet domain.WorkflowContextPacket
+	if err := json.Unmarshal([]byte(prompt[index+len(marker):]), &packet); err != nil {
+		t.Fatalf("decode packet: %v", err)
+	}
+	if packet.Role != domain.WorkflowRoleWorker || packet.Provenance.IssueID != "npm-42" || packet.Provenance.SourceRevision != "candidate-deadbeef" {
+		t.Fatalf("packet provenance=%+v role=%s", packet.Provenance, packet.Role)
+	}
+	if strings.Contains(prompt, task.Notes) || strings.Contains(prompt, "never-include") {
+		t.Fatal("prompt leaked notes")
+	}
+	encoded, err := domain.MarshalWorkflowContextPacket(packet)
+	if err != nil || len(encoded) > domain.WorkflowContextPacketMaxBytes {
+		t.Fatalf("packet bytes=%d err=%v", len(encoded), err)
+	}
+}
+
+func TestBuildStartWorkPromptWithContextDoesNotBypassPacketRedactionThroughTitle(t *testing.T) {
+	task := domain.Task{ID: naming.IssueID("secret-title"), Title: "deploy token=never-include", Type: domain.TypeTask}
+	prompt, err := buildStartWorkPromptWithContext(task, "candidate-deadbeef", false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(prompt, "never-include") || strings.Contains(prompt, task.Title) {
+		t.Fatalf("active launch prompt leaked rejected title: %s", prompt)
+	}
+	if !strings.Contains(prompt, "work on issue secret-title (task): secret-title") {
+		t.Fatalf("active launch prompt did not use issue fallback: %s", prompt)
+	}
+}
+
 func TestBuildStartWorkPromptOmitsMailboxGuidanceForStandaloneTask(t *testing.T) {
 	prompt := buildStartWorkPrompt("az-42", "task", "Fix startup shell", false, "")
 	if !strings.Contains(prompt, "Role: contributor") {
@@ -10570,14 +10619,11 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "az orchestrate status --root <issue-id>") {
 		t.Fatalf("prompt = %q, want orchestrate status instruction", prompt)
 	}
-	if !strings.Contains(prompt, "leave it running while workers are active") {
-		t.Fatalf("prompt = %q, want continuous watch instruction", prompt)
+	if !strings.Contains(prompt, "checkpoint and yield when no immediate action remains") {
+		t.Fatalf("prompt = %q, want quiescent checkpoint instruction", prompt)
 	}
-	if !strings.Contains(prompt, "Remain in this active turn/loop and continuously consume its events; starting sessions and a background watch is not a completed handoff to the human") {
-		t.Fatalf("prompt = %q, want persistent watch-consumption duty", prompt)
-	}
-	if !strings.Contains(prompt, "Do not use `--once` for orchestration monitoring") {
-		t.Fatalf("prompt = %q, want --once diagnostic warning", prompt)
+	if strings.Contains(prompt, "leave it running while workers are active") || strings.Contains(prompt, "continuously consume its events") {
+		t.Fatalf("prompt = %q, retained model-mediated watch loop", prompt)
 	}
 	if !strings.Contains(prompt, "az orchestrate complete-check --root <issue-id>") {
 		t.Fatalf("prompt = %q, want complete-check instruction", prompt)
@@ -10607,8 +10653,8 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "supervise that orchestrator as a direct child while it exclusively owns its descendants") {
 		t.Fatalf("prompt = %q, want no-flattening guidance", prompt)
 	}
-	if !strings.Contains(prompt, "React to progress, blocked, and integration-ready evidence; review and integrate accepted children/epics, advance newly unblocked work, and repeat status/start/watch/review while graph work remains") {
-		t.Fatalf("prompt = %q, want active parent coordination loop", prompt)
+	if !strings.Contains(prompt, "repeat bounded status/start/review steps only while immediate work remains") {
+		t.Fatalf("prompt = %q, want bounded parent coordination loop", prompt)
 	}
 	if !strings.Contains(prompt, "az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"") {
 		t.Fatalf("prompt = %q, want active worker message instruction", prompt)
@@ -10616,7 +10662,7 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "Bare `az mail send` is durable mailbox-only") {
 		t.Fatalf("prompt = %q, want passive mailbox warning", prompt)
 	}
-	if !strings.Contains(prompt, "workers reporting to this active parent orchestrator/watch should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`") {
+	if !strings.Contains(prompt, "workers reporting to this parent orchestrator should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`") {
 		t.Fatalf("prompt = %q, want safe worker reporting guidance", prompt)
 	}
 	if !strings.Contains(prompt, "Worker integration evidence should be a structured JSON `worker_evidence.v1` packet") {
@@ -10646,7 +10692,7 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 		t.Fatalf("prompt = %q, want hook status/install fallback guidance", prompt)
 	}
 	if !strings.Contains(prompt, "az orchestrate capture --issue <worker-issue>") ||
-		!strings.Contains(prompt, "Do not poll panes on a fixed interval") {
+		!strings.Contains(prompt, "only when a bounded status snapshot is stale, failed, or contradictory") {
 		t.Fatalf("prompt = %q, want daemon-backed capture guardrail", prompt)
 	}
 	if !strings.Contains(prompt, "az orchestrate integrate --issue <issue-id>") {
@@ -10678,7 +10724,7 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale") {
 		t.Fatalf("prompt = %q, want unresolved child rationale guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Continue the parent loop until `az orchestrate complete-check --root <issue-id>` and final validation pass; only then set the root `in_review` and hand it to the human") {
+	if !strings.Contains(prompt, "Continue bounded orchestration steps until `az orchestrate complete-check --root <issue-id>` and final validation pass; only then set the root `in_review` and hand it to the human") {
 		t.Fatalf("prompt = %q, want complete-check-gated human handoff", prompt)
 	}
 }

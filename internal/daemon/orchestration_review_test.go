@@ -94,11 +94,42 @@ func TestReviewInspectionKeepsStableScopeAcrossCandidateRevisions(t *testing.T) 
 	if first.DiffRange != "base-revision..head-revision-1" || second.DiffRange != "base-revision..head-revision-2" {
 		t.Fatalf("diff ranges = first:%q second:%q", first.DiffRange, second.DiffRange)
 	}
+	if first.ReviewContext == nil || first.IntegrationContext == nil {
+		t.Fatalf("bounded contexts missing: review=%+v integration=%+v", first.ReviewContext, first.IntegrationContext)
+	}
+	if first.ReviewContext.Role != domain.WorkflowRoleReviewer || first.IntegrationContext.Role != domain.WorkflowRoleIntegrator || first.ReviewContext.Provenance.SourceRevision != "head-revision-1" {
+		t.Fatalf("bounded contexts = review:%+v integration:%+v", first.ReviewContext, first.IntegrationContext)
+	}
+	for _, packet := range []*domain.WorkflowContextPacket{first.ReviewContext, first.IntegrationContext} {
+		encoded, err := domain.MarshalWorkflowContextPacket(*packet)
+		if err != nil || len(encoded) > domain.WorkflowContextPacketMaxBytes {
+			t.Fatalf("bounded context bytes=%d err=%v", len(encoded), err)
+		}
+		if strings.Contains(string(encoded), repoDir) {
+			t.Fatalf("bounded context leaked local worktree path: %s", encoded)
+		}
+	}
 	if first.ReviewMode != "full" || first.ReviewFallback != "initial_review" {
 		t.Fatalf("initial review selection = mode:%q fallback:%q", first.ReviewMode, first.ReviewFallback)
 	}
 	if incremental := first.HeadRevision + ".." + second.HeadRevision; incremental != "head-revision-1..head-revision-2" {
 		t.Fatalf("incremental range = %q, want prior reviewed head through current head", incremental)
+	}
+}
+
+func TestBuildReviewWorkflowContextUsesRecordedInvariantNotReviewMatrixLabels(t *testing.T) {
+	task := domain.Task{ID: "review-invariant", Title: "Review", Type: domain.TypeTask}
+	inspection := protocol.OrchestrationReview{
+		IssueID: "review-invariant", HeadRevision: "candidate-1",
+		Evidence:    &domain.WorkerEvidencePacket{Review: domain.WorkerEvidenceReview{ReusedLayers: []string{"daemon packet builder"}, Matrix: &domain.WorkerEvidenceReviewMatrix{CoveredCells: []string{"state transitions"}}}},
+		ContextRisk: &domain.IssueContextRiskPacket{Evidence: []domain.IssueContextRiskEvidence{{Invariant: "workflow results remain revision-bound"}}},
+	}
+	packet, err := buildReviewWorkflowContext(task, inspection, domain.WorkflowRoleReviewer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(packet.AffectedInvariants, []string{"workflow results remain revision-bound"}) {
+		t.Fatalf("affected invariants = %v", packet.AffectedInvariants)
 	}
 }
 
@@ -1098,6 +1129,9 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	if len(result.Returned) != 1 || result.Returned[0] != issueID || len(result.Launched) != 0 || len(result.Pending) != 0 || len(result.Failed) != 0 {
 		t.Fatalf("return result = %+v", result)
 	}
+	if len(result.Results) != 1 || result.Results[0].Summary.Role != domain.WorkflowRoleReviewer || result.Results[0].Summary.Status != "returned" {
+		t.Fatalf("bounded reviewer result = %+v", result.Results)
+	}
 	task, err := client.GetWithRuntime(ctx, "project", issueID)
 	if err != nil {
 		t.Fatal(err)
@@ -1921,6 +1955,9 @@ func TestReviewAcceptTrustsDecisionOverInternalReviewArtifactWithoutTreatingArti
 	}
 	if len(result.Failed) != 0 || len(result.Closed) != 1 || result.Closed[0] != issueID {
 		t.Fatalf("result = %+v, want authoritative tracking-only close", result)
+	}
+	if len(result.Results) != 1 || result.Results[0].Summary.Role != domain.WorkflowRoleIntegrator || result.Results[0].Summary.Status != "completed" {
+		t.Fatalf("bounded integrator result = %+v", result.Results)
 	}
 	after, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{})
 	if err != nil {

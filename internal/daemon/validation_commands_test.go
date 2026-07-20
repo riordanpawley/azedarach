@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -64,6 +66,232 @@ func TestValidationCommandStartsPublicationWithoutAggregateQueueing(t *testing.T
 	if len(status.Snapshot.Active) != 2 || len(status.Snapshot.Queued) != 0 {
 		t.Fatalf("snapshot = %+v, want both publication requests active", status.Snapshot)
 	}
+}
+
+func TestValidationFinishReturnsBoundedPortableFailureSummary(t *testing.T) {
+	repoDir := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	d := &Daemon{cfg: Config{WorkflowArtifactDir: filepath.Join(repoDir, "retained-artifacts")}, operationRuntime: runtime, revision: map[string]uint64{"consumer-project": 1}}
+	ctx := context.Background()
+	acquireBody, err := json.Marshal(protocol.ValidationAcquireRequest{
+		RequestID: "npm-check", LeaseToken: "secret", Class: domain.ValidationClassAggregate,
+		Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate,
+		IsolationMode: "consumer-runner", EnvironmentFingerprint: "node-22", Override: domain.ValidationOverrideNone,
+		Profile: "consumer-check", Command: "npm test", SourceRevision: "candidate-123", TTLSeconds: 30,
+	})
+	require.NoError(t, err)
+	acquired, err := d.handleValidationCommand(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "acquire", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationAcquire, Meta: protocol.Metadata{ProjectID: "consumer-project"}, Body: acquireBody})
+	require.NoError(t, err)
+	require.True(t, acquired.OK, "response=%+v", acquired)
+
+	retainedOutput := filepath.Join(repoDir, "full-output.log")
+	require.NoError(t, os.WriteFile(retainedOutput, []byte("complete npm output\n"), 0o600))
+	finishBody, err := json.Marshal(protocol.ValidationFinishRequest{
+		RequestID: "npm-check", LeaseToken: "secret", State: domain.ValidationRequestFailed, Outcome: "exit 1",
+		Evidence: domain.ValidationEvidence{
+			Held: true, RequestID: "npm-check", Class: domain.ValidationClassAggregate,
+			Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate,
+			Profile: "consumer-check", SourceRevision: "candidate-123", Present: true,
+			FailureSummary: strings.Repeat("npm assertion failed ", 2000), ReportPaths: []string{retainedOutput},
+		},
+	})
+	require.NoError(t, err)
+	finished, err := d.handleValidationCommand(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "finish", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationFinish, Meta: protocol.Metadata{ProjectID: "consumer-project"}, Body: finishBody})
+	require.NoError(t, err)
+	require.True(t, finished.OK, "response=%+v error=%+v", finished, finished.Error)
+	var result protocol.ValidationRequestResponse
+	require.NoError(t, json.Unmarshal(finished.Body, &result))
+	assert.LessOrEqual(t, len(finished.Body), domain.WorkflowResultSummaryMaxBytes)
+	assert.NotContains(t, string(finished.Body), retainedOutput)
+	assert.Empty(t, result.Request.Command)
+	assert.Empty(t, result.Request.Evidence.ReportPaths)
+	summary, err := json.Marshal(result.Summary)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(summary), domain.WorkflowResultSummaryMaxBytes)
+	assert.Equal(t, domain.WorkflowRoleValidator, result.Summary.Role)
+	assert.Equal(t, domain.WorkflowRoleValidator, result.Context.Role)
+	assert.Equal(t, "repository:consumer-project", result.Context.Provenance.ScopeID)
+	assert.Contains(t, result.Context.Requirements, "command: npm test")
+	assert.Equal(t, "repository:consumer-project", result.Summary.Provenance.ScopeID)
+	assert.Empty(t, result.Summary.Provenance.IssueID, "repository validation must not fabricate a ticket")
+	assert.Equal(t, "candidate-123", result.Summary.Provenance.SourceRevision)
+	assert.Equal(t, "retained", result.Summary.OutputRetention)
+	assert.NotContains(t, string(summary), retainedOutput)
+	reference := result.Summary.ArtifactLinks[0]
+	assert.Contains(t, reference.Reference, "artifact:sha256/")
+	assert.Contains(t, reference.Digest, "sha256:")
+	retainedFile, _, _, err := d.openValidationArtifact("consumer-project", reference.Reference)
+	require.NoError(t, err)
+	require.NoError(t, retainedFile.Close())
+	retainedPath := filepath.Join(d.validationArtifactRoot("consumer-project"), strings.TrimPrefix(reference.Reference, "artifact:sha256/"))
+	require.NoError(t, os.WriteFile(retainedOutput, []byte("mutated caller output\n"), 0o600))
+	retained, err := os.ReadFile(retainedPath)
+	require.NoError(t, err)
+	assert.Equal(t, "complete npm output\n", string(retained), "retained artifact must be independent of source mutation")
+	require.NoError(t, os.Remove(retainedOutput))
+	retained, err = os.ReadFile(retainedPath)
+	require.NoError(t, err)
+	assert.Equal(t, "complete npm output\n", string(retained), "retained artifact must survive source deletion")
+	require.NoError(t, os.Chmod(retainedPath, 0o600))
+	require.NoError(t, os.WriteFile(retainedPath, []byte("corrupt"), 0o600))
+	_, _, _, err = d.openValidationArtifact("consumer-project", reference.Reference)
+	assert.ErrorContains(t, err, "digest mismatch")
+}
+
+func TestOpenValidationArtifactPinsVerifiedFileAcrossPathReplacement(t *testing.T) {
+	root := t.TempDir()
+	d := &Daemon{cfg: Config{WorkflowArtifactDir: filepath.Join(root, "artifacts")}}
+	source := filepath.Join(root, "output.log")
+	require.NoError(t, os.WriteFile(source, []byte("verified output\n"), 0o600))
+	reference, err := d.retainValidationArtifact("project-a", source)
+	require.NoError(t, err)
+
+	file, _, _, err := d.openValidationArtifact("project-a", reference.Reference)
+	require.NoError(t, err)
+	defer file.Close()
+	retainedPath := filepath.Join(d.validationArtifactRoot("project-a"), strings.TrimPrefix(reference.Reference, "artifact:sha256/"))
+	require.NoError(t, os.Remove(retainedPath))
+	require.NoError(t, os.WriteFile(retainedPath, []byte("replacement output\n"), 0o600))
+
+	content, err := io.ReadAll(file)
+	require.NoError(t, err)
+	assert.Equal(t, "verified output\n", string(content), "serving must use the descriptor whose content was verified")
+}
+
+func TestOpenValidationArtifactRejectsSymlinkTraversal(t *testing.T) {
+	root := t.TempDir()
+	content := []byte("outside artifact\n")
+	digest := fmt.Sprintf("%x", sha256.Sum256(content))
+	reference := "artifact:sha256/" + digest
+
+	t.Run("digest path", func(t *testing.T) {
+		artifactRoot := filepath.Join(root, "digest-link-artifacts")
+		d := &Daemon{cfg: Config{WorkflowArtifactDir: artifactRoot}}
+		projectRoot := d.validationArtifactRoot("project-a")
+		require.NoError(t, os.MkdirAll(projectRoot, 0o700))
+		outside := filepath.Join(root, "outside-digest")
+		require.NoError(t, os.WriteFile(outside, content, 0o600))
+		require.NoError(t, os.Symlink(outside, filepath.Join(projectRoot, digest)))
+
+		_, _, _, err := d.openValidationArtifact("project-a", reference)
+		require.ErrorContains(t, err, "unavailable")
+	})
+
+	t.Run("artifact root component", func(t *testing.T) {
+		outsideRoot := filepath.Join(root, "outside-root")
+		directRoot := filepath.Join(root, "direct-root")
+		require.NoError(t, os.MkdirAll(filepath.Join(outsideRoot, "project-a", "sha256"), 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(outsideRoot, "project-a", "sha256", digest), content, 0o400))
+		require.NoError(t, os.Symlink(outsideRoot, directRoot))
+		d := &Daemon{cfg: Config{WorkflowArtifactDir: directRoot}}
+
+		_, _, _, err := d.openValidationArtifact("project-a", reference)
+		require.ErrorContains(t, err, "unavailable")
+	})
+
+	t.Run("artifact root parent component", func(t *testing.T) {
+		outsideParent := filepath.Join(root, "outside-parent")
+		require.NoError(t, os.MkdirAll(filepath.Join(outsideParent, "artifacts", "validation"), 0o700))
+		linkedParent := filepath.Join(root, "linked-parent")
+		require.NoError(t, os.Symlink(outsideParent, linkedParent))
+		d := &Daemon{cfg: Config{WorkflowArtifactDir: filepath.Join(linkedParent, "artifacts")}}
+
+		_, _, _, err := d.openValidationArtifact("project-a", reference)
+		require.ErrorContains(t, err, "unavailable")
+	})
+}
+
+func TestOpenValidationArtifactRootRejectsDotSegmentsBeforeNormalization(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	require.NoError(t, os.MkdirAll(filepath.Join(outside, "artifacts"), 0o700))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "link")))
+
+	unsafePath := root + string(filepath.Separator) + "link" + string(filepath.Separator) + ".." + string(filepath.Separator) + "outside" + string(filepath.Separator) + "artifacts"
+	opened, err := openValidationArtifactRoot(unsafePath, nil)
+	if opened != nil {
+		_ = opened.Close()
+	}
+	require.ErrorContains(t, err, "invalid validation artifact root component")
+}
+
+func TestOpenValidationArtifactRootSupportsPlatformCanonicalTempPrefix(t *testing.T) {
+	root := t.TempDir()
+	opened, err := openValidationArtifactRoot(root, nil)
+	require.NoError(t, err)
+	require.NoError(t, opened.Close())
+}
+
+func TestValidationArtifactReadCommandIsProjectScopedAndDigestVerified(t *testing.T) {
+	root := t.TempDir()
+	d := &Daemon{cfg: Config{WorkflowArtifactDir: filepath.Join(root, "artifacts")}}
+	source := filepath.Join(root, "output.log")
+	require.NoError(t, os.WriteFile(source, []byte("complete output\n"), 0o600))
+	reference, err := d.retainValidationArtifact("project-a", source)
+	require.NoError(t, err)
+	body, err := json.Marshal(protocol.ValidationArtifactReadRequest{Reference: reference.Reference})
+	require.NoError(t, err)
+
+	read, err := d.handleValidationCommand(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "read", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationArtifactRead, Meta: protocol.Metadata{ProjectID: "project-a"}, Body: body})
+	require.NoError(t, err)
+	require.True(t, read.OK, "response=%+v", read)
+	var result protocol.ValidationArtifactReadResponse
+	require.NoError(t, json.Unmarshal(read.Body, &result))
+	assert.Equal(t, "complete output\n", string(result.Content))
+	assert.Equal(t, reference.Digest, result.Digest)
+	assert.True(t, result.Complete)
+	assert.Equal(t, int64(len(result.Content)), result.TotalSize)
+	chunkBody, err := json.Marshal(protocol.ValidationArtifactReadRequest{Reference: reference.Reference, Limit: 4})
+	require.NoError(t, err)
+	chunk, err := d.handleValidationCommand(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "read-chunk", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationArtifactRead, Meta: protocol.Metadata{ProjectID: "project-a"}, Body: chunkBody})
+	require.NoError(t, err)
+	require.True(t, chunk.OK, "response=%+v", chunk)
+	var firstChunk protocol.ValidationArtifactReadResponse
+	require.NoError(t, json.Unmarshal(chunk.Body, &firstChunk))
+	assert.Equal(t, "comp", string(firstChunk.Content))
+	assert.Equal(t, int64(4), firstChunk.NextOffset)
+	assert.False(t, firstChunk.Complete)
+	nextChunkBody, err := json.Marshal(protocol.ValidationArtifactReadRequest{Reference: reference.Reference, Offset: firstChunk.NextOffset, Limit: 4})
+	require.NoError(t, err)
+	nextChunk, err := d.handleValidationCommand(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "read-next-chunk", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationArtifactRead, Meta: protocol.Metadata{ProjectID: "project-a"}, Body: nextChunkBody})
+	require.NoError(t, err)
+	require.True(t, nextChunk.OK, "response=%+v", nextChunk)
+	var secondChunk protocol.ValidationArtifactReadResponse
+	require.NoError(t, json.Unmarshal(nextChunk.Body, &secondChunk))
+	assert.Equal(t, "lete", string(secondChunk.Content))
+	assert.Equal(t, firstChunk.NextOffset, secondChunk.Offset)
+
+	unauthorized, err := d.handleValidationCommand(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "read-other", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationArtifactRead, Meta: protocol.Metadata{ProjectID: "project-b"}, Body: body})
+	require.NoError(t, err)
+	assert.False(t, unauthorized.OK)
+	assert.Contains(t, unauthorized.Error.Message, "unavailable")
+
+	badBody, err := json.Marshal(protocol.ValidationArtifactReadRequest{Reference: "artifact:sha256/../../secret"})
+	require.NoError(t, err)
+	bad, err := d.handleValidationCommand(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "read-bad", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationArtifactRead, Meta: protocol.Metadata{ProjectID: "project-a"}, Body: badBody})
+	require.NoError(t, err)
+	assert.False(t, bad.OK)
+	assert.Contains(t, bad.Error.Message, "invalid validation artifact")
+
+	tooLargeBody, err := json.Marshal(protocol.ValidationArtifactReadRequest{Reference: reference.Reference, Limit: protocol.ValidationArtifactReadMaxBytes + 1})
+	require.NoError(t, err)
+	tooLarge, err := d.handleValidationCommand(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "read-large", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationArtifactRead, Meta: protocol.Metadata{ProjectID: "project-a"}, Body: tooLargeBody})
+	require.NoError(t, err)
+	assert.False(t, tooLarge.OK)
+	assert.Contains(t, tooLarge.Error.Message, "limit exceeds")
+}
+
+func TestRetainValidationArtifactFailsClosedWhenStorageUnavailable(t *testing.T) {
+	root := t.TempDir()
+	blocked := filepath.Join(root, "not-a-directory")
+	require.NoError(t, os.WriteFile(blocked, []byte("block"), 0o600))
+	source := filepath.Join(root, "output.log")
+	require.NoError(t, os.WriteFile(source, []byte("output"), 0o600))
+	d := &Daemon{cfg: Config{WorkflowArtifactDir: blocked}}
+	_, err := d.retainValidationArtifact("project", source)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a directory")
 }
 
 func TestPublicationCoverageForPathsRejectsNonRepoRelativeGitPaths(t *testing.T) {

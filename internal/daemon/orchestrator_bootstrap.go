@@ -26,7 +26,18 @@ func (d *Daemon) rootedOrchestratorBootstrapPrompt(ctx context.Context, projectI
 	if err != nil {
 		return "", fmt.Errorf("load rooted orchestrator issue %s: %w", rootID, err)
 	}
-	return buildRootedOrchestratorPrompt(rootID, task.Type.String(), task.Title), nil
+	packet, err := domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
+		Role: domain.WorkflowRoleIntegrator, IssueID: rootID, SourceRevision: domain.WorkflowIssueContextRevision(task), Summary: task.Title,
+		Requirements: domain.WorkflowIssueRequirements(task),
+	})
+	if err != nil {
+		return "", fmt.Errorf("build rooted orchestrator bounded context: %w", err)
+	}
+	encoded, err := domain.MarshalWorkflowContextPacket(packet)
+	if err != nil {
+		return "", fmt.Errorf("marshal rooted orchestrator bounded context: %w", err)
+	}
+	return buildRootedOrchestratorPrompt(rootID, task.Type.String(), packet.Summary) + "\n\nBounded semantic workflow context (authoritative for this phase; do not reconstruct it from inherited transcript or workflow scrollback):\n" + string(encoded), nil
 }
 
 func (d *Daemon) ensureRootedOrchestratorBootstrap(ctx context.Context, projectID string, scope domain.OrchestrationScope, sessionID, prompt string, launchedHere bool) (string, error) {

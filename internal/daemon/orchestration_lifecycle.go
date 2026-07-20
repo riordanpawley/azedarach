@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"time"
@@ -73,7 +74,7 @@ func (d *Daemon) reconcileOrchestratorLifecycleScope(ctx context.Context, author
 			return fmt.Errorf("run project orchestrator loop: %w", err)
 		}
 	}
-	return d.enforceRootedOrchestratorContinuation(ctx, authority, evaluated, projectID, now, policy)
+	return d.enforceOrchestratorContinuation(ctx, authority, evaluated, projectID, now, policy)
 }
 
 func orchestratorLeaseHasStoppedSessionIntent(ctx context.Context, store *daemonstate.RuntimeStateStore, lease daemonstate.OrchestratorScopeLease) (bool, error) {
@@ -85,69 +86,109 @@ func orchestratorLeaseHasStoppedSessionIntent(ctx context.Context, store *daemon
 	return found && session.ID == lease.SessionID && daemonstate.NormalizeSessionState(session.State) == daemonstate.SessionStateStopped, nil
 }
 
-func (d *Daemon) enforceRootedOrchestratorContinuation(ctx context.Context, authority *daemonstate.OrchestratorLeaseAuthority, lease daemonstate.OrchestratorScopeLease, projectID string, now time.Time, policy domain.OrchestratorLifecyclePolicy) error {
-	if lease.Identity.Scope.Kind != domain.OrchestrationScopeRooted {
-		return nil
-	}
+func (d *Daemon) enforceOrchestratorContinuation(ctx context.Context, authority *daemonstate.OrchestratorLeaseAuthority, lease daemonstate.OrchestratorScopeLease, projectID string, now time.Time, policy domain.OrchestratorLifecyclePolicy) error {
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
-	parent, found, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, lease.Identity.Scope.RootIssueID.String())
-	if err != nil {
-		return fmt.Errorf("refresh parent orchestrator activity: %w", err)
+	_, found, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, lease.Identity.Scope.RootIssueID.String())
+	if lease.Identity.Scope.Kind == domain.OrchestrationScopeProject {
+		_, found, err = store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, "project")
 	}
-	if !found || !orchestratorActivityWakeRequired(parent.Activity) {
+	if err != nil {
+		return fmt.Errorf("refresh orchestrator activity: %w", err)
+	}
+	if !found {
 		return nil
 	}
-	complete, err := d.taskCompleteCheck(ctx, projectID, lease.Identity.Scope.RootIssueID.String())
-	if err != nil {
-		return fmt.Errorf("evaluate parent orchestrator complete-check: %w", err)
+	if lease.Identity.Scope.Kind == domain.OrchestrationScopeRooted {
+		complete, err := d.taskCompleteCheck(ctx, projectID, lease.Identity.Scope.RootIssueID.String())
+		if err != nil {
+			return fmt.Errorf("evaluate parent orchestrator complete-check: %w", err)
+		}
+		if complete.Pass {
+			if _, checkpointErr := checkpointRootedOrchestratorAction(ctx, store, lease, orchestratorActionableState{}, false, now); checkpointErr != nil {
+				return checkpointErr
+			}
+			return nil
+		}
 	}
 	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, projectID, protocol.OrchestrationSnapshotRequest{Scope: lease.Identity.Scope})
 	if err != nil {
-		return fmt.Errorf("build parent orchestrator continuation snapshot: %w", err)
+		return fmt.Errorf("build orchestrator continuation snapshot: %w", err)
 	}
-	if !rootedOrchestratorContinuationRequired(complete.Pass, snapshot) {
-		return nil
-	}
-	applyOrchestratorContinuationProjection(&snapshot, lease)
-	if !snapshot.ContinuationRequired {
-		return nil
-	}
-	reason := domain.OrchestratorWakeOpenWork
-	for _, nested := range snapshot.NestedRoots {
-		if strings.EqualFold(nested.IssueStatus, string(domain.StatusInReview)) {
-			reason = domain.OrchestratorWakeReviewRequest
-			break
+	action, actionable := orchestratorActionableContinuation(lease.Identity.Scope, snapshot)
+	if lease.Identity.Scope.Kind == domain.OrchestrationScopeRooted {
+		generation, checkpointErr := checkpointRootedOrchestratorAction(ctx, store, lease, action, actionable, now)
+		if checkpointErr != nil {
+			return checkpointErr
+		}
+		if actionable {
+			action.Revision = fmt.Sprintf("%d-%s", generation, action.Revision)
 		}
 	}
-	woken, changed, err := authority.Wake(ctx, lease.Identity, now, reason, policy)
-	if err != nil {
-		return fmt.Errorf("record parent orchestrator continuation wake: %w", err)
-	}
-	if !changed {
+	if !actionable {
 		return nil
 	}
-	applyOrchestratorContinuationProjection(&snapshot, woken)
+	setOrchestratorContinuationProjection(&snapshot, lease.Identity.Scope, action)
+	reason := domain.OrchestratorWakeOpenWork
+	if action.Kind == "review" {
+		reason = domain.OrchestratorWakeReviewRequest
+	}
+	woken, _, err := authority.Wake(ctx, lease.Identity, now, reason, policy)
+	if err != nil {
+		return fmt.Errorf("record orchestrator continuation wake: %w", err)
+	}
 	target, found, err := d.currentAgentInputTarget(ctx, projectID, woken.SessionID)
 	if err != nil {
-		return fmt.Errorf("resolve parent orchestrator continuation target: %w", err)
+		return fmt.Errorf("resolve orchestrator continuation target: %w", err)
 	}
 	if !found || d.agentInputService() == nil {
-		return nil // durable wake remains pending for a later reconciliation
+		return nil
 	}
 	result, err := d.agentInputService().Deliver(ctx, domain.AgentInputDeliveryRequest{
 		ProjectID: projectID, SessionID: woken.SessionID, Target: target,
 		Tool: d.runtimeConfigForProject(projectID).CLITool, Kind: domain.AgentInputMessageOrchestratorWake,
 		Payload:   snapshot.ContinuationContract,
-		IntentKey: fmt.Sprintf("orchestrator-wake:%s:%s:%d", woken.Identity.Scope.Kind, woken.Identity.Scope.RootIssueID, woken.Cursor),
-		ExpiresAt: time.Now().Add(5 * time.Minute),
+		IntentKey: orchestratorWakeIntentKey(woken.Identity.Scope, action.Revision, woken.SessionID, target),
 	})
 	if err != nil {
-		return fmt.Errorf("deliver parent orchestrator continuation wake: %w", err)
+		return fmt.Errorf("deliver orchestrator continuation wake: %w", err)
 	}
 	if result.Outcome != domain.AgentInputDelivered {
 		return nil // fail closed; durable wake is retried by reconciliation
 	}
 	return nil
+}
+
+func orchestratorWakeIntentKey(scope domain.OrchestrationScope, actionRevision, sessionID string, target domain.ManagedAgentRuntimeIdentity) string {
+	targetDigest := sha256.Sum256([]byte(strings.TrimSpace(sessionID) + "\x00" + strings.TrimSpace(target.AgentIncarnation)))
+	return fmt.Sprintf("orchestrator-wake:%s:%s:%s:%x", scope.Kind, scope.RootIssueID, strings.TrimSpace(actionRevision), targetDigest[:12])
+}
+
+func checkpointRootedOrchestratorAction(ctx context.Context, store *daemonstate.RuntimeStateStore, lease daemonstate.OrchestratorScopeLease, action orchestratorActionableState, actionable bool, now time.Time) (int64, error) {
+	desiredKey, desiredKind, desiredStatus := "", "observe", "idle"
+	if actionable {
+		desiredKey, desiredKind, desiredStatus = action.Revision, action.Kind, "actionable"
+	}
+	for attempts := 0; attempts < 3; attempts++ {
+		checkpoint, _, err := store.GetOrchestratorLoopCheckpoint(ctx, lease.Identity)
+		if err != nil {
+			return 0, fmt.Errorf("refresh rooted orchestrator action checkpoint: %w", err)
+		}
+		if checkpoint.LastActionKey == desiredKey && checkpoint.LastActionKind == desiredKind && checkpoint.LastActionStatus == desiredStatus {
+			return checkpoint.WatchCursor, nil
+		}
+		next := daemonstate.OrchestratorLoopCheckpoint{
+			Identity: lease.Identity, WatchCursor: checkpoint.WatchCursor + 1,
+			LastActionKey: desiredKey, LastActionKind: desiredKind, LastActionStatus: desiredStatus, UpdatedAt: now,
+		}
+		advanced, err := store.AdvanceOrchestratorLoopCheckpoint(ctx, next, checkpoint.WatchCursor)
+		if err != nil {
+			return 0, fmt.Errorf("advance rooted orchestrator action checkpoint: %w", err)
+		}
+		if advanced {
+			return next.WatchCursor, nil
+		}
+	}
+	return 0, fmt.Errorf("advance rooted orchestrator action checkpoint: concurrent transition did not converge")
 }
 
 func orchestratorActivityWakeRequired(activity string) bool {
@@ -157,6 +198,58 @@ func orchestratorActivityWakeRequired(activity string) bool {
 	default:
 		return false
 	}
+}
+
+func (d *Daemon) agentInputDeliveryEligible(ctx context.Context, request domain.AgentInputDeliveryRequest, now time.Time) (bool, error) {
+	if request.Kind != domain.AgentInputMessageOrchestratorWake {
+		return true, nil
+	}
+	const prefix = "orchestrator-wake:"
+	key := strings.TrimPrefix(strings.TrimSpace(request.IntentKey), prefix)
+	if key == request.IntentKey {
+		return false, nil
+	}
+	parts := strings.SplitN(key, ":", 4)
+	if len(parts) != 4 || strings.TrimSpace(parts[2]) == "" || strings.TrimSpace(parts[3]) == "" {
+		return false, nil
+	}
+	lease, found, err := d.resolveOrchestratorSession(ctx, request.ProjectID, request.SessionID)
+	if err != nil || !found {
+		return false, err
+	}
+	if string(lease.Identity.Scope.Kind) != parts[0] || lease.Identity.Scope.RootIssueID.String() != parts[1] {
+		return false, nil
+	}
+	if request.IntentKey != orchestratorWakeIntentKey(lease.Identity.Scope, parts[2], request.SessionID, request.Target) {
+		return false, nil
+	}
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, request.ProjectID, protocol.OrchestrationSnapshotRequest{Scope: lease.Identity.Scope})
+	if err != nil {
+		return false, err
+	}
+	action, actionable := orchestratorActionableContinuation(lease.Identity.Scope, snapshot)
+	if lease.Identity.Scope.Kind == domain.OrchestrationScopeRooted {
+		store := d.sessionRuntimeStateStoreIfConfigured(request.ProjectID)
+		if store == nil {
+			return false, nil
+		}
+		if !actionable {
+			_, checkpointErr := checkpointRootedOrchestratorAction(ctx, store, lease, action, false, now)
+			return false, checkpointErr
+		}
+		checkpoint, found, checkpointErr := store.GetOrchestratorLoopCheckpoint(ctx, lease.Identity)
+		if checkpointErr != nil || !found {
+			return false, checkpointErr
+		}
+		if checkpoint.LastActionStatus != "actionable" || checkpoint.LastActionKey != action.Revision || checkpoint.LastActionKind != action.Kind {
+			return false, nil
+		}
+		action.Revision = fmt.Sprintf("%d-%s", checkpoint.WatchCursor, action.Revision)
+	}
+	if !actionable {
+		return false, nil
+	}
+	return action.Revision == parts[2], nil
 }
 
 func (d *Daemon) wakePausedOrchestratorsForRecovery(ctx context.Context, projectID string, now time.Time) error {
@@ -182,7 +275,7 @@ func (d *Daemon) wakePausedOrchestratorsForRecovery(ctx context.Context, project
 				return loadErr
 			}
 			// Rooted leases are resumed by the full continuation guard so a durable
-			// wake record is never written without delivering its cursor-bearing prompt.
+			// wake record is paired with its scope-bound semantic continuation.
 			if current.Identity.Scope.Kind == domain.OrchestrationScopeRooted || current.Lifecycle != domain.OrchestratorPaused {
 				return nil
 			}

@@ -472,12 +472,13 @@ type orchestrateContainmentRisk struct {
 }
 
 type orchestratePromptResult struct {
-	RootIssueID  string   `json:"root_issue_id"`
-	IssueID      string   `json:"issue_id"`
-	ParentIssue  string   `json:"parent_issue"`
-	Coordination string   `json:"coordination"`
-	Prompt       string   `json:"prompt"`
-	Commands     []string `json:"commands"`
+	RootIssueID  string                       `json:"root_issue_id"`
+	IssueID      string                       `json:"issue_id"`
+	ParentIssue  string                       `json:"parent_issue"`
+	Coordination string                       `json:"coordination"`
+	Context      domain.WorkflowContextPacket `json:"context_packet"`
+	Prompt       string                       `json:"prompt"`
+	Commands     []string                     `json:"commands"`
 }
 
 type orchestrateIntegrateResult struct {
@@ -929,8 +930,8 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		Warnings:               orchestrateStatusWarnings(ctx, deps, ready, len(ready.Runnable)),
 		Advice: map[string]interface{}{
 			"watch":             fmt.Sprintf("az orchestrate watch --root %s --since %d --jsonl", ready.RootIssueID, nextMailboxSeq(events, opts.SinceSeq)),
-			"watch_instruction": "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
-			"persistence_guard": "Daemon-enforced: parent idle/turn completion is wake-required while direct nested roots remain and complete-check has not passed; the durable cursor is resumed after restart or session replacement.",
+			"watch_instruction": "Optional external observer only; do not run this continuous watch inside a model turn. Agents should complete one bounded status/action step and yield for the daemon's revision-bound continuation.",
+			"persistence_guard": "Daemon-enforced: actionable scope transitions enqueue one deduplicated durable continuation; busy agents defer delivery and pending intents recover after restart.",
 		},
 	}
 	if opts.Summary {
@@ -1088,7 +1089,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 			fmt.Printf("- %s\n", warning)
 		}
 	}
-	fmt.Println("Next watch command (leave running while workers are active; do not add --once):")
+	fmt.Println("Optional external observer command (do not run inside a model turn):")
 	fmt.Printf("- %s\n", result.Advice["watch"])
 	fmt.Printf("- %s\n", result.Advice["watch_instruction"])
 	return nil
@@ -1375,7 +1376,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		Advice: orchestrateStartAdvice{
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
 			StatusCommand:    fmt.Sprintf("az orchestrate status --root %s --json", opts.RootIssueID),
-			WatchInstruction: "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
+			WatchInstruction: "Optional external observer only; agents should yield after a bounded status/action step and wait for the daemon's revision-bound continuation.",
 		},
 	}
 	if readinessErr == nil {
@@ -2062,7 +2063,7 @@ func printOrchestrateStartResult(result orchestrateStartResult) {
 		}
 	}
 	if result.Advice.WatchCommand != "" {
-		fmt.Println("Next watch command (leave running while workers are active; do not add --once):")
+		fmt.Println("Optional external observer command (do not run inside a model turn):")
 		fmt.Printf("- %s\n", result.Advice.WatchCommand)
 		if result.Advice.WatchInstruction != "" {
 			fmt.Printf("- %s\n", result.Advice.WatchInstruction)
@@ -2449,7 +2450,10 @@ func OrchestratePromptCommand(deps *Dependencies, opts OrchestratePromptOptions)
 	if coordination == "" {
 		coordination = "native"
 	}
-	result := buildOrchestratePromptResult(rootIssueID, parentIssueID, task, coordination)
+	result, err := buildOrchestratePromptResult(rootIssueID, parentIssueID, task, coordination)
+	if err != nil {
+		return err
+	}
 	if opts.JSON {
 		return printJSON(result)
 	}
@@ -3280,8 +3284,19 @@ func printCompactOrchestrateFrame(frame orchestrateCompactFrame) {
 	}
 }
 
-func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain.Task, coordination string) orchestratePromptResult {
+func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain.Task, coordination string) (orchestratePromptResult, error) {
 	issueID := task.ID.String()
+	contextPacket, contextErr := domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
+		Role: domain.WorkflowRoleWorker, IssueID: issueID, SourceRevision: domain.WorkflowIssueContextRevision(task), Summary: task.Title,
+		Requirements: domain.WorkflowIssueRequirements(task),
+	})
+	if contextErr != nil {
+		return orchestratePromptResult{}, fmt.Errorf("build bounded worker context: %w", contextErr)
+	}
+	contextJSON, err := domain.MarshalWorkflowContextPacket(contextPacket)
+	if err != nil {
+		return orchestratePromptResult{}, fmt.Errorf("marshal bounded worker context: %w", err)
+	}
 	commands := []string{
 		"az prime",
 		fmt.Sprintf("az issue get %s", issueID),
@@ -3300,7 +3315,11 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 		)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Work on issue %s: %s\n\n", issueID, task.Title)
+	safeTitle := contextPacket.Summary
+	if safeTitle == "" {
+		safeTitle = issueID
+	}
+	fmt.Fprintf(&b, "Work on issue %s: %s\n\n", issueID, safeTitle)
 	fmt.Fprintf(&b, "Start by running `az prime`, then continue this worker task using the issue context without waiting for further instruction.\n\n")
 	fmt.Fprintf(&b, "Root issue: %s\n", rootIssueID)
 	fmt.Fprintf(&b, "Coordination mode: %s\n", coordination)
@@ -3314,15 +3333,7 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 	if len(task.Implementations) > 0 {
 		fmt.Fprintf(&b, "Implementations: %s\n", strings.Join(task.Implementations, ", "))
 	}
-	if strings.TrimSpace(task.Description) != "" {
-		fmt.Fprintf(&b, "\nDescription:\n%s\n", strings.TrimSpace(task.Description))
-	}
-	if strings.TrimSpace(task.Design) != "" {
-		fmt.Fprintf(&b, "\nDesign:\n%s\n", strings.TrimSpace(task.Design))
-	}
-	if strings.TrimSpace(task.Acceptance) != "" {
-		fmt.Fprintf(&b, "\nAcceptance:\n%s\n", strings.TrimSpace(task.Acceptance))
-	}
+	fmt.Fprintf(&b, "\nBounded semantic workflow context (authoritative for this phase; do not reconstruct it from inherited transcript or workflow scrollback):\n%s\n", contextJSON)
 	if strings.TrimSpace(task.Notes) != "" {
 		fmt.Fprintf(&b, "\nCurrent notes: present but omitted from worker prompt. Run `az issue get %s --with-notes` only if full note history is necessary.\n", issueID)
 	}
@@ -3355,9 +3366,10 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 		IssueID:      issueID,
 		ParentIssue:  parentIssueID,
 		Coordination: coordination,
+		Context:      contextPacket,
 		Prompt:       b.String(),
 		Commands:     commands,
-	}
+	}, nil
 }
 
 func orchestrateStartWarnings(ctx context.Context, deps *Dependencies, ready daemonclient.TaskGraphReadiness, launchCount int) []string {

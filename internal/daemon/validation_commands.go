@@ -5,6 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -14,6 +18,7 @@ import (
 	operationstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
+	"golang.org/x/sys/unix"
 )
 
 const defaultValidationLeaseTTL = 30 * time.Second
@@ -27,6 +32,9 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 	var store *operationstore.SQLiteStore
 	var storeErr error
 	switch req.Command {
+	case protocol.CommandValidationArtifactRead:
+		// Artifact reads are project-authorized by their project-scoped storage
+		// namespace and do not require the validation projection store.
 	case protocol.CommandPublicationEvidenceRecord,
 		protocol.CommandPublicationEvidenceStatus, protocol.CommandPublicationEvidenceEvaluate:
 		store, storeErr = d.publicationEvidenceProjectionStore()
@@ -57,7 +65,7 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
-		return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: result})
+		return d.validationRequestSuccessResponse(req, result)
 	case protocol.CommandValidationHeartbeat:
 		var body protocol.ValidationHeartbeatRequest
 		if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -67,7 +75,7 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
-		return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: result})
+		return d.validationRequestSuccessResponse(req, result)
 	case protocol.CommandValidationNested:
 		var body protocol.ValidationAuthorizeNestedRequest
 		if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -77,7 +85,7 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
-		return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: result})
+		return d.validationRequestSuccessResponse(req, result)
 	case protocol.CommandValidationFinish:
 		var body protocol.ValidationFinishRequest
 		if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -87,13 +95,23 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
-		return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: result})
+		return d.validationRequestSuccessResponse(req, result)
 	case protocol.CommandValidationStatus:
 		snapshot, err := store.ValidationSnapshot(ctx, projectID, now, defaultValidationLeaseTTL)
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 		return d.validationSuccessResponse(req, protocol.ValidationStatusResponse{Snapshot: snapshot})
+	case protocol.CommandValidationArtifactRead:
+		var body protocol.ValidationArtifactReadRequest
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("decode validation artifact read: %v", err)), nil
+		}
+		content, digest, totalSize, nextOffset, err := d.readValidationArtifact(projectID, body.Reference, body.Offset, body.Limit)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+		}
+		return d.validationSuccessResponse(req, protocol.ValidationArtifactReadResponse{Reference: strings.TrimSpace(body.Reference), Digest: "sha256:" + digest, Content: content, Offset: body.Offset, NextOffset: nextOffset, TotalSize: totalSize, Complete: nextOffset == totalSize})
 	case protocol.CommandPublicationEvidenceRecord:
 		var body protocol.PublicationEvidenceRecordRequest
 		if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -139,6 +157,287 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 	default:
 		return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported validation command"), nil
 	}
+}
+
+func (d *Daemon) validationRequestSuccessResponse(req protocol.RequestEnvelope, request domain.ValidationRequest) (protocol.ResponseEnvelope, error) {
+	issueID := strings.TrimSpace(request.IssueID)
+	scopeID := ""
+	if issueID == "" {
+		scopeID = "repository:" + strings.TrimSpace(request.ProjectID)
+	}
+	artifacts := make([]domain.WorkflowArtifactReference, 0, len(request.Evidence.ReportPaths)+1)
+	paths := append([]string(nil), request.Evidence.ReportPaths...)
+	if request.Evidence.ReportPath != "" {
+		paths = append(paths, request.Evidence.ReportPath)
+	}
+	outputPresent := request.Evidence.FailureSummary != "" || len(paths) > 0
+	for _, path := range uniqueNonEmpty(paths) {
+		artifact, retainErr := d.retainValidationArtifact(request.ProjectID, path)
+		if retainErr != nil {
+			continue
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	contextPacket, err := domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
+		Role: domain.WorkflowRoleValidator, IssueID: issueID, ScopeID: scopeID, SourceRevision: request.SourceRevision,
+		Summary:            "validation " + strings.TrimSpace(request.Profile),
+		Requirements:       []string{"profile: " + request.Profile, "command: " + request.Command},
+		AffectedInvariants: []string{"class: " + string(request.Class), "scope: " + string(request.Scope), "purpose: " + string(request.Purpose)},
+	})
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "build bounded validation context: "+err.Error()), nil
+	}
+	summary, err := domain.BuildWorkflowResultSummary(domain.WorkflowResultInput{
+		Role: domain.WorkflowRoleValidator, IssueID: issueID, ScopeID: scopeID, SourceRevision: request.SourceRevision,
+		Status: string(request.State), Outcome: request.Outcome, FailureSummary: request.Evidence.FailureSummary,
+		ArtifactLinks: artifacts, OutputPresent: outputPresent,
+	})
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "build bounded validation result: "+err.Error()), nil
+	}
+	responseRequest := request
+	responseRequest.Command = ""
+	responseRequest.OverrideReason = ""
+	responseRequest.Outcome = ""
+	responseRequest.Evidence = domain.ValidationEvidence{}
+	return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: responseRequest, Context: contextPacket, Summary: summary})
+}
+
+func (d *Daemon) validationArtifactRoot(projectID string) string {
+	projectDigest := sha256.Sum256([]byte(strings.TrimSpace(projectID)))
+	projectKey := fmt.Sprintf("%x", projectDigest[:])
+	return filepath.Join(d.validationArtifactBaseRoot(), "validation", projectKey, "sha256")
+}
+
+func (d *Daemon) validationArtifactBaseRoot() string {
+	if configured := strings.TrimSpace(d.cfg.WorkflowArtifactDir); configured != "" {
+		return configured
+	}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".azedarach", "artifacts")
+	}
+	return filepath.Join(os.TempDir(), "azedarach", "artifacts")
+}
+
+// retainValidationArtifact creates an immutable, content-addressed copy before
+// a result claims that command output was retained. The opaque reference is
+// resolvable independently of the caller-owned source path.
+func (d *Daemon) retainValidationArtifact(projectID, source string) (domain.WorkflowArtifactReference, error) {
+	in, err := os.Open(strings.TrimSpace(source))
+	if err != nil {
+		return domain.WorkflowArtifactReference{}, err
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return domain.WorkflowArtifactReference{}, fmt.Errorf("validation artifact source is not a regular file")
+	}
+	root := d.validationArtifactRoot(projectID)
+	if err = os.MkdirAll(root, 0o700); err != nil {
+		return domain.WorkflowArtifactReference{}, err
+	}
+	tmp, err := os.CreateTemp(root, ".staged-*")
+	if err != nil {
+		return domain.WorkflowArtifactReference{}, err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	hash := sha256.New()
+	if _, err = io.Copy(io.MultiWriter(tmp, hash), in); err != nil {
+		tmp.Close()
+		return domain.WorkflowArtifactReference{}, err
+	}
+	if err = tmp.Sync(); err != nil {
+		tmp.Close()
+		return domain.WorkflowArtifactReference{}, err
+	}
+	if err = tmp.Close(); err != nil {
+		return domain.WorkflowArtifactReference{}, err
+	}
+	digest := fmt.Sprintf("%x", hash.Sum(nil))
+	if err = os.Chmod(tmpPath, 0o400); err != nil {
+		return domain.WorkflowArtifactReference{}, err
+	}
+	target := filepath.Join(root, digest)
+	if err = os.Rename(tmpPath, target); err != nil {
+		return domain.WorkflowArtifactReference{}, err
+	}
+	if dir, openErr := os.Open(root); openErr == nil {
+		err = dir.Sync()
+		_ = dir.Close()
+		if err != nil {
+			return domain.WorkflowArtifactReference{}, err
+		}
+	}
+	return domain.WorkflowArtifactReference{Label: "validation report", Reference: "artifact:sha256/" + digest, Digest: "sha256:" + digest}, nil
+}
+
+func (d *Daemon) openValidationArtifact(projectID, reference string) (*os.File, string, int64, error) {
+	const prefix = "artifact:sha256/"
+	digest := strings.TrimPrefix(strings.TrimSpace(reference), prefix)
+	if len(digest) != sha256.Size*2 || prefix+digest != strings.TrimSpace(reference) {
+		return nil, "", 0, fmt.Errorf("invalid validation artifact reference")
+	}
+	for _, char := range digest {
+		if !strings.ContainsRune("0123456789abcdef", char) {
+			return nil, "", 0, fmt.Errorf("invalid validation artifact digest")
+		}
+	}
+	projectDigest := sha256.Sum256([]byte(strings.TrimSpace(projectID)))
+	root, err := openValidationArtifactRoot(d.validationArtifactBaseRoot(), []string{"validation", fmt.Sprintf("%x", projectDigest[:]), "sha256"})
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("validation artifact unavailable")
+	}
+	defer root.Close()
+	fd, err := unix.Openat(int(root.Fd()), digest, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("validation artifact unavailable")
+	}
+	file := os.NewFile(uintptr(fd), digest)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, "", 0, fmt.Errorf("validation artifact unavailable")
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, "", 0, fmt.Errorf("validation artifact unavailable")
+	}
+	hash := sha256.New()
+	_, copyErr := io.Copy(hash, file)
+	if copyErr != nil || fmt.Sprintf("%x", hash.Sum(nil)) != digest {
+		_ = file.Close()
+		return nil, "", 0, fmt.Errorf("validation artifact digest mismatch")
+	}
+	if _, err = file.Seek(0, io.SeekStart); err != nil {
+		_ = file.Close()
+		return nil, "", 0, fmt.Errorf("validation artifact unavailable")
+	}
+	return file, digest, info.Size(), nil
+}
+
+func openValidationArtifactRoot(basePath string, descendants []string) (*os.File, error) {
+	if err := validateValidationArtifactPath(basePath); err != nil {
+		return nil, err
+	}
+	abs, err := filepath.Abs(basePath)
+	if err != nil || strings.TrimSpace(basePath) == "" || abs == string(filepath.Separator) {
+		return nil, fmt.Errorf("invalid validation artifact root")
+	}
+	abs, err = canonicalValidationArtifactPath(abs)
+	if err != nil {
+		return nil, err
+	}
+	fd, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	current := os.NewFile(uintptr(fd), string(filepath.Separator))
+	if current == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("open validation artifact root")
+	}
+	relative, err := filepath.Rel(string(filepath.Separator), abs)
+	if err != nil {
+		_ = current.Close()
+		return nil, err
+	}
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		if component == "" || component == "." || component == ".." || filepath.Base(component) != component {
+			_ = current.Close()
+			return nil, fmt.Errorf("invalid validation artifact root component")
+		}
+		nextFD, openErr := unix.Openat(int(current.Fd()), component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		_ = current.Close()
+		if openErr != nil {
+			return nil, openErr
+		}
+		current = os.NewFile(uintptr(nextFD), component)
+		if current == nil {
+			_ = unix.Close(nextFD)
+			return nil, fmt.Errorf("open validation artifact root component")
+		}
+	}
+	for _, component := range descendants {
+		if component == "" || component == "." || component == ".." || filepath.Base(component) != component {
+			_ = current.Close()
+			return nil, fmt.Errorf("invalid validation artifact root component")
+		}
+		nextFD, openErr := unix.Openat(int(current.Fd()), component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		_ = current.Close()
+		if openErr != nil {
+			return nil, openErr
+		}
+		current = os.NewFile(uintptr(nextFD), component)
+		if current == nil {
+			_ = unix.Close(nextFD)
+			return nil, fmt.Errorf("open validation artifact root component")
+		}
+	}
+	return current, nil
+}
+
+func validateValidationArtifactPath(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("invalid validation artifact root")
+	}
+	for _, component := range strings.Split(filepath.ToSlash(path), "/") {
+		if component == "." || component == ".." {
+			return fmt.Errorf("invalid validation artifact root component")
+		}
+	}
+	return nil
+}
+
+// canonicalValidationArtifactPath accounts for Darwin's standard system
+// aliases (/var -> /private/var and /tmp -> /private/tmp) without permitting
+// arbitrary configured symlinks. The remaining path is still opened one
+// descriptor at a time with O_NOFOLLOW.
+func canonicalValidationArtifactPath(path string) (string, error) {
+	if runtime.GOOS != "darwin" {
+		return path, nil
+	}
+	for _, prefix := range []string{"/var", "/tmp"} {
+		relative, err := filepath.Rel(prefix, path)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		canonical, err := filepath.EvalSymlinks(prefix)
+		if err != nil {
+			return "", fmt.Errorf("canonicalize validation artifact root: %w", err)
+		}
+		return filepath.Join(canonical, relative), nil
+	}
+	return path, nil
+}
+
+func (d *Daemon) readValidationArtifact(projectID, reference string, offset int64, limit int) ([]byte, string, int64, int64, error) {
+	if offset < 0 {
+		return nil, "", 0, 0, fmt.Errorf("validation artifact offset must be non-negative")
+	}
+	if limit <= 0 {
+		limit = protocol.ValidationArtifactReadMaxBytes
+	}
+	if limit > protocol.ValidationArtifactReadMaxBytes {
+		return nil, "", 0, 0, fmt.Errorf("validation artifact read limit exceeds %d bytes", protocol.ValidationArtifactReadMaxBytes)
+	}
+	file, digest, totalSize, err := d.openValidationArtifact(projectID, reference)
+	if err != nil {
+		return nil, "", 0, 0, err
+	}
+	defer file.Close()
+	if offset > totalSize {
+		return nil, "", 0, 0, fmt.Errorf("validation artifact offset exceeds content size")
+	}
+	if _, err = file.Seek(offset, io.SeekStart); err != nil {
+		return nil, "", 0, 0, fmt.Errorf("validation artifact unavailable")
+	}
+	content, err := io.ReadAll(io.LimitReader(file, int64(limit)))
+	if err != nil {
+		return nil, "", 0, 0, fmt.Errorf("validation artifact unavailable")
+	}
+	nextOffset := offset + int64(len(content))
+	return content, digest, totalSize, nextOffset, nil
 }
 
 func (d *Daemon) validatePublicationEvidenceIssue(ctx context.Context, projectID, issueID string) error {

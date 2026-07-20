@@ -9454,7 +9454,25 @@ func renderPrimeImplementationSection(implementations []string) string {
 }
 
 func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Task, observations []domain.WorkerObservation, containmentRisks []daemonclient.TaskContainmentRisk, tmuxAvailable bool) string {
-	structuredContext := renderPrimeStructuredIssueContext(issueID, task)
+	role := domain.WorkflowRoleWorker
+	if task.Type == domain.TypeEpic {
+		role = domain.WorkflowRoleIntegrator
+	}
+	packet, packetErr := domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
+		Role: role, IssueID: task.ID.String(), SourceRevision: domain.WorkflowIssueContextRevision(task),
+		Summary: task.Title, Requirements: domain.WorkflowIssueRequirements(task),
+	})
+	packetJSON := []byte(`{"schema":"workflow_context.v1","omitted":[{"field":"context","count":1,"reason":"construction_failed"}]}`)
+	if packetErr == nil {
+		if encoded, err := domain.MarshalWorkflowContextPacket(packet); err == nil {
+			packetJSON = encoded
+		}
+	}
+	safeTitle := packet.Summary
+	if safeTitle == "" {
+		safeTitle = task.ID.String()
+	}
+	structuredContext := "\nBounded semantic workflow context (authoritative; do not reconstruct from inherited workflow scrollback):\n" + string(packetJSON)
 	implementations := formatPrimeImplementations(task.Implementations)
 	parent := ""
 	mailbox := ""
@@ -9471,7 +9489,7 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 		issueID,
 		issueID,
 		task.ID,
-		task.Title,
+		safeTitle,
 		task.Status,
 		task.Priority.String(),
 		task.Type,
@@ -9488,11 +9506,11 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 
 func renderPrimeOrchestratorExitContract(rootIssueID string) string {
 	return fmt.Sprintf(`Orchestrator Exit Contract (root %s):
-- Remain in the active orchestration turn/loop after starting workers, nested orchestrators, or a background watch; startup is not a completed handoff to the human.
-- Continuously consume the root watch and react to worker/nested-orchestrator progress, blocked, and integration-ready evidence while graph work remains.
+- Process the current bounded orchestration snapshot and its immediate actions, then checkpoint and yield when the scope is quiescent.
+- Do not run a continuous watch or polling loop inside a model turn. The daemon observes scope changes and delivers one deduplicated revision-bound continuation when judgment or mutation is actionable.
 - Chain of command is strict: coordinate only direct children. Never launch, message, review, integrate, stop, or take over grandchildren or deeper descendants.
 - Supervise nested epic/root orchestrators as direct children while they exclusively own their descendants.
-- Resolve each review through `+"`az orchestrate review accept --root %s --issue <review-issue>`"+` or `+"`az orchestrate review return ...`"+`; accepted close must finish before using or presenting dependent results. Then advance newly unblocked work and repeat status/start/watch/review until `+"`az orchestrate complete-check --root %s`"+` passes; then run root validation.
+- Resolve each review through `+"`az orchestrate review accept --root %s --issue <review-issue>`"+` or `+"`az orchestrate review return ...`"+`; accepted close must finish before using or presenting dependent results. Then advance newly unblocked work and repeat bounded status/start/review steps while immediate work remains until `+"`az orchestrate complete-check --root %s`"+` passes; then run root validation.
 - Set the root `+"`in_review`"+` and report to the human without stopping its session or cleaning its worktree.
 - Close/integrate the root only after explicit human acceptance.
 `, rootIssueID, rootIssueID, rootIssueID)
@@ -9622,20 +9640,6 @@ func primeIssueDiffersFromRoot(rootIssueID, issueID string) bool {
 	rootIssueID = strings.TrimSpace(rootIssueID)
 	issueID = strings.TrimSpace(issueID)
 	return issueID != "" && !strings.EqualFold(issueID, rootIssueID)
-}
-
-func renderPrimeStructuredIssueContext(issueID string, task domain.Task) string {
-	var b strings.Builder
-	if strings.TrimSpace(task.Description) != "" {
-		fmt.Fprintf(&b, "\nDescription: %s", summarizePrimeDescription(issueID, task.Description))
-	}
-	if strings.TrimSpace(task.Acceptance) != "" {
-		fmt.Fprintf(&b, "\nAcceptance: %s", summarizePrimeDescription(issueID, task.Acceptance))
-	}
-	if strings.TrimSpace(task.Design) != "" {
-		fmt.Fprintf(&b, "\nDesign: %s", summarizePrimeDescription(issueID, task.Design))
-	}
-	return b.String()
 }
 
 func renderPrimeWorkerObservationSection(observations []domain.WorkerObservation) string {

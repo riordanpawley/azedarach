@@ -794,6 +794,47 @@ func TestPublicationQueueAutomaticallyRecomputesChangedBaseAttempt(t *testing.T)
 	}
 }
 
+func TestRecoverAcceptedReviewPublicationCreatesCurrentBaseSuccessorFromTerminalRoot(t *testing.T) {
+	repo := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = runtime.Close() })
+	root := daemonTestPublicationOperation(runtime.canonicalProject, "publication-root", "issue", "accepted-intent", "source", time.Now().UTC())
+	stored, _, err := runtime.store.EnqueuePublication(context.Background(), root, publicationCoalesceKey(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, acquired, err := runtime.store.ClaimPublicationOperation(context.Background(), stored.OperationID, operationstore.PublicationOperationClaim{Owner: "daemon", Token: "claim", Now: time.Now().UTC(), TTL: time.Minute})
+	if err != nil || !acquired {
+		t.Fatalf("claim root = (%+v,%t,%v)", claimed, acquired, err)
+	}
+	if _, err = runtime.store.UpdatePublicationOperation(context.Background(), stored.OperationID, operationstore.PublicationOperationUpdate{
+		ExpectedStates:     []domain.PublicationOperationState{claimed.State},
+		ExpectedClaimToken: "claim",
+		State:              domain.PublicationOperationFailed,
+		ReleaseClaim:       true,
+		UpdatedAt:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prepared := root
+	prepared.OperationID = "prepared-current-base"
+	prepared.BaseRevision = "current-base"
+	pin := acceptedReviewPin{
+		Reviewer:                       domain.ReviewerIdentity{OwnerID: root.ActorID, OwnerKind: root.ReviewerKind},
+		ReviewEpochEventID:             root.ReviewEpochEventID,
+		AcceptedReviewEventID:          root.AcceptedReviewEventID,
+		AcceptedPublicationOperationID: root.OperationID,
+		SourceOID:                      root.SourceRevision,
+	}
+	successor, err := (&Daemon{}).recoverAcceptedReviewPublication(context.Background(), runtime.store, prepared, pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if successor.OperationID == root.OperationID || successor.BaseRevision != "current-base" || successor.AcceptedPublicationOperationID != root.OperationID || successor.PatchEvidenceID != root.PatchEvidenceID || !strings.HasPrefix(successor.IntentKey, root.IntentKey+":publication-retry:") {
+		t.Fatalf("recovered successor = %+v", successor)
+	}
+}
+
 func TestPublicationQueueRefreshesExpectedBaseStaleAtAuthoritativeApply(t *testing.T) {
 	repo := t.TempDir()
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
@@ -1403,7 +1444,7 @@ func TestPublicationValidationProfileReusesCompatibleExactReviewEvidence(t *test
 		t.Fatal(err)
 	}
 	d := &Daemon{operationRuntime: runtime}
-	operation := domain.PublicationOperation{OperationID: "publication", ProjectID: runtime.canonicalProject, IssueID: "issue", ActorID: "reviewer", ReviewerKind: "orchestrator", ReviewEpochEventID: 42, AcceptedReviewEventID: 43, PatchEvidenceID: "patch", PolicyVersion: "v1", ValidationCommand: "npm run verify", EnvironmentFingerprint: "portable-env"}
+	operation := domain.PublicationOperation{OperationID: "publication", ProjectID: runtime.canonicalProject, IssueID: "issue", ActorID: "reviewer", ReviewerKind: "orchestrator", ReviewEpochEventID: 42, AcceptedReviewEventID: 43, PatchEvidenceID: "patch", AcceptedPublicationOperationID: "patch", PolicyVersion: "v1", ValidationCommand: "npm run verify", EnvironmentFingerprint: "portable-env"}
 	if got := d.publicationValidationProfile(ctx, operation, "candidate"); got != "portable-review" {
 		t.Fatalf("compatible profile = %q, want portable-review", got)
 	}
@@ -1563,7 +1604,7 @@ func TestPublicationValidationStagesRequireExactPinnedDAGCapability(t *testing.T
 func daemonTestPublicationOperation(projectID, operationID, issueID, intent, source string, created time.Time) domain.PublicationOperation {
 	return domain.PublicationOperation{
 		OperationID: operationID, ProjectID: projectID, IssueID: issueID, IntentKey: intent,
-		RequestFingerprint: "fingerprint", ActorID: "reviewer", ReviewerKind: "orchestrator", ReviewEpochEventID: 42, AcceptedReviewEventID: 43, PatchEvidenceID: "patch-evidence", TargetID: "base", TargetBranch: "main",
+		RequestFingerprint: "fingerprint", ActorID: "reviewer", ReviewerKind: "orchestrator", ReviewEpochEventID: 42, AcceptedReviewEventID: 43, PatchEvidenceID: "patch-evidence", AcceptedPublicationOperationID: operationID, TargetID: "base", TargetBranch: "main",
 		SourceRevision: source, BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "go:test",
 		ValidationCommand: "npm test", EvidenceDigest: "evidence", State: domain.PublicationOperationQueued, CreatedAt: created,
 	}

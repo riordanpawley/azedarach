@@ -87,6 +87,7 @@ type Config struct {
 	WorktreeInitCommands       []string
 	WorktreeAsyncInitCommands  []string
 	GateFailureArtifactPaths   []string
+	WorkflowArtifactDir        string
 	IssueResources             appconfig.IssueResourcesConfig
 	IssueAutoArchive           appconfig.IssueAutoArchiveConfig
 	ScheduledScripts           appconfig.ScheduledScriptsConfig
@@ -466,6 +467,7 @@ func New(cfg Config) *Daemon {
 	d.codexAgentInput.issueClients = d.issueClientForProject
 	d.codexAgentInput.recoveryOwner = agentInputOwner + ":recovery"
 	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, d.codexAgentInput, agentInputOwner)
+	d.agentInput.deliveryEligible = d.agentInputDeliveryEligible
 	if !cfg.ScopedRuntime && strings.TrimSpace(os.Getenv("AZEDARACH_DISABLE_USER_DB")) != "1" {
 		if store, err := userstore.Open(userstore.DefaultPath()); err != nil {
 			cfg.Logger.Warn("initialize user cross-project projection", "error", err)
@@ -1080,7 +1082,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleHookLogList(ctx, req)
 	case protocol.CommandRuntimeSignalIngest:
 		return d.handleRuntimeSignalIngest(ctx, req)
-	case protocol.CommandValidationAcquire, protocol.CommandValidationHeartbeat, protocol.CommandValidationNested, protocol.CommandValidationFinish, protocol.CommandValidationStatus,
+	case protocol.CommandValidationAcquire, protocol.CommandValidationHeartbeat, protocol.CommandValidationNested, protocol.CommandValidationFinish, protocol.CommandValidationStatus, protocol.CommandValidationArtifactRead,
 		protocol.CommandPublicationEvidenceRecord, protocol.CommandPublicationEvidenceStatus, protocol.CommandPublicationEvidenceEvaluate:
 		return d.handleValidationCommand(ctx, req)
 	case protocol.CommandUIOpenTaskWorkspace, protocol.CommandUIOpenTaskDrillDown:

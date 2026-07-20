@@ -31,7 +31,7 @@ This repository now ships the Go implementation as the canonical `az` CLI.
      remove generation directories while clients from them may still run.
 3. If an older worktree-targeting symlink exists, migrate it to the stable,
    paired generation layout with the local helper:
-   - `just build-install-run --no-run`
+   - `just build-install`
    - The helper publishes the pair and atomically switches the stable control
      link; no direnv reload is required.
    - A caller already running from a retained managed generation is safe but
@@ -62,7 +62,7 @@ evidence and forces a failed outcome even when the payload already failed.
 After that candidate is integrated into `main`, production deployment remains
 an explicit operator action from the primary worktree:
 
-1. Run `just build-install-run --no-run` from the primary worktree.
+1. Run `just build-install` from the primary worktree.
 2. Verify the stable control link and matching `az`/`azd` sibling resolution.
 3. Restart the global daemon only as an explicit production deployment action.
 

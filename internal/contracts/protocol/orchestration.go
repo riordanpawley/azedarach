@@ -85,6 +85,7 @@ type OrchestrationSnapshot struct {
 	StaleCloseableChildren []OrchestrationCloseable                  `json:"stale_closeable_children,omitempty"`
 	ContainmentRisks       []OrchestrationRisk                       `json:"containment_risks,omitempty"`
 	WorkerObservations     []domain.WorkerObservation                `json:"worker_observations,omitempty"`
+	ActionableBlockers     []OrchestrationActionableBlocker          `json:"actionable_blockers,omitempty"`
 	Blocked                map[string]string                         `json:"blocked"`
 	Candidates             []OrchestrationCandidate                  `json:"candidates,omitempty"`
 	Reviews                []OrchestrationCandidate                  `json:"reviews,omitempty"`
@@ -100,6 +101,13 @@ type OrchestrationSnapshot struct {
 	PendingDecisions       map[string][]domain.PendingDecisionChange `json:"pending_decisions,omitempty"`
 	Health                 OrchestrationHealth                       `json:"health"`
 	Completion             OrchestrationCompletion                   `json:"completion"`
+}
+
+// OrchestrationActionableBlocker identifies the latest durable worker-blocked
+// observation for one direct issue in the exact orchestration scope.
+type OrchestrationActionableBlocker struct {
+	IssueID string `json:"issue_id"`
+	EventID int64  `json:"event_id"`
 }
 
 type OrchestrationCompletion struct {
@@ -123,6 +131,8 @@ type OrchestrationConstraints struct {
 type OrchestrationReview struct {
 	IssueID            string                         `json:"issue_id"`
 	ParentIssueID      string                         `json:"parent_issue_id,omitempty"`
+	ReviewContext      *domain.WorkflowContextPacket  `json:"review_context_packet,omitempty"`
+	IntegrationContext *domain.WorkflowContextPacket  `json:"integration_context_packet,omitempty"`
 	Actionable         bool                           `json:"actionable"`
 	Reasons            []string                       `json:"reasons,omitempty"`
 	Evidence           *domain.WorkerEvidencePacket   `json:"evidence,omitempty"`
@@ -385,6 +395,14 @@ type OrchestrationIntentResult struct {
 	Routed       []OrchestrationRouteResult    `json:"routed,omitempty"`
 	Skipped      map[string]string             `json:"skipped,omitempty"`
 	Failed       map[string]string             `json:"failed,omitempty"`
+	Results      []WorkflowPhaseResult         `json:"result_summaries,omitempty"`
+}
+
+// WorkflowPhaseResult binds a bounded phase result to the issue whose raw
+// orchestration fields were deliberately excluded from the response.
+type WorkflowPhaseResult struct {
+	IssueID string                       `json:"issue_id"`
+	Summary domain.WorkflowResultSummary `json:"summary"`
 }
 
 type OrchestrationRouteResult struct {
