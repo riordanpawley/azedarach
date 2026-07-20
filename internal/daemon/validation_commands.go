@@ -366,7 +366,7 @@ func publicationNameContains(values []string, target string) bool {
 }
 
 func (d *Daemon) recordTaskCloseMergeResultEvidence(ctx context.Context, projectID, issueID string, integration taskCloseIntegrationResult) error {
-	canonical := false
+	canonical := integration.ExternalReconciled
 	for _, attempt := range integration.ValidationAttempts {
 		if attempt.Canonical && attempt.Status == domain.IntegrationCandidateValidationPassed && strings.TrimSpace(attempt.CandidateHead) == strings.TrimSpace(integration.TargetOID) {
 			canonical = true
@@ -394,15 +394,38 @@ func (d *Daemon) recordTaskCloseMergeResultEvidence(ctx context.Context, project
 	}
 	policyVersion := publicationPolicyVersion(projectCfg, gateCommand)
 	environmentFingerprint := publicationEnvironmentFingerprint(projectCfg)
-	operation, validation, err := d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, policyVersion, gateCommand, environmentFingerprint)
-	if err != nil {
-		return err
+	var operation domain.PublicationOperation
+	var validation domain.ValidationRequest
+	if integration.ExternalReconciled {
+		external, ok := ctx.Value(externalTaskIntegrationContextKey{}).(externalTaskIntegrationContext)
+		if !ok || external.Operation.OperationID != integration.PublicationOperationID {
+			return fmt.Errorf("external reconciliation publication authority is unavailable")
+		}
+		operation = external.Operation
+		finishedAt := operation.CreatedAt.UTC()
+		if operation.FinishedAt != nil {
+			finishedAt = operation.FinishedAt.UTC()
+		} else if !operation.UpdatedAt.IsZero() {
+			finishedAt = operation.UpdatedAt.UTC()
+		}
+		validation = domain.ValidationRequest{RequestID: operation.ValidationRequestID, EnvironmentFingerprint: operation.EnvironmentFingerprint, FinishedAt: &finishedAt}
+		if strings.TrimSpace(operation.PolicyVersion) != strings.TrimSpace(policyVersion) ||
+			strings.TrimSpace(operation.EnvironmentFingerprint) != strings.TrimSpace(environmentFingerprint) ||
+			strings.Join(strings.Fields(operation.ValidationCommand), " ") != strings.Join(strings.Fields(gateCommand), " ") {
+			return fmt.Errorf("external reconciliation publication policy identity changed")
+		}
+	} else {
+		var err error
+		operation, validation, err = d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, policyVersion, gateCommand, environmentFingerprint)
+		if err != nil {
+			return err
+		}
 	}
 	currentTarget, err := d.git.ResolveCommit(ctx, targetWorktree, integration.TargetBranch)
 	if err != nil {
 		return fmt.Errorf("resolve exact synthetic merge target: %w", err)
 	}
-	if currentTarget != strings.TrimSpace(integration.TargetOID) {
+	if !integration.ExternalReconciled && currentTarget != strings.TrimSpace(integration.TargetOID) {
 		return fmt.Errorf("exact synthetic merge target moved: current=%s recorded=%s", currentTarget, integration.TargetOID)
 	}
 	status, err := d.git.Status(ctx, targetWorktree)

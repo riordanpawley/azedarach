@@ -2461,7 +2461,25 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		recordPhase("external_integration_revalidation", phaseStartedAt, false)
 		phaseStartedAt = time.Now()
 	}
-	if strings.TrimSpace(cmd.ExpectedPublicationOperationID) != "" {
+	if external, ok := ctx.Value(externalTaskIntegrationContextKey{}).(externalTaskIntegrationContext); ok {
+		finishedAt := time.Now().UTC()
+		task, err = issueClient.CloseWithRuntimeExternalReviewPublicationAuthority(ctx, projectID, taskID, closeStatus, reviewAuthority, cmd.ExpectedReviewEvidence, external.Operation, finishedAt)
+		if err == nil {
+			external.Operation.State = domain.PublicationOperationMerged
+			external.Operation.LeaseOwner = ""
+			external.Operation.ClaimToken = ""
+			external.Operation.ClaimExpiresAt = nil
+			external.Operation.FailureKind = ""
+			external.Operation.FailureDetail = ""
+			external.Operation.FailureArtifact = ""
+			external.Operation.FinishedAt = &finishedAt
+			external.Operation.UpdatedAt = finishedAt
+			d.publishPublicationOperationEvent(external.Operation)
+			if d.publicationStateChanged != nil {
+				d.publicationStateChanged(external.Operation)
+			}
+		}
+	} else if strings.TrimSpace(cmd.ExpectedPublicationOperationID) != "" {
 		task, err = issueClient.CloseWithRuntimeReviewPublicationAuthority(ctx, projectID, taskID, closeStatus, reviewAuthority, cmd.ExpectedReviewEvidence)
 	} else if cmd.ExpectedReviewEvidence != nil {
 		task, err = issueClient.CloseWithRuntimeReviewEvidenceFence(ctx, projectID, taskID, closeStatus, *cmd.ExpectedReviewEvidence, reviewEvidenceFence)
@@ -3189,7 +3207,6 @@ func (d *Daemon) persistTaskCloseIntegrationPublication(ctx context.Context, pro
 		if err != nil {
 			return fmt.Errorf("record external integration reconciliation evidence: %w", err)
 		}
-		return nil
 	}
 	configured, err := d.publicationEvidenceConfigured(projectID)
 	if err != nil {
