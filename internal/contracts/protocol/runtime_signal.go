@@ -25,6 +25,7 @@ type RuntimeSignalIngestCommandBody struct {
 	LogicalPaneID    string         `json:"logical_pane_id,omitempty" msgpack:"logical_pane_id,omitempty"`
 	PanePID          int            `json:"pane_pid,omitempty" msgpack:"pane_pid,omitempty"`
 	AgentIncarnation string         `json:"agent_incarnation,omitempty" msgpack:"agent_incarnation,omitempty"`
+	AgentThreadID    string         `json:"agent_thread_id,omitempty" msgpack:"agent_thread_id,omitempty"`
 	Agent            string         `json:"agent,omitempty" msgpack:"agent,omitempty"`
 	Hook             string         `json:"hook,omitempty" msgpack:"hook,omitempty"`
 	Command          string         `json:"command,omitempty" msgpack:"command,omitempty"`

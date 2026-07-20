@@ -331,8 +331,16 @@ type ManagedAgentIdentity struct {
 	TmuxPaneID       string
 	PanePID          int
 	AgentIncarnation string
+	AgentThreadID    string
 	ObservedAt       time.Time
 	UpdatedAt        time.Time
+}
+
+func nullableTrimmed(value string) any {
+	if value = strings.TrimSpace(value); value != "" {
+		return value
+	}
+	return nil
 }
 
 // UpsertManagedAgentIdentity installs a new authoritative incarnation. Callers
@@ -349,15 +357,15 @@ func (s *RuntimeStateStore) UpsertManagedAgentIdentity(ctx context.Context, iden
 			return err
 		}
 		result, err := db.ExecContext(writeCtx, `INSERT INTO `+managedAgentIdentityTable+`
-			(project_id,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,observed_at,updated_at)
-			VALUES(?,?,?,?,?,?,?,?)
+			(project_id,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,agent_thread_id,observed_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(project_id,session_id,logical_pane_id) DO UPDATE SET
 				tmux_pane_id=excluded.tmux_pane_id,pane_pid=excluded.pane_pid,
-				agent_incarnation=excluded.agent_incarnation,observed_at=excluded.observed_at,updated_at=excluded.updated_at
+				agent_incarnation=excluded.agent_incarnation,agent_thread_id=excluded.agent_thread_id,observed_at=excluded.observed_at,updated_at=excluded.updated_at
 			WHERE excluded.observed_at > `+managedAgentIdentityTable+`.observed_at
 				AND excluded.agent_incarnation <> `+managedAgentIdentityTable+`.agent_incarnation`,
 			identity.ProjectID, identity.SessionID, identity.LogicalPaneID, identity.TmuxPaneID,
-			identity.PanePID, identity.AgentIncarnation, identity.ObservedAt.Format(time.RFC3339Nano), identity.UpdatedAt.Format(time.RFC3339Nano))
+			identity.PanePID, identity.AgentIncarnation, nullableTrimmed(identity.AgentThreadID), identity.ObservedAt.Format(time.RFC3339Nano), identity.UpdatedAt.Format(time.RFC3339Nano))
 		if err != nil {
 			return fmt.Errorf("upsert managed agent identity %s/%s/%s: %w", identity.ProjectID, identity.SessionID, identity.LogicalPaneID, err)
 		}
@@ -370,7 +378,7 @@ func (s *RuntimeStateStore) UpsertManagedAgentIdentity(ctx context.Context, iden
 			if loadErr != nil {
 				return loadErr
 			}
-			if found && current.TmuxPaneID == identity.TmuxPaneID && current.PanePID == identity.PanePID && current.AgentIncarnation == identity.AgentIncarnation {
+			if found && current.TmuxPaneID == identity.TmuxPaneID && current.PanePID == identity.PanePID && current.AgentIncarnation == identity.AgentIncarnation && current.AgentThreadID == identity.AgentThreadID {
 				return nil
 			}
 			return fmt.Errorf("%w: %s/%s/%s", ErrStaleManagedAgentIdentity, identity.ProjectID, identity.SessionID, identity.LogicalPaneID)
@@ -385,6 +393,7 @@ func normalizeManagedAgentIdentity(identity ManagedAgentIdentity) (ManagedAgentI
 	identity.LogicalPaneID = strings.TrimSpace(identity.LogicalPaneID)
 	identity.TmuxPaneID = strings.TrimSpace(identity.TmuxPaneID)
 	identity.AgentIncarnation = strings.TrimSpace(identity.AgentIncarnation)
+	identity.AgentThreadID = strings.TrimSpace(identity.AgentThreadID)
 	if identity.ProjectID == "" || identity.SessionID == "" || identity.LogicalPaneID == "" || identity.TmuxPaneID == "" || identity.AgentIncarnation == "" || identity.PanePID <= 0 {
 		return identity, fmt.Errorf("managed agent identity requires project, session, logical pane, tmux pane, positive pane pid, and agent incarnation")
 	}
@@ -406,11 +415,11 @@ func (s *RuntimeStateStore) GetManagedAgentIdentity(ctx context.Context, project
 	}
 	var identity ManagedAgentIdentity
 	var observedAt, updatedAt string
-	err = db.QueryRowContext(ctx, `SELECT project_id,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,observed_at,updated_at
+	err = db.QueryRowContext(ctx, `SELECT project_id,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,COALESCE(agent_thread_id,''),observed_at,updated_at
 		FROM `+managedAgentIdentityTable+` WHERE project_id=? AND session_id=? AND logical_pane_id=?`,
 		normalizedProjectID(projectID), strings.TrimSpace(sessionID), strings.TrimSpace(logicalPaneID)).Scan(
 		&identity.ProjectID, &identity.SessionID, &identity.LogicalPaneID, &identity.TmuxPaneID, &identity.PanePID,
-		&identity.AgentIncarnation, &observedAt, &updatedAt)
+		&identity.AgentIncarnation, &identity.AgentThreadID, &observedAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ManagedAgentIdentity{}, false, nil
 	}
@@ -448,11 +457,11 @@ func (s *RuntimeStateStore) AcknowledgeManagedAgentIdentity(ctx context.Context,
 		defer func() { _ = tx.Rollback() }()
 		var current ManagedAgentIdentity
 		var observedAt, updatedAt string
-		err = tx.QueryRowContext(writeCtx, `SELECT project_id,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,observed_at,updated_at
+		err = tx.QueryRowContext(writeCtx, `SELECT project_id,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,COALESCE(agent_thread_id,''),observed_at,updated_at
 			FROM `+managedAgentIdentityTable+` WHERE project_id=? AND session_id=? AND logical_pane_id=?`,
 			identity.ProjectID, identity.SessionID, identity.LogicalPaneID).Scan(
 			&current.ProjectID, &current.SessionID, &current.LogicalPaneID, &current.TmuxPaneID, &current.PanePID,
-			&current.AgentIncarnation, &observedAt, &updatedAt)
+			&current.AgentIncarnation, &current.AgentThreadID, &observedAt, &updatedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -505,7 +514,7 @@ func (s *RuntimeStateStore) ListManagedAgentIdentities(ctx context.Context, proj
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT project_id,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,observed_at,updated_at
+	rows, err := db.QueryContext(ctx, `SELECT project_id,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,COALESCE(agent_thread_id,''),observed_at,updated_at
 		FROM `+managedAgentIdentityTable+` WHERE project_id=? AND session_id=? ORDER BY logical_pane_id`, normalizedProjectID(projectID), strings.TrimSpace(sessionID))
 	if err != nil {
 		return nil, fmt.Errorf("list managed agent identities: %w", err)
@@ -515,7 +524,7 @@ func (s *RuntimeStateStore) ListManagedAgentIdentities(ctx context.Context, proj
 	for rows.Next() {
 		var identity ManagedAgentIdentity
 		var observedAt, updatedAt string
-		if err := rows.Scan(&identity.ProjectID, &identity.SessionID, &identity.LogicalPaneID, &identity.TmuxPaneID, &identity.PanePID, &identity.AgentIncarnation, &observedAt, &updatedAt); err != nil {
+		if err := rows.Scan(&identity.ProjectID, &identity.SessionID, &identity.LogicalPaneID, &identity.TmuxPaneID, &identity.PanePID, &identity.AgentIncarnation, &identity.AgentThreadID, &observedAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan managed agent identity: %w", err)
 		}
 		identity.ObservedAt, err = parseRuntimeStateTime(observedAt)
@@ -540,7 +549,7 @@ func (s *RuntimeStateStore) MatchManagedAgentIdentity(ctx context.Context, candi
 	if err != nil || !found {
 		return false, err
 	}
-	return current.TmuxPaneID == candidate.TmuxPaneID && current.PanePID == candidate.PanePID && current.AgentIncarnation == candidate.AgentIncarnation, nil
+	return current.TmuxPaneID == candidate.TmuxPaneID && current.PanePID == candidate.PanePID && current.AgentIncarnation == candidate.AgentIncarnation && current.AgentThreadID == candidate.AgentThreadID, nil
 }
 
 // ApplyPhysicalSessionObservation atomically records a monotonic physical
@@ -3042,6 +3051,7 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessPr
 			tmux_pane_id TEXT NOT NULL CHECK (trim(tmux_pane_id) <> ''),
 			pane_pid INTEGER NOT NULL CHECK (pane_pid > 0),
 			agent_incarnation TEXT NOT NULL CHECK (trim(agent_incarnation) <> ''),
+			agent_thread_id TEXT CHECK (agent_thread_id IS NULL OR trim(agent_thread_id) <> ''),
 			observed_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY(project_id, session_id, logical_pane_id)
@@ -3114,6 +3124,10 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessPr
 			session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
 			prompt_hash TEXT NOT NULL CHECK (trim(prompt_hash) <> ''),
 			runtime_nonce TEXT NOT NULL CHECK (trim(runtime_nonce) <> ''),
+			tmux_pane_id TEXT,
+			pane_pid INTEGER,
+			agent_incarnation TEXT,
+			agent_thread_id TEXT,
 			acknowledged_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY (project_id, root_issue_id),
@@ -3185,6 +3199,16 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessPr
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("ensure runtime-state schema: %w", err)
+		}
+	}
+	if err := ensureColumn(ctx, db, managedAgentIdentityTable, "agent_thread_id", "TEXT"); err != nil {
+		return err
+	}
+	for _, column := range []struct{ name, definition string }{
+		{"tmux_pane_id", "TEXT"}, {"pane_pid", "INTEGER"}, {"agent_incarnation", "TEXT"}, {"agent_thread_id", "TEXT"},
+	} {
+		if err := ensureColumn(ctx, db, rootedBootstrapAckTable, column.name, column.definition); err != nil {
+			return err
 		}
 	}
 	if err := ensureColumn(ctx, db, physicalSessionObservationTable, "observed_version", "INTEGER NOT NULL DEFAULT 0"); err != nil {

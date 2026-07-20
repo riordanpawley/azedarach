@@ -300,7 +300,10 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 		worktree string
 	}
 	prepared, err, timedOut := runRestartStage(ctx, sessionRestartPrepareTimeout, func(stageCtx context.Context) (preparedRestart, error) {
-		artifact, prepareErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchResume, ProjectID: target.ProjectID, IssueID: target.IssueID, SessionID: target.SessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths, Prompt: launchPrompt, LogicalPaneID: old.LogicalPaneID, AgentIncarnation: incarnation})
+		if strings.EqualFold(strings.TrimSpace(d.runtimeConfigForProject(target.ProjectID).CLITool), "codex") && strings.TrimSpace(old.AgentThreadID) == "" {
+			return preparedRestart{}, errors.New("managed Codex restart requires an exact durable thread id")
+		}
+		artifact, prepareErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchResume, ProjectID: target.ProjectID, IssueID: target.IssueID, SessionID: target.SessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths, Prompt: launchPrompt, LogicalPaneID: old.LogicalPaneID, AgentIncarnation: incarnation, AgentThreadID: old.AgentThreadID})
 		if prepareErr != nil {
 			return preparedRestart{}, prepareErr
 		}
@@ -612,7 +615,7 @@ func (d *Daemon) repairRecoveredSessionRestartRootedBootstrap(ctx context.Contex
 
 func sameManagedRestartIdentity(a, b daemonstate.ManagedAgentIdentity) bool {
 	return a.ProjectID == b.ProjectID && a.SessionID == b.SessionID && a.LogicalPaneID == b.LogicalPaneID &&
-		sanitizeRuntimePaneID(a.TmuxPaneID) == sanitizeRuntimePaneID(b.TmuxPaneID) && a.PanePID == b.PanePID && a.AgentIncarnation == b.AgentIncarnation
+		sanitizeRuntimePaneID(a.TmuxPaneID) == sanitizeRuntimePaneID(b.TmuxPaneID) && a.PanePID == b.PanePID && a.AgentIncarnation == b.AgentIncarnation && a.AgentThreadID == b.AgentThreadID
 }
 
 func reportSessionRestartProgress(ctx context.Context, plan sessionRestartRecoveryPlan) error {
@@ -888,7 +891,7 @@ func decodeSessionRestartRecoveryPlan(record daemonops.Record) (sessionRestartRe
 	return plan, true
 }
 func restartProtocolIdentity(i daemonstate.ManagedAgentIdentity) *protocol.ManagedAgentIdentity {
-	return &protocol.ManagedAgentIdentity{LogicalPaneID: i.LogicalPaneID, TmuxPaneID: i.TmuxPaneID, PanePID: i.PanePID, AgentIncarnation: i.AgentIncarnation}
+	return &protocol.ManagedAgentIdentity{LogicalPaneID: i.LogicalPaneID, TmuxPaneID: i.TmuxPaneID, PanePID: i.PanePID, AgentIncarnation: i.AgentIncarnation, AgentThreadID: i.AgentThreadID}
 }
 func restartSuccessOutcome(activity string) string {
 	switch strings.ToLower(strings.TrimSpace(activity)) {

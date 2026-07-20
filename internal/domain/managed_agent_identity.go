@@ -16,6 +16,7 @@ type ManagedAgentRuntimeIdentity struct {
 	TmuxPaneID       string             `json:"tmux_pane_id"`
 	PanePID          int                `json:"pane_pid"`
 	AgentIncarnation string             `json:"agent_incarnation"`
+	AgentThreadID    string             `json:"agent_thread_id,omitempty"`
 }
 
 func (i ManagedAgentRuntimeIdentity) Validate() error {
@@ -40,5 +41,6 @@ func (i ManagedAgentRuntimeIdentity) SameIncarnation(other ManagedAgentRuntimeId
 	return i.LogicalPaneID == other.LogicalPaneID &&
 		strings.TrimSpace(i.TmuxPaneID) == strings.TrimSpace(other.TmuxPaneID) &&
 		i.PanePID == other.PanePID &&
-		strings.TrimSpace(i.AgentIncarnation) == strings.TrimSpace(other.AgentIncarnation)
+		strings.TrimSpace(i.AgentIncarnation) == strings.TrimSpace(other.AgentIncarnation) &&
+		strings.TrimSpace(i.AgentThreadID) == strings.TrimSpace(other.AgentThreadID)
 }

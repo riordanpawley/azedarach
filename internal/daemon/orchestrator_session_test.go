@@ -450,7 +450,7 @@ func testSessionRestartAllPreservesProjectOrchestratorAuthority(t *testing.T, ap
 	}
 	launchScript := runner.launchScriptContents[sessionID]
 	if appServer {
-		if !strings.Contains(launchScript, "app-server daemon start") || !strings.Contains(launchScript, "resume --remote unix:// --last") {
+		if !strings.Contains(launchScript, "app-server daemon start") || !strings.Contains(launchScript, "resume --remote unix:// '019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02'") || strings.Contains(launchScript, "--last") {
 			t.Fatalf("project orchestrator app-server restart script = %q", launchScript)
 		}
 	} else if !strings.Contains(launchScript, "codex "+codexFloopFailOpenConfigExpansion+" resume") || strings.Contains(launchScript, "app-server") || strings.Contains(launchScript, "--remote") {

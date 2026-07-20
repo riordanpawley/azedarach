@@ -115,7 +115,7 @@ func (r *realRestartRunner) Run(ctx context.Context, args ...string) (string, er
 	identity := daemonstate.ManagedAgentIdentity{
 		ProjectID: r.projectID, SessionID: r.session, LogicalPaneID: "agent",
 		TmuxPaneID: strings.TrimPrefix(fields[0], "%"), PanePID: pid,
-		AgentIncarnation: replacementIncarnation, ObservedAt: time.Now().UTC(),
+		AgentIncarnation: replacementIncarnation, AgentThreadID: "019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02", ObservedAt: time.Now().UTC(),
 	}
 	if storeErr := r.store.UpsertManagedAgentIdentity(ctx, identity); storeErr != nil {
 		return output, storeErr
@@ -220,7 +220,7 @@ func TestRestartManagedAgentPaneRequiresForceAndAcknowledgesReplacement(t *testi
 	project, session := "project", "az-1"
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
-	old := daemonstate.ManagedAgentIdentity{ProjectID: project, SessionID: session, LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old", ObservedAt: time.Now()}
+	old := daemonstate.ManagedAgentIdentity{ProjectID: project, SessionID: session, LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old", AgentThreadID: "019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02", ObservedAt: time.Now()}
 	if err := store.UpsertManagedAgentIdentity(ctx, old); err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func newExactRestartDaemon(t *testing.T, project, session, issue, activity strin
 	t.Helper()
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
-	old := daemonstate.ManagedAgentIdentity{ProjectID: project, SessionID: session, LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old", ObservedAt: time.Now()}
+	old := daemonstate.ManagedAgentIdentity{ProjectID: project, SessionID: session, LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old", AgentThreadID: "019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02", ObservedAt: time.Now()}
 	if err := store.UpsertManagedAgentIdentity(context.Background(), old); err != nil {
 		t.Fatal(err)
 	}

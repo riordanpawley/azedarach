@@ -369,12 +369,12 @@ func (c *Client) EnsureAgentInputDeliveryIntent(ctx context.Context, request dom
 			}
 			now := time.Now().UTC()
 			_, err = db.ExecContext(lockCtx, `INSERT INTO agent_input_delivery_intents (
-				project_id,intent_key,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,
+				project_id,intent_key,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,agent_thread_id,
 				tool,message_kind,payload,state,expires_at,created_at,updated_at
-			) VALUES(?,?,?,?,?,?,?,?,?,?, 'queued',?,?,?) ON CONFLICT(project_id,intent_key) DO NOTHING`,
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?, 'queued',?,?,?) ON CONFLICT(project_id,intent_key) DO NOTHING`,
 				strings.TrimSpace(request.ProjectID), strings.TrimSpace(request.IntentKey), strings.TrimSpace(request.SessionID),
 				strings.TrimSpace(string(request.Target.LogicalPaneID)), strings.TrimSpace(request.Target.TmuxPaneID), request.Target.PanePID,
-				strings.TrimSpace(request.Target.AgentIncarnation), strings.TrimSpace(request.Tool), string(request.Kind), request.Payload,
+				strings.TrimSpace(request.Target.AgentIncarnation), nullableTrimmedString(request.Target.AgentThreadID), strings.TrimSpace(request.Tool), string(request.Kind), request.Payload,
 				nullableTimestamp(request.ExpiresAt), formatTimestamp(now), formatTimestamp(now))
 			if err != nil {
 				return fmt.Errorf("insert agent input intent: %w", err)
@@ -595,8 +595,8 @@ func (c *Client) ResolveAgentInputDeliverySubmissionRefusal(ctx context.Context,
 func (c *Client) loadAgentInputDeliveryIntent(ctx context.Context, q sqlIssueDBTX, projectID, intentKey string) (AgentInputDeliveryIntent, error) {
 	var out AgentInputDeliveryIntent
 	var logicalPane, kind, expires, leaseExpires, acknowledged sql.NullString
-	err := q.QueryRowContext(ctx, `SELECT session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,tool,message_kind,payload,state,expires_at,COALESCE(lease_owner,''),COALESCE(lease_token,''),lease_expires_at,attempt_count,acknowledged_at FROM agent_input_delivery_intents WHERE project_id=? AND intent_key=?`, projectID, intentKey).Scan(
-		&out.Request.SessionID, &logicalPane, &out.Request.Target.TmuxPaneID, &out.Request.Target.PanePID, &out.Request.Target.AgentIncarnation, &out.Request.Tool, &kind, &out.Request.Payload, &out.State, &expires, &out.LeaseOwner, &out.LeaseToken, &leaseExpires, &out.AttemptCount, &acknowledged)
+	err := q.QueryRowContext(ctx, `SELECT session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,COALESCE(agent_thread_id,''),tool,message_kind,payload,state,expires_at,COALESCE(lease_owner,''),COALESCE(lease_token,''),lease_expires_at,attempt_count,acknowledged_at FROM agent_input_delivery_intents WHERE project_id=? AND intent_key=?`, projectID, intentKey).Scan(
+		&out.Request.SessionID, &logicalPane, &out.Request.Target.TmuxPaneID, &out.Request.Target.PanePID, &out.Request.Target.AgentIncarnation, &out.Request.Target.AgentThreadID, &out.Request.Tool, &kind, &out.Request.Payload, &out.State, &expires, &out.LeaseOwner, &out.LeaseToken, &leaseExpires, &out.AttemptCount, &acknowledged)
 	if err != nil {
 		return out, err
 	}
@@ -627,6 +627,13 @@ func nullableTimestamp(t time.Time) any {
 		return nil
 	}
 	return formatTimestamp(t.UTC())
+}
+
+func nullableTrimmedString(value string) any {
+	if value = strings.TrimSpace(value); value != "" {
+		return value
+	}
+	return nil
 }
 func randomAgentInputToken() (string, error) {
 	var b [24]byte

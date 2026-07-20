@@ -54,6 +54,10 @@ func (d *Daemon) ensureRootedOrchestratorBootstrap(ctx context.Context, projectI
 	}
 	authority := daemonstate.NewRootedBootstrapAcknowledgementAuthority(store)
 	promptHash := rootedOrchestratorPromptHash(prompt)
+	managedIdentity, managedFound, managedErr := store.GetManagedAgentIdentity(ctx, d.canonicalProjectID(projectID), sessionID, "agent")
+	if managedErr != nil {
+		return "", fmt.Errorf("refresh rooted managed-agent identity: %w", managedErr)
+	}
 	if !launchedHere {
 		acknowledgement, acknowledged, projectionErr := authority.Get(ctx, identity)
 		if projectionErr != nil {
@@ -63,7 +67,7 @@ func (d *Daemon) ensureRootedOrchestratorBootstrap(ctx context.Context, projectI
 		if nonceErr != nil {
 			return "", fmt.Errorf("read rooted orchestrator runtime nonce: %w", nonceErr)
 		}
-		if found && acknowledged && acknowledgement.SessionID == sessionID && acknowledgement.PromptHash == promptHash && acknowledgement.RuntimeNonce == runtimeNonce {
+		if found && acknowledged && managedFound && acknowledgement.SessionID == sessionID && acknowledgement.PromptHash == promptHash && acknowledgement.RuntimeNonce == runtimeNonce && acknowledgement.TmuxPaneID == managedIdentity.TmuxPaneID && acknowledgement.PanePID == managedIdentity.PanePID && acknowledgement.AgentIncarnation == managedIdentity.AgentIncarnation && acknowledgement.AgentThreadID == managedIdentity.AgentThreadID {
 			return "verified", nil
 		}
 	}
@@ -90,7 +94,13 @@ func (d *Daemon) ensureRootedOrchestratorBootstrap(ctx context.Context, projectI
 	now := time.Now().UTC()
 	acknowledgement := daemonstate.RootedBootstrapAcknowledgement{
 		Identity: identity, SessionID: sessionID, PromptHash: promptHash,
-		RuntimeNonce: runtimeNonce, AcknowledgedAt: now, UpdatedAt: now,
+		RuntimeNonce: runtimeNonce, TmuxPaneID: managedIdentity.TmuxPaneID, PanePID: managedIdentity.PanePID, AgentIncarnation: managedIdentity.AgentIncarnation, AgentThreadID: managedIdentity.AgentThreadID, AcknowledgedAt: now, UpdatedAt: now,
+	}
+	if !managedFound || strings.TrimSpace(managedIdentity.AgentIncarnation) == "" {
+		return "", errors.New("rooted bootstrap acknowledgement requires exact managed-agent identity")
+	}
+	if strings.EqualFold(strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool), "codex") && strings.TrimSpace(managedIdentity.AgentThreadID) == "" {
+		return "", errors.New("rooted Codex bootstrap acknowledgement requires exact durable thread id")
 	}
 	if err := authority.Acknowledge(ctx, acknowledgement); err != nil {
 		return "", fmt.Errorf("persist rooted bootstrap acknowledgement: %w", err)

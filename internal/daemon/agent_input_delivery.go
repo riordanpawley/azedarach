@@ -370,7 +370,7 @@ func (s *agentInputDeliveryService) observeIdentity(ctx context.Context, request
 	if err != nil {
 		return domain.ManagedAgentRuntimeIdentity{}, domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "identity lookup failed"}, fmt.Errorf("lookup managed agent identity: %w", err)
 	}
-	current := domain.ManagedAgentRuntimeIdentity{LogicalPaneID: domain.ManagedAgentPaneID(identity.LogicalPaneID), TmuxPaneID: identity.TmuxPaneID, PanePID: identity.PanePID, AgentIncarnation: identity.AgentIncarnation}
+	current := domain.ManagedAgentRuntimeIdentity{LogicalPaneID: domain.ManagedAgentPaneID(identity.LogicalPaneID), TmuxPaneID: identity.TmuxPaneID, PanePID: identity.PanePID, AgentIncarnation: identity.AgentIncarnation, AgentThreadID: identity.AgentThreadID}
 	if !found || !request.Target.SameIncarnation(current) {
 		return current, domain.AgentInputDeliveryResult{Outcome: domain.AgentInputRejectedStaleTarget, Reason: "managed agent incarnation changed"}, nil
 	}
@@ -392,5 +392,5 @@ func (d *Daemon) currentAgentInputTarget(ctx context.Context, projectID, session
 		return domain.ManagedAgentRuntimeIdentity{}, false, nil
 	}
 	identity, found, err := store.GetManagedAgentIdentity(ctx, projectID, sessionID, "agent")
-	return domain.ManagedAgentRuntimeIdentity{LogicalPaneID: domain.ManagedAgentPaneID(identity.LogicalPaneID), TmuxPaneID: identity.TmuxPaneID, PanePID: identity.PanePID, AgentIncarnation: identity.AgentIncarnation}, found, err
+	return domain.ManagedAgentRuntimeIdentity{LogicalPaneID: domain.ManagedAgentPaneID(identity.LogicalPaneID), TmuxPaneID: identity.TmuxPaneID, PanePID: identity.PanePID, AgentIncarnation: identity.AgentIncarnation, AgentThreadID: identity.AgentThreadID}, found, err
 }

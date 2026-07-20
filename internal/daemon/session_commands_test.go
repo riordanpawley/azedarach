@@ -458,6 +458,17 @@ func TestCodexAppServerLaunchUsesStockRemoteTUIAndSupervisedResume(t *testing.T)
 	}
 }
 
+func TestCodexManagedResumeUsesExactDurableThreadWithoutPickerFallback(t *testing.T) {
+	d := &Daemon{cfg: Config{CLITool: "codex", CodexAppServer: true}}
+	command := d.buildCodexResumeCommand(protocol.DefaultProjectID, "root", "019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02", false, nil)
+	if !strings.Contains(command, "resume --remote unix:// '019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02'") {
+		t.Fatalf("exact-thread resume command = %q", command)
+	}
+	if strings.Contains(command, "--last") || strings.Contains(command, "send-keys") || strings.Contains(command, "paste") {
+		t.Fatalf("exact-thread resume permits ambiguous/picker delivery = %q", command)
+	}
+}
+
 func TestCodexAppServerRecoveryCoordinatesConcurrentSupervisors(t *testing.T) {
 	stableDir := t.TempDir()
 	supervisor := codexAppServerSupervisedCommand("codex", stableDir, "codex first", "codex resume")
@@ -2027,7 +2038,7 @@ func seedManagedRestartIdentity(t *testing.T, d *Daemon, runner *sessionStartTmu
 	runner.panePIDs[sessionID] = 123
 	if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{
 		ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "1",
-		PanePID: 123, AgentIncarnation: "pre-restart", ObservedAt: time.Now().UTC(),
+		PanePID: 123, AgentIncarnation: "pre-restart", AgentThreadID: "019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02", ObservedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -2050,7 +2061,7 @@ func seedManagedRestartIdentity(t *testing.T, d *Daemon, runner *sessionStartTmu
 			runner.panePIDs[sessionID] = 124
 			return store.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{
 				ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "1",
-				PanePID: 124, AgentIncarnation: incarnation[1], ObservedAt: time.Now().UTC().Add(time.Second),
+				PanePID: 124, AgentIncarnation: incarnation[1], AgentThreadID: "019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02", ObservedAt: time.Now().UTC().Add(time.Second),
 			})
 		}
 		return errors.New("restart artifact did not contain an agent incarnation")
@@ -2099,9 +2110,13 @@ func acknowledgeManagedAgentOnInitialLaunch(t *testing.T, d *Daemon, runner *ses
 			}
 			return
 		}
+		agentThreadID := ""
+		if strings.EqualFold(strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool), "codex") {
+			agentThreadID = "019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02"
+		}
 		if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{
 			ProjectID: d.canonicalProjectID(projectID), SessionID: sessionID, LogicalPaneID: "agent",
-			TmuxPaneID: "1", PanePID: panePID, AgentIncarnation: incarnation[1], ObservedAt: observedAt,
+			TmuxPaneID: "1", PanePID: panePID, AgentIncarnation: incarnation[1], AgentThreadID: agentThreadID, ObservedAt: observedAt,
 		}); err != nil {
 			t.Errorf("acknowledge initial managed agent launch: %v", err)
 		}

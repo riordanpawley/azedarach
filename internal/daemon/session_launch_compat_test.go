@@ -25,7 +25,7 @@ func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string,
 	tool := d.runtimeConfigForProject(projectID).CLITool
 	switch tool {
 	case "codex":
-		return d.buildCodexResumeCommand(projectID, issueID, yolo, imagePaths)
+		return d.buildCodexResumeCommand(projectID, issueID, "", yolo, imagePaths)
 	case "opencode":
 		return d.buildOpenCodeContinueCommand(projectID, issueID, sessionRestartContinuePrompt)
 	case "", "claude":

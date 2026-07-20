@@ -196,6 +196,7 @@ func ingestAgentHookRuntimeSignalBestEffort(ctx context.Context, deps *Dependenc
 		Worktree:         strings.TrimSpace(hookCtx.ProjectDir),
 		TmuxPane:         strings.TrimSpace(os.Getenv("TMUX_PANE")),
 		AgentIncarnation: agentHookIncarnation(hookCtx.Payload),
+		AgentThreadID:    agentHookIncarnation(hookCtx.Payload),
 		Agent:            string(hookCtx.Agent),
 		Hook:             event,
 		Event:            event,

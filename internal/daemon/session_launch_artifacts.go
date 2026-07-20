@@ -44,6 +44,7 @@ type sessionLaunchSpec struct {
 	SanitizeEnvironment bool
 	LogicalPaneID       string
 	AgentIncarnation    string
+	AgentThreadID       string
 }
 
 type sessionLaunchArtifact struct {
