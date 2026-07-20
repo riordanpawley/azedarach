@@ -87,6 +87,7 @@ type Config struct {
 	WorktreeInitCommands       []string
 	WorktreeAsyncInitCommands  []string
 	GateFailureArtifactPaths   []string
+	WorkflowArtifactDir        string
 	IssueResources             appconfig.IssueResourcesConfig
 	IssueAutoArchive           appconfig.IssueAutoArchiveConfig
 	ScheduledScripts           appconfig.ScheduledScriptsConfig

@@ -189,15 +189,13 @@ func (d *Daemon) validationRequestSuccessResponse(req protocol.RequestEnvelope, 
 }
 
 func (d *Daemon) validationArtifactRoot() string {
-	base := strings.TrimSpace(d.cfg.LockPath)
-	if base != "" {
-		return filepath.Join(filepath.Dir(base), "artifacts", "validation", "sha256")
+	if configured := strings.TrimSpace(d.cfg.WorkflowArtifactDir); configured != "" {
+		return filepath.Join(configured, "validation", "sha256")
 	}
-	repoDir := strings.TrimSpace(d.cfg.RepoDir)
-	if repoDir == "" && d.operationRuntime != nil {
-		repoDir = strings.TrimSpace(d.operationRuntime.repoDir)
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".azedarach", "artifacts", "validation", "sha256")
 	}
-	return filepath.Join(repoDir, ".azedarach", "artifacts", "validation", "sha256")
+	return filepath.Join(os.TempDir(), "azedarach", "artifacts", "validation", "sha256")
 }
 
 // retainValidationArtifact creates an immutable, content-addressed copy before

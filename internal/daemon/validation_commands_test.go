@@ -70,7 +70,7 @@ func TestValidationFinishReturnsBoundedPortableFailureSummary(t *testing.T) {
 	repoDir := t.TempDir()
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 	t.Cleanup(func() { _ = runtime.Close() })
-	d := &Daemon{operationRuntime: runtime, revision: map[string]uint64{"consumer-project": 1}}
+	d := &Daemon{cfg: Config{WorkflowArtifactDir: filepath.Join(repoDir, "retained-artifacts")}, operationRuntime: runtime, revision: map[string]uint64{"consumer-project": 1}}
 	ctx := context.Background()
 	acquireBody, err := json.Marshal(protocol.ValidationAcquireRequest{
 		RequestID: "npm-check", LeaseToken: "secret", Class: domain.ValidationClassAggregate,
@@ -141,7 +141,7 @@ func TestRetainValidationArtifactFailsClosedWhenStorageUnavailable(t *testing.T)
 	require.NoError(t, os.WriteFile(blocked, []byte("block"), 0o600))
 	source := filepath.Join(root, "output.log")
 	require.NoError(t, os.WriteFile(source, []byte("output"), 0o600))
-	d := &Daemon{cfg: Config{LockPath: filepath.Join(blocked, "daemon.lock")}}
+	d := &Daemon{cfg: Config{WorkflowArtifactDir: blocked}}
 	_, err := d.retainValidationArtifact(source)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a directory")
