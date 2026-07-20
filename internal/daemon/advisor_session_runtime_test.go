@@ -22,6 +22,7 @@ import (
 )
 
 func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
 	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
 	repoDir := t.TempDir()
 	client := newMigratedIssueClient(t, repoDir, slog.Default())
@@ -37,7 +38,7 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 	runner := newSessionStartTmuxRunner()
 	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
 	t.Setenv("PATH", filepath.Join(repoDir, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
-	d := &Daemon{cfg: Config{RepoDir: repoDir, ManagedGenerationBinDir: managedDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore()}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, ManagedGenerationBinDir: managedDir, Logger: slog.Default(), ScopedRuntime: true}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore()}
 	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, protocol.DefaultProjectID)
 	service := issueInteractionService{daemon: d}
 
@@ -72,6 +73,9 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 		}
 		if got, ok := tmuxCommandEnvironmentValue(command, "PATH"); ok || got != "" {
 			t.Fatalf("advisor tmux injected PATH = %q, %t; command=%v", got, ok, command)
+		}
+		if got, ok := tmuxCommandEnvironmentValue(command, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "worktree" {
+			t.Fatalf("advisor scope = %q, present=%t; command=%v", got, ok, command)
 		}
 	}
 	if err := d.persistTmuxSessionRuntimeState(ctx, protocol.DefaultProjectID, []tmux.SessionInfo{{Name: first.Request.SessionID}}, nil); err != nil {

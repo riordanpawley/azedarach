@@ -32,6 +32,7 @@ import (
 )
 
 func TestProjectOrchestratorSessionStartAttachesExactScopeSingleton(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID := "project-session"
@@ -42,7 +43,7 @@ func TestProjectOrchestratorSessionStartAttachesExactScopeSingleton(t *testing.T
 	staleDir := filepath.Join(repoDir, "bin")
 	t.Setenv("PATH", staleDir+string(os.PathListSeparator)+"/usr/bin:/bin")
 	d := &Daemon{
-		cfg:                    Config{RepoDir: repoDir, ManagedGenerationBinDir: managedDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		cfg:                    Config{RepoDir: repoDir, ManagedGenerationBinDir: managedDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), ScopedRuntime: true},
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
 		tmux:                   tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil))),
 	}
@@ -88,6 +89,9 @@ func TestProjectOrchestratorSessionStartAttachesExactScopeSingleton(t *testing.T
 		pathValue, ok := tmuxCommandEnvironmentValue(command, "PATH")
 		if ok || pathValue != "" {
 			t.Fatalf("project orchestrator tmux injected PATH = %q, %t; command=%v", pathValue, ok, command)
+		}
+		if got, ok := tmuxCommandEnvironmentValue(command, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "worktree" {
+			t.Fatalf("project orchestrator scope = %q, present=%t; command=%v", got, ok, command)
 		}
 		break
 	}

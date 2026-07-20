@@ -1230,7 +1230,7 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 	}
 	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
 	if cmd.StartWork {
-		if err := d.tmux.NewSessionWithCommandAndEnvironment(ctx, cmd.SessionID, worktree.Path, launchCommand, nil); err != nil {
+		if err := d.tmux.NewSessionWithCommandAndEnvironment(ctx, cmd.SessionID, worktree.Path, launchCommand, d.daemonScopeTmuxEnvironment()); err != nil {
 			cleanupNote := d.reconcileAmbiguousSessionStartCreateError(ctx, req, cmd, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, sessionStartLaunchFailureMessage("tmux_launch", cmd, worktree.Path, launchCommand, true, err, cleanupNote)), nil
 		}
@@ -2578,7 +2578,7 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	if artifactErr != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare conflict resolver launch artifact: %v", artifactErr)), nil
 	}
-	reusedWindow, err := d.tmux.EnsureWindowWithCommandAndEnvironment(ctx, sessionName, sessionConflictWindowName, worktreePath, artifact.Command, nil)
+	reusedWindow, err := d.tmux.EnsureWindowWithCommandAndEnvironment(ctx, sessionName, sessionConflictWindowName, worktreePath, artifact.Command, d.daemonScopeTmuxEnvironment())
 	if err != nil {
 		artifact.remove()
 		cleanupNote := d.retireAmbiguousConflictResolverWindow(ctx, sessionName, sessionConflictWindowName)
@@ -2798,7 +2798,7 @@ func (d *Daemon) ensureConflictSession(ctx context.Context, projectID, issueID, 
 	if d.tmux == nil {
 		return "", false, errors.New("tmux service unavailable")
 	}
-	if err := d.tmux.NewSessionWithEnvironment(ctx, canonicalSessionID, worktreePath, nil); err != nil {
+	if err := d.tmux.NewSessionWithEnvironment(ctx, canonicalSessionID, worktreePath, d.daemonScopeTmuxEnvironment()); err != nil {
 		return "", false, err
 	}
 	return canonicalSessionID, false, nil
@@ -4045,7 +4045,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			}
 			continue
 		}
-		if newErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, canonicalSessionID, wt.Path, launchArtifact.Command, nil); newErr != nil {
+		if newErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, canonicalSessionID, wt.Path, launchArtifact.Command, d.daemonScopeTmuxEnvironment()); newErr != nil {
 			launchArtifact.remove()
 			if live, probeErr := d.tmux.HasSession(ctx, canonicalSessionID); probeErr == nil && live {
 				_ = d.tmux.KillSession(ctx, canonicalSessionID)
@@ -5185,7 +5185,7 @@ func (d *Daemon) buildCodexResumeCommand(projectID, issueID string, yolo bool, i
 	tool := strings.TrimSpace(projectCfg.CLITool)
 	if projectCfg.CodexAppServer {
 		resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
-		return codexAppServerSupervisedCommand(tool, resume, resume)
+		return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), resume, resume)
 	}
 
 	parts := []string{
@@ -6171,7 +6171,7 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 		command := promptAssignment + "; " + strings.Join(parts, " ")
 		if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
 			resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
-			return codexAppServerSupervisedCommand(tool, command, resume)
+			return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, resume)
 		}
 		if strings.EqualFold(tool, "codex") {
 			return codexFloopFailOpenProbe(tool) + "; " + command
@@ -6182,7 +6182,7 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 	command := strings.Join(parts, " ")
 	if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
 		resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
-		return codexAppServerSupervisedCommand(tool, command, resume)
+		return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, resume)
 	}
 	if strings.EqualFold(tool, "codex") {
 		return codexFloopFailOpenProbe(tool) + "; " + command
@@ -6225,8 +6225,30 @@ func codexFloopFailOpenProbe(tool string) string {
 		codexFloopFailOpenConfigVariable + "='-c " + codexFloopFailOpenConfig + "'; fi"
 }
 
-func codexAppServerSupervisedCommand(tool, firstCommand, resumeCommand string) string {
-	startDaemon := tool + " " + codexFloopFailOpenConfigExpansion + " app-server daemon start >/dev/null"
+func codexAppServerSupervisedCommand(tool, stableDir, firstCommand, resumeCommand string) string {
+	stableDir = filepath.Clean(stableDir)
+	managedDaemon := func(action string) string {
+		return "(cd " + singleQuoteForShell(stableDir) + " && " + tool + " " + codexFloopFailOpenConfigExpansion + " app-server daemon " + action + " >/dev/null)"
+	}
+	startDaemon := managedDaemon("start")
+	healthDaemon := managedDaemon("version")
+	restartDaemon := managedDaemon("restart")
+	recoveryLock := filepath.Join(stableDir, "codex-app-server-recovery.lock")
+	recoverDaemon := "__az_codex_recovery_lock=" + singleQuoteForShell(recoveryLock) + "; " +
+		"__az_codex_recovery_owner=\"$__az_codex_recovery_lock.$$\"; " +
+		"__az_codex_recovery_stale=\"$__az_codex_recovery_lock.stale.$$\"; " +
+		"(umask 077; printf '%s\\n' \"$$\" >\"$__az_codex_recovery_owner\") || exit $?; " +
+		"while ! ln \"$__az_codex_recovery_owner\" \"$__az_codex_recovery_lock\" 2>/dev/null; do " +
+		"__az_codex_recovery_pid=$(cat \"$__az_codex_recovery_lock\" 2>/dev/null || :); " +
+		"case $__az_codex_recovery_pid in ''|*[!0-9]*) ;; *) if ! kill -0 \"$__az_codex_recovery_pid\" 2>/dev/null; then " +
+		"rm -f \"$__az_codex_recovery_stale\"; if ln \"$__az_codex_recovery_lock\" \"$__az_codex_recovery_stale\" 2>/dev/null && " +
+		"[ \"$__az_codex_recovery_lock\" -ef \"$__az_codex_recovery_stale\" ]; then rm -f \"$__az_codex_recovery_lock\"; fi; " +
+		"rm -f \"$__az_codex_recovery_stale\"; fi;; esac; sleep 1; done; " +
+		"__az_codex_recovery_cleanup='if [ \"$__az_codex_recovery_lock\" -ef \"$__az_codex_recovery_owner\" ]; then rm -f \"$__az_codex_recovery_lock\"; fi; rm -f \"$__az_codex_recovery_owner\" \"$__az_codex_recovery_stale\"'; " +
+		"trap 'eval \"$__az_codex_recovery_cleanup\"' EXIT; " +
+		"trap 'eval \"$__az_codex_recovery_cleanup\"; trap - EXIT HUP INT TERM; exit 1' HUP INT TERM; " +
+		"if ! " + healthDaemon + "; then " + restartDaemon + " || exit $?; fi; " +
+		"eval \"$__az_codex_recovery_cleanup\"; trap - EXIT HUP INT TERM"
 	steps := []string{
 		"__az_codex_remote_started=$(date +%s)",
 		"if [ \"$__az_codex_remote_first\" -eq 1 ]; then __az_codex_remote_first=0; " + firstCommand + "; else " + resumeCommand + "; fi",
@@ -6235,10 +6257,19 @@ func codexAppServerSupervisedCommand(tool, firstCommand, resumeCommand string) s
 		"__az_codex_remote_elapsed=$(($(date +%s)-__az_codex_remote_started))",
 		"if [ \"$__az_codex_remote_elapsed\" -lt 5 ]; then __az_codex_remote_failures=$((__az_codex_remote_failures+1)); else __az_codex_remote_failures=1; fi",
 		"[ \"$__az_codex_remote_failures\" -ge 3 ] && exit \"$__az_codex_remote_status\"",
-		startDaemon + " || exit $?",
+		recoverDaemon,
 		"sleep 1",
 	}
-	return codexFloopFailOpenProbe(tool) + "; " + startDaemon + " || exit $?; __az_codex_remote_first=1; __az_codex_remote_failures=0; while :; do " + strings.Join(steps, "; ") + "; done"
+	scopeGuard := "case ${AZEDARACH_DAEMON_SCOPE:-} in global) ;; *) echo 'refusing to control the user-global Codex app-server without trusted global Azedarach daemon scope' >&2; exit 1;; esac"
+	return scopeGuard + "; " + codexFloopFailOpenProbe(tool) + "; " + startDaemon + " || exit $?; __az_codex_remote_first=1; __az_codex_remote_failures=0; while :; do " + strings.Join(steps, "; ") + "; done"
+}
+
+func (d *Daemon) daemonScopeTmuxEnvironment() map[string]string {
+	scope := "global"
+	if d != nil && d.cfg.ScopedRuntime {
+		scope = "worktree"
+	}
+	return map[string]string{"AZEDARACH_DAEMON_SCOPE": scope}
 }
 
 const initialPromptShellVariable = "__AZEDARACH_INITIAL_PROMPT"

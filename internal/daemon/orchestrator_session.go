@@ -229,7 +229,7 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 				if artifactErr != nil {
 					return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare project orchestrator launch artifact: %v%s", artifactErr, cleanupNote(pauseOrReleaseLease()))), nil
 				}
-				if launchErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, acquired.Lease.SessionID, workdir, artifact.Command, nil); launchErr != nil {
+				if launchErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, acquired.Lease.SessionID, workdir, artifact.Command, d.daemonScopeTmuxEnvironment()); launchErr != nil {
 					appeared, _ := d.tmux.HasSession(ctx, acquired.Lease.SessionID)
 					if !appeared {
 						artifact.remove()

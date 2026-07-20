@@ -399,6 +399,12 @@ func (c *Client) KillWindow(ctx context.Context, sessionName, windowName string)
 // window, layout, and every unrelated pane. paneID is tmux's stable pane target
 // (for example %12), never a window or session name.
 func (c *Client) RespawnPane(ctx context.Context, paneID, workdir, command string) error {
+	return c.RespawnPaneWithEnvironment(ctx, paneID, workdir, command, nil)
+}
+
+// RespawnPaneWithEnvironment replaces exactly one pane process and installs
+// environment only on that replacement process.
+func (c *Client) RespawnPaneWithEnvironment(ctx context.Context, paneID, workdir, command string, environment map[string]string) error {
 	paneID = strings.TrimSpace(paneID)
 	if paneID == "" || strings.TrimSpace(command) == "" {
 		return &domain.TmuxError{Op: "respawn-pane", Session: paneID, Err: errors.New("pane target and command are required")}
@@ -407,6 +413,7 @@ func (c *Client) RespawnPane(ctx context.Context, paneID, workdir, command strin
 	if strings.TrimSpace(workdir) != "" {
 		args = append(args, "-c", workdir)
 	}
+	args = appendTmuxEnvironmentArgs(args, environment)
 	args = append(args, command)
 	if _, err := c.runner.Run(ctx, args...); err != nil {
 		return &domain.TmuxError{Op: "respawn-pane", Session: paneID, Err: err}

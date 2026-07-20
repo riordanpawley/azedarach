@@ -587,8 +587,10 @@ func readLaunchScriptFromCommand(t *testing.T, command string) string {
 }
 
 func TestRestartManagedAgentPaneArtifactFlagsWorktreeAndUnrelatedPanes(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
 	d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "waiting")
 	d.cfg.DangerouslySkipPermissions = true
+	d.cfg.ScopedRuntime = true
 	runner.extraPanes = "\nother-session\t%99\t999\naz-1\t%13\t113"
 	worktree := filepath.Join(t.TempDir(), "issue-worktree")
 	if err := store.UpsertWorktreeState(context.Background(), daemonstate.WorktreeState{ProjectID: "project", IssueID: "one", Path: worktree, Branch: "issue/one", UpdatedAt: time.Now()}); err != nil {
@@ -601,6 +603,9 @@ func TestRestartManagedAgentPaneArtifactFlagsWorktreeAndUnrelatedPanes(t *testin
 	respawns, body, args := runner.snapshot()
 	if respawns != 1 || len(args) < 7 || args[3] != "%12" || args[5] != worktree {
 		t.Fatalf("respawns=%d args=%v", respawns, args)
+	}
+	if got, ok := tmuxCommandEnvironmentValue(args, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "worktree" {
+		t.Fatalf("respawn pane scope = %q, present=%t; args=%v", got, ok, args)
 	}
 	if !strings.Contains(body, "codex mcp get --json floop") ||
 		!strings.Contains(body, "codex "+codexFloopFailOpenConfigExpansion+" resume") ||
