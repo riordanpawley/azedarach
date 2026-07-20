@@ -308,6 +308,27 @@ type TaskIntegrationReceipt struct {
 	PublicationOperationID string
 }
 
+type taskIntegrationReceiptMutationHookKey struct{}
+
+const (
+	taskIntegrationReceiptHookBeforeTxBegin    = "before-transaction-begin"
+	taskIntegrationReceiptHookAfterEventInsert = "after-event-insert"
+)
+
+// WithTaskIntegrationReceiptMutationHookForTest installs a deterministic test
+// seam around the receipt mutation. Production callers must not use it.
+func WithTaskIntegrationReceiptMutationHookForTest(ctx context.Context, hook func(string) error) context.Context {
+	return context.WithValue(ctx, taskIntegrationReceiptMutationHookKey{}, hook)
+}
+
+func runTaskIntegrationReceiptMutationHook(ctx context.Context, stage string) error {
+	hook, _ := ctx.Value(taskIntegrationReceiptMutationHookKey{}).(func(string) error)
+	if hook == nil {
+		return nil
+	}
+	return hook(stage)
+}
+
 type IssueObservationEventListOptions struct {
 	Types         []domain.IssueObservationEventType
 	Limit         int
@@ -507,6 +528,9 @@ func (c *Client) AppendTaskIntegrationReceiptIfAbsent(ctx context.Context, issue
 			db, err := c.dbHandle()
 			if err != nil {
 				return err
+			}
+			if err := runTaskIntegrationReceiptMutationHook(ctx, taskIntegrationReceiptHookBeforeTxBegin); err != nil {
+				return c.wrapError("append-task-integration-receipt", issueID, err)
 			}
 			tx, err := db.BeginTx(ctx, nil)
 			if err != nil {
@@ -1863,6 +1887,13 @@ func (c *Client) insertIssueObservationEventConditional(ctx context.Context, exe
 	id, err := result.LastInsertId()
 	if err != nil {
 		return 0, false, fmt.Errorf("read observation event id: %w", err)
+	}
+	if params.Type == domain.IssueEventTaskIntegrationCompleted &&
+		strings.TrimSpace(params.Source) == "daemon-task-close" &&
+		strings.TrimSpace(params.SourceCommand) == "integrate-before-close" {
+		if err := runTaskIntegrationReceiptMutationHook(ctx, taskIntegrationReceiptHookAfterEventInsert); err != nil {
+			return 0, false, err
+		}
 	}
 	operation := domain.ProjectionDeltaUpsert
 	if params.Type == domain.IssueEventIssueDeleted {
