@@ -699,14 +699,14 @@ sub merge_whole_gate_evidence {
     my ($path, $identity, $fatal_path, $fatal_identity, $whole) = @_;
     my $existing = {};
     my $fatal = read_trusted_json_file($fatal_path, $fatal_identity);
-    if (-s $path) {
-        my $content = eval { read_trusted_file($path, $identity) };
-        if (!defined $content) {
-            $whole->{fatal_phase} = 'evidence_identity';
-            $whole->{fatal_detail} = 'candidate replaced validation evidence file';
-        } else {
-            $existing = decode_json($content || '{}');
-        }
+    my $content = eval { read_trusted_file($path, $identity) };
+    if (!defined $content) {
+        $whole->{fatal_phase} = 'evidence_identity';
+        $whole->{fatal_detail} = 'candidate replaced validation evidence file';
+    } elsif ($content ne '') {
+        $existing = decode_json($content);
+    }
+    if (%$existing) {
         for my $field (qw(held request_id class scope purpose execution authoritative_request_id override profile source_revision)) {
             die "accumulated validation lease evidence identity changed\n" if defined($existing->{$field}) && "$existing->{$field}" ne "$whole->{$field}";
         }
