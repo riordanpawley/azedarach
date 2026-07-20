@@ -2882,7 +2882,12 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	canonicalID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
 	var current daemonstate.Session
-	if existing, found, err := store.GetWorkerSessionStateByIssueID(context.Background(), projectID, issueID, canonicalID); err != nil {
+	if existing, found, err := store.GetSessionState(context.Background(), projectID, sessionID); err != nil {
+		return fmt.Errorf("load physical session owner before stop projection: %w", err)
+	} else if found && strings.TrimSpace(existing.IssueID) == issueID && !isAgentScopedSessionID(existing.ID) {
+		current = existing
+		sessionID = existing.ID
+	} else if existing, found, err := store.GetWorkerSessionStateByIssueID(context.Background(), projectID, issueID, canonicalID); err != nil {
 		return fmt.Errorf("load logical session before stop projection: %w", err)
 	} else if found && !isAgentScopedSessionID(existing.ID) {
 		current = existing
@@ -2895,16 +2900,13 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 	if current.UpdatedAt.After(updatedAt) {
 		updatedAt = current.UpdatedAt
 	}
-	session := daemonstate.Session{
-		ID:            sessionID,
-		IssueID:       issueID,
-		Role:          daemonstate.SessionRoleWorker,
-		ScopeKind:     daemonstate.SessionScopeIssue,
-		ScopeID:       issueID,
-		State:         daemonstate.SessionStateStopped,
-		ObservedState: daemonstate.SessionStateStopped,
-		UpdatedAt:     updatedAt,
+	session := current
+	if strings.TrimSpace(session.ID) == "" {
+		session = daemonstate.Session{ID: sessionID, IssueID: issueID, Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID}
 	}
+	session.State = daemonstate.SessionStateStopped
+	session.ObservedState = daemonstate.SessionStateStopped
+	session.UpdatedAt = updatedAt
 	if err := store.UpsertSessionState(ctx, projectID, session); err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("write-through stop session runtime state failed",
