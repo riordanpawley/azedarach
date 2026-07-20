@@ -32,15 +32,18 @@ func TestTerminalizeAcceptedReviewPublicationAtomicallySupersedesExactEpoch(t *t
 			}
 			client := NewClient(repo, nil)
 			t.Cleanup(func() { _ = client.CloseDB() })
+			reader := NewClient(repo, nil)
+			t.Cleanup(func() { _ = reader.CloseDB() })
+			if err := reader.OpenProjectionDeltaStore(); err != nil {
+				t.Fatal(err)
+			}
 			queue := operationstore.New(repo, nil)
 			t.Cleanup(func() { _ = queue.Close() })
 			issueID, err := client.Create(ctx, CreateTaskParams{Title: "publish", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInReview})
 			if err != nil {
 				t.Fatal(err)
 			}
-			op := domain.PublicationOperation{OperationID: "publication-" + string(state), ProjectID: "project", IssueID: issueID, IntentKey: "intent", RequestFingerprint: "fingerprint", ActorID: "reviewer", TargetID: "base", TargetBranch: "main", SourceRevision: "source", BaseRevision: "base", ValidationCommand: "npm test", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC()}
-			// Zero authority is the immutable migration-0009 legacy shape. It must
-			// be retired, never upgraded into fabricated accepted-review authority.
+			op := domain.PublicationOperation{OperationID: "publication-" + string(state), ProjectID: "project", IssueID: issueID, IntentKey: "intent", RequestFingerprint: "fingerprint", ActorID: "reviewer", ReviewerKind: "orchestrator", ReviewEpochEventID: 17, AcceptedReviewEventID: 19, PatchEvidenceID: "patch-evidence", TargetID: "base", TargetBranch: "main", SourceRevision: "source", BaseRevision: "base", ValidationCommand: "npm test", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC()}
 			stored, _, err := queue.EnqueuePublication(ctx, op, "candidate-"+string(state))
 			if err != nil {
 				t.Fatal(err)
@@ -59,6 +62,27 @@ func TestTerminalizeAcceptedReviewPublicationAtomicallySupersedesExactEpoch(t *t
 			if _, err := client.TerminalizeAcceptedReviewPublication(ctx, TerminalReviewPublicationDisposition{Operation: claimed, ExpectedClaimToken: "wrong", State: state, FinishedAt: time.Now().UTC()}); err == nil {
 				t.Fatal("stale daemon terminalized active operation")
 			}
+			for name, mutate := range map[string]func(*domain.PublicationOperation){
+				"actor":           func(candidate *domain.PublicationOperation) { candidate.ActorID = "other-reviewer" },
+				"reviewer-kind":   func(candidate *domain.PublicationOperation) { candidate.ReviewerKind = "agent" },
+				"intent":          func(candidate *domain.PublicationOperation) { candidate.IntentKey = "other-intent" },
+				"fingerprint":     func(candidate *domain.PublicationOperation) { candidate.RequestFingerprint = "other-fingerprint" },
+				"epoch":           func(candidate *domain.PublicationOperation) { candidate.ReviewEpochEventID++ },
+				"accepted-review": func(candidate *domain.PublicationOperation) { candidate.AcceptedReviewEventID++ },
+				"patch-evidence":  func(candidate *domain.PublicationOperation) { candidate.PatchEvidenceID = "other-patch" },
+			} {
+				t.Run("rejects-"+name+"-mismatch", func(t *testing.T) {
+					mismatched := claimed
+					mutate(&mismatched)
+					if _, err := client.TerminalizeAcceptedReviewPublication(ctx, TerminalReviewPublicationDisposition{Operation: mismatched, ExpectedClaimToken: "claim", State: state, FinishedAt: time.Now().UTC()}); err == nil {
+						t.Fatal("mismatched immutable authority terminalized operation")
+					}
+				})
+			}
+			_, projectionHead, err := reader.ListProjectionDeltas(ctx, "default", 0, 1000)
+			if err != nil {
+				t.Fatal(err)
+			}
 			terminal, err := client.TerminalizeAcceptedReviewPublication(ctx, TerminalReviewPublicationDisposition{Operation: claimed, ExpectedClaimToken: "claim", State: state, FailureKind: "terminal", FailureDetail: "failed", FinishedAt: time.Now().UTC()})
 			if err != nil {
 				t.Fatal(err)
@@ -72,6 +96,16 @@ func TestTerminalizeAcceptedReviewPublicationAtomicallySupersedesExactEpoch(t *t
 			}
 			if got := events[0].Payload["publication_operation_id"]; got != op.OperationID {
 				t.Fatalf("operation binding=%v", got)
+			}
+			if got := events[0].Payload["reviewer_kind"]; got != op.ReviewerKind {
+				t.Fatalf("reviewer kind binding=%v", got)
+			}
+			if got := events[0].Payload["patch_evidence_id"]; got != op.PatchEvidenceID {
+				t.Fatalf("patch evidence binding=%v", got)
+			}
+			deltas, nextHead, err := reader.WatchProjectionDeltas(ctx, "default", projectionHead, 1)
+			if err != nil || len(deltas) != 1 || deltas[0].Kind != domain.ProjectionKindSourceAdvance || nextHead != projectionHead+1 {
+				t.Fatalf("cross-client terminal observation advance=(%+v,%d,%v), want source advance at %d", deltas, nextHead, err, projectionHead+1)
 			}
 			if replay, err := client.TerminalizeAcceptedReviewPublication(ctx, TerminalReviewPublicationDisposition{Operation: claimed, ExpectedClaimToken: "wrong", State: state, FinishedAt: time.Now().UTC()}); err != nil || replay.State != state {
 				t.Fatalf("idempotent exact replay=(%+v,%v)", replay, err)

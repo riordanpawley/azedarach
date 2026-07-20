@@ -884,22 +884,18 @@ func (c *Client) TerminalizeAcceptedReviewPublication(ctx context.Context, dispo
 			}
 			defer func() { _ = tx.Rollback() }()
 			var state string
-			var actor, intentKey, fingerprint string
+			var actor, reviewerKind, intentKey, fingerprint, patchEvidenceID string
 			var epochID, acceptedID int64
-			err = tx.QueryRowContext(ctx, `SELECT state,actor_id,intent_key,request_fingerprint,review_epoch_event_id,accepted_review_event_id FROM daemon_publication_operations WHERE operation_id=? AND project_id=? AND issue_id=?`, op.OperationID, op.ProjectID, op.IssueID).Scan(&state, &actor, &intentKey, &fingerprint, &epochID, &acceptedID)
+			err = tx.QueryRowContext(ctx, `SELECT state,actor_id,reviewer_kind,intent_key,request_fingerprint,review_epoch_event_id,accepted_review_event_id,patch_evidence_id FROM daemon_publication_operations WHERE operation_id=? AND project_id=? AND issue_id=?`, op.OperationID, op.ProjectID, op.IssueID).Scan(&state, &actor, &reviewerKind, &intentKey, &fingerprint, &epochID, &acceptedID, &patchEvidenceID)
 			if err != nil {
 				return fmt.Errorf("read terminal publication authority: %w", err)
 			}
-			if !strings.EqualFold(actor, op.ActorID) || intentKey != op.IntentKey || fingerprint != op.RequestFingerprint || epochID != op.ReviewEpochEventID || acceptedID != op.AcceptedReviewEventID {
+			if !strings.EqualFold(actor, op.ActorID) || reviewerKind != op.ReviewerKind || intentKey != op.IntentKey || fingerprint != op.RequestFingerprint || epochID != op.ReviewEpochEventID || acceptedID != op.AcceptedReviewEventID || patchEvidenceID != op.PatchEvidenceID {
 				return errors.New("terminal publication authority changed concurrently")
 			}
-			payload := map[string]any{"outcome": string(domain.ReviewOutcomeIntegrationFailed), "actor_id": op.ActorID, "intent_key": op.IntentKey, "request_fingerprint": op.RequestFingerprint, "publication_operation_id": op.OperationID, "accepted_review_event_id": op.AcceptedReviewEventID, "review_epoch_event_id": op.ReviewEpochEventID, "publication_state": string(disposition.State), "failure": strings.TrimSpace(disposition.FailureDetail)}
-			payloadJSON, err := json.Marshal(payload)
-			if err != nil {
-				return err
-			}
+			payload := map[string]any{"outcome": string(domain.ReviewOutcomeIntegrationFailed), "actor_id": op.ActorID, "reviewer_kind": op.ReviewerKind, "intent_key": op.IntentKey, "request_fingerprint": op.RequestFingerprint, "publication_operation_id": op.OperationID, "accepted_review_event_id": op.AcceptedReviewEventID, "review_epoch_event_id": op.ReviewEpochEventID, "patch_evidence_id": op.PatchEvidenceID, "publication_state": string(disposition.State), "failure": strings.TrimSpace(disposition.FailureDetail)}
 			var existing int64
-			err = tx.QueryRowContext(ctx, `SELECT id FROM issue_observation_events WHERE issue_id=? AND event_type=? AND json_extract(payload_json,'$.outcome')=? AND json_extract(payload_json,'$.publication_operation_id')=? AND CAST(json_extract(payload_json,'$.accepted_review_event_id') AS INTEGER)=? AND CAST(json_extract(payload_json,'$.review_epoch_event_id') AS INTEGER)=? ORDER BY id DESC LIMIT 1`, op.IssueID, string(domain.IssueEventReviewCompleted), string(domain.ReviewOutcomeIntegrationFailed), op.OperationID, op.AcceptedReviewEventID, op.ReviewEpochEventID).Scan(&existing)
+			err = tx.QueryRowContext(ctx, `SELECT id FROM issue_observation_events WHERE issue_id=? AND event_type=? AND json_extract(payload_json,'$.outcome')=? AND json_extract(payload_json,'$.publication_operation_id')=? AND LOWER(json_extract(payload_json,'$.actor_id'))=LOWER(?) AND json_extract(payload_json,'$.reviewer_kind')=? AND json_extract(payload_json,'$.intent_key')=? AND json_extract(payload_json,'$.request_fingerprint')=? AND CAST(json_extract(payload_json,'$.accepted_review_event_id') AS INTEGER)=? AND CAST(json_extract(payload_json,'$.review_epoch_event_id') AS INTEGER)=? AND json_extract(payload_json,'$.patch_evidence_id')=? ORDER BY id DESC LIMIT 1`, op.IssueID, string(domain.IssueEventReviewCompleted), string(domain.ReviewOutcomeIntegrationFailed), op.OperationID, op.ActorID, op.ReviewerKind, op.IntentKey, op.RequestFingerprint, op.AcceptedReviewEventID, op.ReviewEpochEventID, op.PatchEvidenceID).Scan(&existing)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
@@ -915,7 +911,7 @@ func (c *Client) TerminalizeAcceptedReviewPublication(ctx context.Context, dispo
 				return nil
 			}
 			if errors.Is(err, sql.ErrNoRows) {
-				_, err = tx.ExecContext(ctx, `INSERT INTO issue_observation_events(issue_id,event_type,source,source_command,payload_json,observed_at) VALUES(?,?,?,?,?,?)`, op.IssueID, string(domain.IssueEventReviewCompleted), "daemon-orchestration", "review-accept", string(payloadJSON), finished.Format(time.RFC3339Nano))
+				_, err = c.insertIssueObservationEvent(ctx, tx, op.IssueID, IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: payload, ObservedAt: finished})
 				if err != nil {
 					return fmt.Errorf("append terminal review disposition: %w", err)
 				}
