@@ -2307,6 +2307,9 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		Status:         string(closeStatus),
 		WorktreeForced: cmd.ForceWorktree,
 	}
+	if external, ok := ctx.Value(externalTaskIntegrationContextKey{}).(externalTaskIntegrationContext); ok && external.Operation.State == domain.PublicationOperationMerged {
+		return d.replayCompletedExternalTaskClose(ctx, issueClient, projectID, taskID, closeStatus, external.Operation, result, req)
+	}
 	result.ContextRisk = d.taskContextRiskForCloseout(ctx, projectID, taskID, d.cfg.RepoDir)
 	if result.ContextRisk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*result.ContextRisk) {
 		return result, fmt.Errorf("context risk is high for issue %s: record root_cause, invariant, regression_validation, or a structured risk note before closeout", taskID)
@@ -2502,6 +2505,33 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		}
 		result.WorktreeCleanupOperationID = operationID
 	}
+	d.publishTaskEvent(req, protocol.EventTaskUpdated, rev, taskEventBodyFromTask(projectID, task))
+	return result, nil
+}
+
+func (d *Daemon) replayCompletedExternalTaskClose(ctx context.Context, issueClient *issues.Client, projectID, taskID string, closeStatus domain.Status, operation domain.PublicationOperation, result taskCloseResult, req protocol.RequestEnvelope) (taskCloseResult, error) {
+	task, err := issueClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		return result, fmt.Errorf("recover externally reconciled close for issue %s: %w", taskID, err)
+	}
+	if task.Status != closeStatus {
+		return result, fmt.Errorf("%w: externally reconciled publication is merged but issue %s has status %s", domain.ErrConflict, taskID, task.Status)
+	}
+	// The close transaction may have committed before its in-process
+	// notifications were published or before the response reached the caller.
+	// Re-emit both projections from durable terminal state. This is intentionally
+	// repeatable: subscribers consume revisions, while the exact operation and
+	// closed issue remain the idempotency authority.
+	d.publishPublicationOperationEvent(operation)
+	if d.publicationStateChanged != nil {
+		d.publicationStateChanged(operation)
+	}
+	rev := d.nextRevision(projectID)
+	result.Revision = rev
+	result.IntegrationRequested = true
+	result.Integrated = true
+	result.IntegratedSourceBranch = "external/" + taskID
+	result.IntegratedTargetBranch = operation.TargetBranch
 	d.publishTaskEvent(req, protocol.EventTaskUpdated, rev, taskEventBodyFromTask(projectID, task))
 	return result, nil
 }

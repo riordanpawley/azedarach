@@ -8955,6 +8955,44 @@ func TestVerifyExternalTaskIntegrationRequiresAncestryAndCandidateTreeIdentity(t
 	}
 }
 
+func TestReplayCompletedExternalTaskCloseIsIdempotentAndRepublishesDurableState(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "already reconciled", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusDone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation := domain.PublicationOperation{OperationID: "publication-replayed", ProjectID: "project", IssueID: issueID, State: domain.PublicationOperationMerged, TargetBranch: "main"}
+	published := 0
+	d := &Daemon{publicationStateChanged: func(got domain.PublicationOperation) {
+		published++
+		if got.OperationID != operation.OperationID || got.State != domain.PublicationOperationMerged {
+			t.Fatalf("published operation = %+v", got)
+		}
+	}}
+	request := protocol.RequestEnvelope{Command: "task.close"}
+	for attempt := 1; attempt <= 2; attempt++ {
+		result, replayErr := d.replayCompletedExternalTaskClose(ctx, client, "project", issueID, domain.StatusDone, operation, taskCloseResult{TaskID: issueID, Status: string(domain.StatusDone)}, request)
+		if replayErr != nil {
+			t.Fatalf("replay %d: %v", attempt, replayErr)
+		}
+		if !result.Integrated || !result.IntegrationRequested || result.IntegratedTargetBranch != "main" || result.Revision == 0 {
+			t.Fatalf("replay %d result = %+v", attempt, result)
+		}
+	}
+	if published != 2 {
+		t.Fatalf("publication convergence notifications = %d, want 2", published)
+	}
+	if _, replayErr := d.replayCompletedExternalTaskClose(ctx, client, "project", issueID, domain.StatusCancelled, operation, taskCloseResult{TaskID: issueID}, request); !errors.Is(replayErr, domain.ErrConflict) {
+		t.Fatalf("mismatched terminal identity error = %v", replayErr)
+	}
+}
+
 func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
