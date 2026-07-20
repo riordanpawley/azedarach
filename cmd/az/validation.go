@@ -212,9 +212,9 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 type validationArtifactReader func(context.Context, protocol.ValidationArtifactReadRequest) (protocol.ValidationArtifactReadResponse, error)
 
 func retrieveValidationArtifact(ctx context.Context, reference, output string, stdout io.Writer, read validationArtifactReader) (returnErr error) {
-	return retrieveValidationArtifactWithStager(ctx, reference, output, stdout, read, func(dir, pattern string) (validationArtifactStage, error) {
+	return retrieveValidationArtifactWithOps(ctx, reference, output, stdout, read, func(dir, pattern string) (validationArtifactStage, error) {
 		return os.CreateTemp(dir, pattern)
-	})
+	}, defaultValidationArtifactFileOps())
 }
 
 type validationArtifactStage interface {
@@ -228,6 +228,55 @@ type validationArtifactStage interface {
 type validationArtifactStager func(string, string) (validationArtifactStage, error)
 
 func retrieveValidationArtifactWithStager(ctx context.Context, reference, output string, stdout io.Writer, read validationArtifactReader, createStage validationArtifactStager) (returnErr error) {
+	return retrieveValidationArtifactWithOps(ctx, reference, output, stdout, read, createStage, defaultValidationArtifactFileOps())
+}
+
+type validationArtifactDirectory interface {
+	Sync() error
+	Close() error
+}
+
+type validationArtifactFileOps struct {
+	openDirectory func(string) (validationArtifactDirectory, error)
+	rename        func(string, string) error
+	backup        func(string) (string, bool, error)
+	remove        func(string) error
+}
+
+func defaultValidationArtifactFileOps() validationArtifactFileOps {
+	return validationArtifactFileOps{
+		openDirectory: func(path string) (validationArtifactDirectory, error) { return os.Open(path) },
+		rename:        os.Rename,
+		backup:        backupValidationArtifactDestination,
+		remove:        os.Remove,
+	}
+}
+
+func backupValidationArtifactDestination(output string) (string, bool, error) {
+	if _, err := os.Lstat(output); errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	} else if err != nil {
+		return "", false, err
+	}
+	placeholder, err := os.CreateTemp(filepath.Dir(output), ".az-validation-artifact-backup-*")
+	if err != nil {
+		return "", false, err
+	}
+	backup := placeholder.Name()
+	if err = placeholder.Close(); err != nil {
+		_ = os.Remove(backup)
+		return "", false, err
+	}
+	if err = os.Remove(backup); err != nil {
+		return "", false, err
+	}
+	if err = os.Link(output, backup); err != nil {
+		return "", false, err
+	}
+	return backup, true, nil
+}
+
+func retrieveValidationArtifactWithOps(ctx context.Context, reference, output string, stdout io.Writer, read validationArtifactReader, createStage validationArtifactStager, fileOps validationArtifactFileOps) (returnErr error) {
 	expectedDigest, err := validationArtifactReferenceDigest(reference)
 	if err != nil {
 		return err
@@ -306,17 +355,51 @@ func retrieveValidationArtifactWithStager(ctx context.Context, reference, output
 		}
 		return closeErr
 	}
-	if err = os.Rename(stagedPath, output); err != nil {
+	dir, openErr := fileOps.openDirectory(filepath.Dir(output))
+	if openErr != nil {
+		return fmt.Errorf("open validation artifact destination directory: %w", openErr)
+	}
+	dirClosed := false
+	defer func() {
+		if !dirClosed {
+			_ = dir.Close()
+		}
+	}()
+	backupPath, hadDestination, backupErr := fileOps.backup(output)
+	if backupErr != nil {
+		return fmt.Errorf("backup validation artifact destination: %w", backupErr)
+	}
+	if backupPath != "" {
+		defer func() { _ = fileOps.remove(backupPath) }()
+	}
+	if err = fileOps.rename(stagedPath, output); err != nil {
 		return fmt.Errorf("publish validation artifact: %w", err)
 	}
-	stagedPath = ""
-	if dir, openErr := os.Open(filepath.Dir(output)); openErr == nil {
-		syncErr := dir.Sync()
-		_ = dir.Close()
-		if syncErr != nil {
-			return fmt.Errorf("sync validation artifact destination: %w", syncErr)
+	if err = dir.Sync(); err != nil {
+		if hadDestination {
+			if restoreErr := fileOps.rename(backupPath, output); restoreErr != nil {
+				return fmt.Errorf("sync validation artifact destination: %w (restore destination: %v)", err, restoreErr)
+			}
+			backupPath = ""
+		} else {
+			_ = fileOps.remove(output)
 		}
+		return fmt.Errorf("sync validation artifact destination: %w", err)
 	}
+	if err = dir.Close(); err != nil {
+		dirClosed = true
+		if hadDestination {
+			if restoreErr := fileOps.rename(backupPath, output); restoreErr != nil {
+				return fmt.Errorf("close validation artifact destination directory: %w (restore destination: %v)", err, restoreErr)
+			}
+			backupPath = ""
+		} else {
+			_ = fileOps.remove(output)
+		}
+		return fmt.Errorf("close validation artifact destination directory: %w", err)
+	}
+	dirClosed = true
+	stagedPath = ""
 	return nil
 }
 

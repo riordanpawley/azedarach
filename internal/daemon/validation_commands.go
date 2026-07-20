@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -316,9 +317,16 @@ func (d *Daemon) openValidationArtifact(projectID, reference string) (*os.File, 
 }
 
 func openValidationArtifactRoot(basePath string, descendants []string) (*os.File, error) {
-	abs, err := filepath.Abs(filepath.Clean(basePath))
+	if err := validateValidationArtifactPath(basePath); err != nil {
+		return nil, err
+	}
+	abs, err := filepath.Abs(basePath)
 	if err != nil || strings.TrimSpace(basePath) == "" || abs == string(filepath.Separator) {
 		return nil, fmt.Errorf("invalid validation artifact root")
+	}
+	abs, err = canonicalValidationArtifactPath(abs)
+	if err != nil {
+		return nil, err
 	}
 	fd, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
@@ -367,6 +375,40 @@ func openValidationArtifactRoot(basePath string, descendants []string) (*os.File
 		}
 	}
 	return current, nil
+}
+
+func validateValidationArtifactPath(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("invalid validation artifact root")
+	}
+	for _, component := range strings.Split(filepath.ToSlash(path), "/") {
+		if component == "." || component == ".." {
+			return fmt.Errorf("invalid validation artifact root component")
+		}
+	}
+	return nil
+}
+
+// canonicalValidationArtifactPath accounts for Darwin's standard system
+// aliases (/var -> /private/var and /tmp -> /private/tmp) without permitting
+// arbitrary configured symlinks. The remaining path is still opened one
+// descriptor at a time with O_NOFOLLOW.
+func canonicalValidationArtifactPath(path string) (string, error) {
+	if runtime.GOOS != "darwin" {
+		return path, nil
+	}
+	for _, prefix := range []string{"/var", "/tmp"} {
+		relative, err := filepath.Rel(prefix, path)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		canonical, err := filepath.EvalSymlinks(prefix)
+		if err != nil {
+			return "", fmt.Errorf("canonicalize validation artifact root: %w", err)
+		}
+		return filepath.Join(canonical, relative), nil
+	}
+	return path, nil
 }
 
 func (d *Daemon) readValidationArtifact(projectID, reference string, offset int64, limit int) ([]byte, string, int64, int64, error) {

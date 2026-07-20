@@ -120,6 +120,100 @@ func TestRetrieveValidationArtifactPreservesDestinationOnStagedWriteFailure(t *t
 	assertNoValidationArtifactTemps(t, dir)
 }
 
+func TestRetrieveValidationArtifactPreservesDestinationOnStageDurabilityFailures(t *testing.T) {
+	for _, failure := range []string{"sync", "close"} {
+		t.Run(failure, func(t *testing.T) {
+			content := []byte("complete retained output")
+			reference, digest := testValidationArtifactIdentity(content)
+			dir := t.TempDir()
+			destination := filepath.Join(dir, "result.log")
+			require.NoError(t, os.WriteFile(destination, []byte("existing"), 0o600))
+			err := retrieveValidationArtifactWithStager(context.Background(), reference, destination, nil, testValidationArtifactReader(reference, digest, content, 5, nil), func(dir, pattern string) (validationArtifactStage, error) {
+				file, createErr := os.CreateTemp(dir, pattern)
+				return &failingValidationArtifactDurabilityStage{File: file, failure: failure}, createErr
+			})
+			require.ErrorContains(t, err, failure+" staged validation artifact")
+			assertValidationArtifactDestinationUnchanged(t, dir, destination)
+		})
+	}
+}
+
+func TestRetrieveValidationArtifactPreservesDestinationOnPublishDurabilityFailures(t *testing.T) {
+	for _, failure := range []string{"directory-open", "rename", "directory-sync", "directory-close"} {
+		t.Run(failure, func(t *testing.T) {
+			content := []byte("complete retained output")
+			reference, digest := testValidationArtifactIdentity(content)
+			dir := t.TempDir()
+			destination := filepath.Join(dir, "result.log")
+			require.NoError(t, os.WriteFile(destination, []byte("existing"), 0o600))
+			ops := defaultValidationArtifactFileOps()
+			switch failure {
+			case "directory-open":
+				ops.openDirectory = func(string) (validationArtifactDirectory, error) { return nil, fmt.Errorf("open failed") }
+			case "rename":
+				ops.rename = func(string, string) error { return fmt.Errorf("rename failed") }
+			case "directory-sync":
+				ops.openDirectory = func(string) (validationArtifactDirectory, error) {
+					return &failingValidationArtifactDirectory{failure: "sync"}, nil
+				}
+			case "directory-close":
+				ops.openDirectory = func(string) (validationArtifactDirectory, error) {
+					return &failingValidationArtifactDirectory{failure: "close"}, nil
+				}
+			}
+			err := retrieveValidationArtifactWithOps(context.Background(), reference, destination, nil, testValidationArtifactReader(reference, digest, content, 5, nil), func(dir, pattern string) (validationArtifactStage, error) {
+				return os.CreateTemp(dir, pattern)
+			}, ops)
+			require.Error(t, err)
+			assertValidationArtifactDestinationUnchanged(t, dir, destination)
+		})
+	}
+}
+
+type failingValidationArtifactDurabilityStage struct {
+	*os.File
+	failure string
+}
+
+func (s *failingValidationArtifactDurabilityStage) Sync() error {
+	if s.failure == "sync" {
+		return fmt.Errorf("sync failed")
+	}
+	return s.File.Sync()
+}
+
+func (s *failingValidationArtifactDurabilityStage) Close() error {
+	if s.failure == "close" {
+		_ = s.File.Close()
+		return fmt.Errorf("close failed")
+	}
+	return s.File.Close()
+}
+
+type failingValidationArtifactDirectory struct{ failure string }
+
+func (d *failingValidationArtifactDirectory) Sync() error {
+	if d.failure == "sync" {
+		return fmt.Errorf("sync failed")
+	}
+	return nil
+}
+
+func (d *failingValidationArtifactDirectory) Close() error {
+	if d.failure == "close" {
+		return fmt.Errorf("close failed")
+	}
+	return nil
+}
+
+func assertValidationArtifactDestinationUnchanged(t *testing.T, dir, destination string) {
+	t.Helper()
+	got, err := os.ReadFile(destination)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("existing"), got)
+	assertNoValidationArtifactTemps(t, dir)
+}
+
 type failingValidationArtifactStage struct {
 	*os.File
 }

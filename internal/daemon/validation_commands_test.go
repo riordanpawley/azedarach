@@ -202,6 +202,27 @@ func TestOpenValidationArtifactRejectsSymlinkTraversal(t *testing.T) {
 	})
 }
 
+func TestOpenValidationArtifactRootRejectsDotSegmentsBeforeNormalization(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	require.NoError(t, os.MkdirAll(filepath.Join(outside, "artifacts"), 0o700))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "link")))
+
+	unsafePath := root + string(filepath.Separator) + "link" + string(filepath.Separator) + ".." + string(filepath.Separator) + "outside" + string(filepath.Separator) + "artifacts"
+	opened, err := openValidationArtifactRoot(unsafePath, nil)
+	if opened != nil {
+		_ = opened.Close()
+	}
+	require.ErrorContains(t, err, "invalid validation artifact root component")
+}
+
+func TestOpenValidationArtifactRootSupportsPlatformCanonicalTempPrefix(t *testing.T) {
+	root := t.TempDir()
+	opened, err := openValidationArtifactRoot(root, nil)
+	require.NoError(t, err)
+	require.NoError(t, opened.Close())
+}
+
 func TestValidationArtifactReadCommandIsProjectScopedAndDigestVerified(t *testing.T) {
 	root := t.TempDir()
 	d := &Daemon{cfg: Config{WorkflowArtifactDir: filepath.Join(root, "artifacts")}}
