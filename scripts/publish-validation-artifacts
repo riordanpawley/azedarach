@@ -98,6 +98,8 @@ mkdirat_component($revision_handle, $stage_name, 0700) or die "create artifact s
 my $stage_handle = openat_directory_nofollow($revision_handle, $stage_name) or die "open artifact staging directory: $!\n";
 register_destination_link($revision_handle, $stage_name, $stage_handle);
 destination_test_barrier('stage');
+die "forced validation artifact stage failure\n"
+    if delete($ENV{AZEDARACH_VALIDATION_TEST_FAIL_AFTER_STAGE});
 my ($reports_root, $reports_handle) = safe_directory_chain_at($stage, $stage_handle, 'reports');
 
 my @candidate_report_paths = ref($evidence->{report_paths}) eq 'ARRAY'
@@ -428,7 +430,15 @@ sub register_destination_link {
     return unless $destination_attachment;
     my @stat = stat($child);
     die "inspect destination attachment $name: $!\n" unless @stat;
-    push @{$destination_attachment->{links}}, {parent => $parent, name => $name, device => $stat[0], inode => $stat[1]};
+    my $link = {parent => $parent, name => $name, device => $stat[0], inode => $stat[1]};
+    push @{$destination_attachment->{links}}, $link;
+    return $link;
+}
+
+sub unregister_destination_link {
+    my ($target) = @_;
+    return unless $destination_attachment && $target;
+    @{$destination_attachment->{links}} = grep { $_ != $target } @{$destination_attachment->{links}};
 }
 
 sub validate_destination_attachment {
@@ -440,6 +450,15 @@ sub validate_destination_attachment {
         die "validation artifact destination attachment changed at $link->{name}\n"
             unless @stat && $stat[0] == $link->{device} && $stat[1] == $link->{inode};
     }
+}
+
+sub validate_directory_identity {
+    my ($parent, $name, $device, $inode) = @_;
+    my $current = openat_directory_nofollow($parent, $name);
+    die "validation artifact destination detached at $name\n" unless $current;
+    my @stat = stat($current);
+    die "validation artifact destination identity changed at $name\n"
+        unless @stat && $stat[0] == $device && $stat[1] == $inode;
 }
 
 sub destination_test_barrier {
@@ -460,19 +479,26 @@ sub remove_tree_at {
     validate_destination_attachment();
     my $directory = openat_directory_nofollow($parent, $name);
     unless ($directory) {
+        validate_destination_attachment();
         unlinkat_component($parent, $name, 0);
         return;
     }
+    my $attachment = register_destination_link($parent, $name, $directory);
+    destination_test_barrier('remove-tree');
+    validate_destination_attachment();
     opendir(my $entries, fd_directory_path($directory)) or die "enumerate artifact directory: $!\n";
     for my $entry (grep { $_ ne '.' && $_ ne '..' } readdir($entries)) {
         if (openat_directory_nofollow($directory, $entry)) {
             remove_tree_at($directory, $entry);
         } else {
+            validate_destination_attachment();
             unlinkat_component($directory, $entry, 0) or die "remove artifact file $entry: $!\n";
         }
     }
     closedir($entries);
+    validate_destination_attachment();
     unlinkat_component($parent, $name, $arg{'at-removedir'}) or die "remove artifact directory $name: $!\n";
+    unregister_destination_link($attachment);
 }
 
 sub fd_directory_path {
@@ -615,21 +641,35 @@ sub create_at {
     my $fd = syscall($openat_syscall, fileno($directory), $name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, $mode);
     die "create artifact $name exclusively: $!\n" if $fd < 0;
     open(my $handle, '>&=', $fd) or die "adopt artifact output descriptor for $name: $!\n";
+    destination_test_barrier('write-open');
+    validate_destination_attachment();
     chmod($mode, $handle) or die "set artifact mode for $name: $!\n";
     return $handle;
+}
+
+sub write_attached {
+    my ($out, $value, $label) = @_;
+    my $offset = 0;
+    while ($offset < length($value)) {
+        destination_test_barrier('write-chunk') if $offset > 0;
+        validate_destination_attachment();
+        my $written = syswrite($out, $value, length($value) - $offset, $offset);
+        die "write artifact $label: $!\n" unless defined($written) && $written > 0;
+        $offset += $written;
+    }
 }
 
 sub write_json_exclusive_at {
     my ($directory, $name, $value, $mode) = @_;
     my $out = create_at($directory, $name, $mode);
-    print {$out} encode_json($value) . "\n";
+    write_attached($out, encode_json($value) . "\n", $name);
     close $out or die "close $name: $!\n";
 }
 
 sub write_text_exclusive_at {
     my ($directory, $name, $value) = @_;
     my $out = create_at($directory, $name, 0600);
-    print {$out} $value;
+    write_attached($out, $value, $name);
     close $out or die "close $name: $!\n";
 }
 
@@ -703,6 +743,8 @@ sub copy_handle_at {
         last if $read == 0;
         my $offset = 0;
         while ($offset < $read) {
+            destination_test_barrier('write-chunk');
+            validate_destination_attachment();
             my $written = syswrite($out, $buffer, $read - $offset, $offset);
             die "write artifact $name: $!\n" unless defined $written;
             $offset += $written;
@@ -969,23 +1011,37 @@ sub prune_unreferenced {
     opendir(my $revisions, fd_directory_path($root_handle)) or die "enumerate artifact revisions: $!\n";
     for my $revision (grep { $_ ne '.' && $_ ne '..' } readdir($revisions)) {
         my $revision_handle = openat_directory_nofollow($root_handle, $revision) or next;
+        register_destination_link($root_handle, $revision, $revision_handle);
+        validate_destination_attachment();
         opendir(my $requests, fd_directory_path($revision_handle)) or next;
         for my $request (grep { $_ ne '.' && $_ ne '..' } readdir($requests)) {
             my $directory = openat_directory_nofollow($revision_handle, $request) or next;
+            my @request_stat = stat($directory);
+            next unless @request_stat;
             my $manifest = eval { read_json_at($directory, 'manifest.json', 'artifact manifest') };
             next unless $manifest;
             my $references = $manifest->{references};
             next if ref($references) eq 'ARRAY' && @$references;
             my $created = eval { Time::Piece->strptime($manifest->{created_at} || '', '%Y-%m-%dT%H:%M:%SZ')->epoch } || 0;
-            push @orphans, {parent => $revision_handle, name => $request, created => $created};
+            push @orphans, {
+                parent => $revision_handle,
+                name => $request,
+                device => $request_stat[0],
+                inode => $request_stat[1],
+                created => $created,
+            };
         }
         closedir($requests);
     }
     closedir($revisions);
     @orphans = sort { $b->{created} <=> $a->{created} } @orphans;
+    destination_test_barrier('prune');
     my $cutoff = time() - 30 * 24 * 60 * 60;
     for my $index (0 .. $#orphans) {
         next if $index < 20 && $orphans[$index]{created} >= $cutoff;
+        validate_destination_attachment();
+        validate_directory_identity($orphans[$index]{parent}, $orphans[$index]{name},
+            $orphans[$index]{device}, $orphans[$index]{inode});
         remove_tree_at($orphans[$index]{parent}, $orphans[$index]{name});
     }
 }

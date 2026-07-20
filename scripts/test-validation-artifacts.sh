@@ -265,7 +265,7 @@ test -z "$(find "$unsafe_target" -mindepth 1 -print -quit)"
 # A destination directory that is renamed out of the trusted project after its
 # handle is acquired must never receive later writes or END-block cleanup. Test
 # every retained destination layer used by publication.
-for destination_phase in artifact-root revision stage; do
+for destination_phase in artifact-root revision stage write-open write-chunk; do
   detach_project="$fixture/detach-$destination_phase-project"
   detach_control="$fixture/detach-$destination_phase-control"
   detach_outside="$fixture/detach-$destination_phase-outside"
@@ -299,7 +299,7 @@ EOF
       detach_path="$detach_project/.azedarach/validation-artifacts/failures/$revision"
       replacement_path="$detach_path"
       ;;
-    stage)
+    stage|write-open|write-chunk)
       detach_path="$(find "$detach_project/.azedarach/validation-artifacts/failures/$revision" -maxdepth 1 -type d -name ".$detach_request.tmp.*" -print -quit)"
       replacement_path="$detach_path"
       ;;
@@ -315,8 +315,46 @@ EOF
   fi
   grep -Eq 'destination (detached from trusted project root|attachment changed)' "$fixture/detach-$destination_phase.stderr"
   test -f "$detached_tree/sentinel"
-  test -z "$(find "$detached_tree" -type f ! -name sentinel -print -quit)"
+  test -z "$(find "$detached_tree" -type f ! -name sentinel -size +0c -print -quit)"
 done
+
+# END cleanup revalidates the dynamically opened stage edge immediately before
+# recursive deletion. Relocating that edge must preserve both outside trees.
+cleanup_project="$fixture/cleanup-project"
+cleanup_control="$fixture/cleanup-control"
+cleanup_outside="$fixture/cleanup-outside"
+cleanup_request="dov-cleanup-detach"
+cleanup_ready="$fixture/cleanup-ready"
+cleanup_release="$fixture/cleanup-release"
+mkdir -p "$cleanup_project" "$cleanup_control" "$cleanup_outside"
+cp "$control_root/gate-output.log" "$cleanup_control/gate-output.log"
+cat >"$cleanup_control/evidence.json" <<EOF
+{"request_id":"$cleanup_request","source_revision":"$revision","publication_nonce":"cleanup-nonce","issue_id":"dov"}
+EOF
+AZEDARACH_VALIDATION_TEST_DESTINATION_PHASE=remove-tree \
+AZEDARACH_VALIDATION_TEST_DESTINATION_READY_FILE="$cleanup_ready" \
+AZEDARACH_VALIDATION_TEST_DESTINATION_RELEASE_FILE="$cleanup_release" \
+AZEDARACH_VALIDATION_TEST_FAIL_AFTER_STAGE=1 \
+  "$publisher" --project-root "$cleanup_project" --candidate-root "$scratch_root" \
+  --control-root "$cleanup_control" --evidence "$cleanup_control/evidence.json" \
+  --gate-output "$cleanup_control/gate-output.log" --request "$cleanup_request" \
+  --revision "$revision" --exit-code 1 >"$fixture/cleanup-detach.stdout" \
+  2>"$fixture/cleanup-detach.stderr" &
+cleanup_pid=$!
+while [[ ! -e "$cleanup_ready" ]]; do kill -0 "$cleanup_pid"; done
+cleanup_stage="$(find "$cleanup_project/.azedarach/validation-artifacts/failures/$revision" -maxdepth 1 -type d -name ".$cleanup_request.tmp.*" -print -quit)"
+mv "$cleanup_stage" "$cleanup_outside/relocated"
+mkdir "$cleanup_stage"
+printf 'outside sentinel\n' >"$cleanup_outside/relocated/sentinel"
+printf 'replacement sentinel\n' >"$cleanup_stage/sentinel"
+: >"$cleanup_release"
+if wait "$cleanup_pid"; then
+  echo "detached END cleanup unexpectedly accepted" >&2
+  exit 1
+fi
+grep -Eq 'destination (detached from trusted project root|attachment changed)' "$fixture/cleanup-detach.stderr"
+test -f "$cleanup_outside/relocated/sentinel"
+test -f "$cleanup_stage/sentinel"
 
 # Existing destinations are checksum-validated on retry.
 printf 'tampered\n' >>"$artifact_dir/reports/001/stderr.txt"
@@ -334,6 +372,36 @@ grep -q 'checksum mismatch' "$fixture/tamper.stderr"
 orphan="$project_root/.azedarach/validation-artifacts/failures/$revision/orphan-request"
 mkdir "$orphan"
 printf '{"request_id":"orphan-request","candidate_revision":"%s","created_at":"2000-01-01T00:00:00Z","references":[]}\n' "$revision" >"$orphan/manifest.json"
+
+# Prune pins the exact selected request inode. Relocating it after enumeration
+# must fail closed without deleting either the relocated tree or a replacement.
+prune_ready="$fixture/prune-ready"
+prune_release="$fixture/prune-release"
+prune_outside="$fixture/prune-outside"
+mkdir "$prune_outside"
+AZEDARACH_VALIDATION_TEST_DESTINATION_PHASE=prune \
+AZEDARACH_VALIDATION_TEST_DESTINATION_READY_FILE="$prune_ready" \
+AZEDARACH_VALIDATION_TEST_DESTINATION_RELEASE_FILE="$prune_release" \
+  "$publisher" --project-root "$project_root" --prune-only \
+  >"$fixture/prune-detach.stdout" 2>"$fixture/prune-detach.stderr" &
+prune_pid=$!
+while [[ ! -e "$prune_ready" ]]; do kill -0 "$prune_pid"; done
+mv "$orphan" "$prune_outside/relocated"
+mkdir "$orphan"
+printf 'replacement sentinel\n' >"$orphan/sentinel"
+printf 'outside sentinel\n' >"$prune_outside/relocated/sentinel"
+: >"$prune_release"
+if wait "$prune_pid"; then
+  echo "detached prune request unexpectedly accepted" >&2
+  exit 1
+fi
+grep -Eq 'destination (detached|identity changed)' "$fixture/prune-detach.stderr"
+test -f "$orphan/sentinel"
+test -f "$prune_outside/relocated/sentinel"
+
+# A normal prune still removes the original unreferenced fixture.
+rm -r "$orphan"
+mv "$prune_outside/relocated" "$orphan"
 $publisher --project-root "$project_root" --prune-only
 test ! -e "$orphan"
 test -f "$fatal_dir/manifest.json"
