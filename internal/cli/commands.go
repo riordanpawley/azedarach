@@ -9488,11 +9488,11 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 
 func renderPrimeOrchestratorExitContract(rootIssueID string) string {
 	return fmt.Sprintf(`Orchestrator Exit Contract (root %s):
-- Remain in the active orchestration turn/loop after starting workers, nested orchestrators, or a background watch; startup is not a completed handoff to the human.
-- Continuously consume the root watch and react to worker/nested-orchestrator progress, blocked, and integration-ready evidence while graph work remains.
+- Process the current bounded orchestration snapshot and its immediate actions, then checkpoint and yield when the scope is quiescent.
+- Do not run a continuous watch or polling loop inside a model turn. The daemon observes scope changes and delivers one deduplicated revision-bound continuation when judgment or mutation is actionable.
 - Chain of command is strict: coordinate only direct children. Never launch, message, review, integrate, stop, or take over grandchildren or deeper descendants.
 - Supervise nested epic/root orchestrators as direct children while they exclusively own their descendants.
-- Resolve each review through `+"`az orchestrate review accept --root %s --issue <review-issue>`"+` or `+"`az orchestrate review return ...`"+`; accepted close must finish before using or presenting dependent results. Then advance newly unblocked work and repeat status/start/watch/review until `+"`az orchestrate complete-check --root %s`"+` passes; then run root validation.
+- Resolve each review through `+"`az orchestrate review accept --root %s --issue <review-issue>`"+` or `+"`az orchestrate review return ...`"+`; accepted close must finish before using or presenting dependent results. Then advance newly unblocked work and repeat bounded status/start/review steps while immediate work remains until `+"`az orchestrate complete-check --root %s`"+` passes; then run root validation.
 - Set the root `+"`in_review`"+` and report to the human without stopping its session or cleaning its worktree.
 - Close/integrate the root only after explicit human acceptance.
 `, rootIssueID, rootIssueID, rootIssueID)

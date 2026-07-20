@@ -7213,6 +7213,7 @@ func daemonWorkerObservationLastEvent(issueEvents []domain.IssueObservationEvent
 			At:        evt.ObservedAt,
 			Source:    strings.TrimSpace(evt.Source),
 			Summary:   issueObservationEventSummary(*evt),
+			Seq:       evt.ID,
 			SessionID: strings.TrimSpace(evt.SessionID),
 			Worktree:  strings.TrimSpace(evt.WorktreePath),
 		}
@@ -7272,7 +7273,8 @@ func workerObservationIssueEventMeaningful(evt domain.IssueObservationEvent) boo
 	case domain.IssueEventIssueDependencyAdded, domain.IssueEventIssueDependencyRemoved:
 		return workerObservationDependencyEventMeaningful(evt)
 	default:
-		return false
+		_, stewardship := projectStewardshipEventType(evt.Type)
+		return stewardship
 	}
 }
 

@@ -82,7 +82,7 @@ Orchestration
 {{ else }}- CLI-managed worker fanout requires `tmux`; it is unavailable. Native delegation remains available.
 {{ end }}{{ else if and .OrchestrationViaAz .TmuxAvailable }}- Mode is `az`: `az orchestrate` is the worker launch and coordination authority for this graph.
 - Shape independently actionable leaves, inspect `az orchestrate status --root <root> --json --summary`, then start a bounded wave with `az orchestrate start --root <root> --limit <n>`.
-- Keep `az orchestrate watch --root <root> --since <seq> --jsonl` running while workers are active. Use `az orchestrate capture --issue <worker>` only when status/watch is stale or contradictory; do not poll panes continuously.
+- Process one bounded status/start/review step at a time, then yield when no immediate action remains. The daemon checkpoints observation state and delivers one deduplicated revision-bound continuation when the scope becomes actionable. Do not run `az orchestrate watch` or a polling loop inside a model turn; use `az orchestrate capture --issue <worker>` only when a bounded status snapshot is stale or contradictory.
 - Trust hook-backed activity. If activity is `unknown`, inspect `az ai status --target=auto` and repair missing or outdated hooks before treating the worker as idle.
 - Workers report `worker-progress`, `worker-blocked`, or `worker-integration-ready`. The orchestrator uses `az orchestrate message` only for evidence-backed intervention.
 - Review worker evidence and context risk, return non-trivial findings to live worker sessions, and close accepted children with `az ticket close --id <child>`.

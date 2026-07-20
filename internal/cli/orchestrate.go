@@ -929,8 +929,8 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		Warnings:               orchestrateStatusWarnings(ctx, deps, ready, len(ready.Runnable)),
 		Advice: map[string]interface{}{
 			"watch":             fmt.Sprintf("az orchestrate watch --root %s --since %d --jsonl", ready.RootIssueID, nextMailboxSeq(events, opts.SinceSeq)),
-			"watch_instruction": "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
-			"persistence_guard": "Daemon-enforced: parent idle/turn completion is wake-required while direct nested roots remain and complete-check has not passed; the durable cursor is resumed after restart or session replacement.",
+			"watch_instruction": "Optional external observer only; do not run this continuous watch inside a model turn. Agents should complete one bounded status/action step and yield for the daemon's revision-bound continuation.",
+			"persistence_guard": "Daemon-enforced: actionable scope transitions enqueue one deduplicated durable continuation; busy agents defer delivery and pending intents recover after restart.",
 		},
 	}
 	if opts.Summary {
@@ -1088,7 +1088,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 			fmt.Printf("- %s\n", warning)
 		}
 	}
-	fmt.Println("Next watch command (leave running while workers are active; do not add --once):")
+	fmt.Println("Optional external observer command (do not run inside a model turn):")
 	fmt.Printf("- %s\n", result.Advice["watch"])
 	fmt.Printf("- %s\n", result.Advice["watch_instruction"])
 	return nil
@@ -1375,7 +1375,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		Advice: orchestrateStartAdvice{
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
 			StatusCommand:    fmt.Sprintf("az orchestrate status --root %s --json", opts.RootIssueID),
-			WatchInstruction: "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
+			WatchInstruction: "Optional external observer only; agents should yield after a bounded status/action step and wait for the daemon's revision-bound continuation.",
 		},
 	}
 	if readinessErr == nil {
@@ -2062,7 +2062,7 @@ func printOrchestrateStartResult(result orchestrateStartResult) {
 		}
 	}
 	if result.Advice.WatchCommand != "" {
-		fmt.Println("Next watch command (leave running while workers are active; do not add --once):")
+		fmt.Println("Optional external observer command (do not run inside a model turn):")
 		fmt.Printf("- %s\n", result.Advice.WatchCommand)
 		if result.Advice.WatchInstruction != "" {
 			fmt.Printf("- %s\n", result.Advice.WatchInstruction)

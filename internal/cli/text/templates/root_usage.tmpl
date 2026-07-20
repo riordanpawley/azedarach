@@ -153,7 +153,7 @@ Examples:
   az orchestrate prompt --root az-123 --issue az-456 --coordination mailbox
   az orchestrate start --root az-123 --limit 4
   az orchestrate watch --root az-123 --since 41 --jsonl
-  # Leave compact orchestrate watch running in another pane/session while workers are active; use --verbose/--full for debugging and --once only for diagnostic single polls.
+  # Optional external observer only; model turns should use bounded status/action steps and yield for daemon-delivered continuations.
   az orchestrate integrate --issue az-456      # Inspect worker evidence / repair guidance
   az orchestrate close-session --issue az-456  # Repair-only daemon stop; normal accepted-worker cleanup uses az ticket close
   az orchestrate complete-check --root az-123
