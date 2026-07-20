@@ -62,8 +62,19 @@ func TestPublicationReviewAuthorityRejectsSupersededAcceptance(t *testing.T) {
 		return event.ID
 	}
 	operation.AcceptedReviewEventID = appendAcceptance(operation.OperationID)
-	newestID := appendAcceptance("publication-new")
+	for range 501 {
+		if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+			Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept",
+			Payload: map[string]any{"outcome": string(domain.ReviewOutcomeIntegrationFailed), "actor_id": operation.ActorID, "actor_kind": operation.ReviewerKind},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	d := &Daemon{cfg: Config{RepoDir: repo, Logger: slog.Default()}, operationRuntime: runtime, issues: client, issueClientsByProject: map[string]*issues.Client{runtime.canonicalProject: client}}
+	if err := d.validatePublicationReviewAuthority(ctx, operation); err != nil {
+		t.Fatalf("authoritative acceptance hidden by ignored diagnostics: %v", err)
+	}
+	newestID := appendAcceptance("publication-new")
 	err = d.validatePublicationReviewAuthority(ctx, operation)
 	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("superseded by authoritative event %d", newestID)) {
 		t.Fatalf("superseded publication authority error = %v", err)
