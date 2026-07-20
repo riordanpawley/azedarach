@@ -116,7 +116,7 @@ func runCandidateValidationDAG(ctx context.Context, root string, env []string, s
 				base, mkErr := os.MkdirTemp(stageRoot, "stage-")
 				tempBase := os.TempDir()
 				if runtime.GOOS == "darwin" {
-					tempBase = "/tmp"
+					tempBase = "/private/tmp"
 				}
 				shortTemp, tempErr := os.MkdirTemp(tempBase, "azv-")
 				if mkErr == nil {

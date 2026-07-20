@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -56,6 +58,9 @@ func TestCandidateValidationDAGUsesHermeticProductStateAndPreservesConsumerEnvir
 	require.NoError(t, err)
 	require.Len(t, result.Stages, 1)
 	assert.Equal(t, "passed", result.Stages[0].Status)
+	if runtime.GOOS == "darwin" {
+		assert.True(t, strings.HasPrefix(result.Stages[0].TempRoot, "/private/tmp/azv-"), result.Stages[0].TempRoot)
+	}
 	assert.NoDirExists(t, result.Stages[0].TempRoot)
 }
 
