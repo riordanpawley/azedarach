@@ -105,11 +105,11 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 		if err := json.Unmarshal(req.Body, &body); err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("decode validation artifact read: %v", err)), nil
 		}
-		content, digest, err := d.readValidationArtifact(projectID, body.Reference)
+		content, digest, totalSize, nextOffset, err := d.readValidationArtifact(projectID, body.Reference, body.Offset, body.Limit)
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 		}
-		return d.validationSuccessResponse(req, protocol.ValidationArtifactReadResponse{Reference: strings.TrimSpace(body.Reference), Digest: "sha256:" + digest, Content: content})
+		return d.validationSuccessResponse(req, protocol.ValidationArtifactReadResponse{Reference: strings.TrimSpace(body.Reference), Digest: "sha256:" + digest, Content: content, Offset: body.Offset, NextOffset: nextOffset, TotalSize: totalSize, Complete: nextOffset == totalSize})
 	case protocol.CommandPublicationEvidenceRecord:
 		var body protocol.PublicationEvidenceRecordRequest
 		if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -300,17 +300,39 @@ func (d *Daemon) resolveValidationArtifact(projectID, reference string) (string,
 	return path, nil
 }
 
-func (d *Daemon) readValidationArtifact(projectID, reference string) ([]byte, string, error) {
+func (d *Daemon) readValidationArtifact(projectID, reference string, offset int64, limit int) ([]byte, string, int64, int64, error) {
+	if offset < 0 {
+		return nil, "", 0, 0, fmt.Errorf("validation artifact offset must be non-negative")
+	}
+	if limit <= 0 {
+		limit = protocol.ValidationArtifactReadMaxBytes
+	}
+	if limit > protocol.ValidationArtifactReadMaxBytes {
+		return nil, "", 0, 0, fmt.Errorf("validation artifact read limit exceeds %d bytes", protocol.ValidationArtifactReadMaxBytes)
+	}
 	path, err := d.resolveValidationArtifact(projectID, reference)
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, 0, err
 	}
-	content, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
-		return nil, "", fmt.Errorf("validation artifact unavailable")
+		return nil, "", 0, 0, fmt.Errorf("validation artifact unavailable")
 	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || offset > info.Size() {
+		return nil, "", 0, 0, fmt.Errorf("validation artifact offset exceeds content size")
+	}
+	if _, err = file.Seek(offset, io.SeekStart); err != nil {
+		return nil, "", 0, 0, fmt.Errorf("validation artifact unavailable")
+	}
+	content, err := io.ReadAll(io.LimitReader(file, int64(limit)))
+	if err != nil {
+		return nil, "", 0, 0, fmt.Errorf("validation artifact unavailable")
+	}
+	nextOffset := offset + int64(len(content))
 	digest := strings.TrimPrefix(strings.TrimSpace(reference), "artifact:sha256/")
-	return content, digest, nil
+	return content, digest, info.Size(), nextOffset, nil
 }
 
 func (d *Daemon) validatePublicationEvidenceIssue(ctx context.Context, projectID, issueID string) error {

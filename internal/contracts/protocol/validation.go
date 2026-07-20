@@ -2,6 +2,8 @@ package protocol
 
 import "github.com/riordanpawley/azedarach/internal/domain"
 
+const ValidationArtifactReadMaxBytes = 1 << 20
+
 const (
 	CommandValidationAcquire           = "validation.acquire"
 	CommandValidationHeartbeat         = "validation.heartbeat"
@@ -59,12 +61,18 @@ type ValidationStatusRequest struct{}
 
 type ValidationArtifactReadRequest struct {
 	Reference string `json:"reference"`
+	Offset    int64  `json:"offset,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
 }
 
 type ValidationArtifactReadResponse struct {
-	Reference string `json:"reference"`
-	Digest    string `json:"digest"`
-	Content   []byte `json:"content"`
+	Reference  string `json:"reference"`
+	Digest     string `json:"digest"`
+	Content    []byte `json:"content"`
+	Offset     int64  `json:"offset"`
+	NextOffset int64  `json:"next_offset"`
+	TotalSize  int64  `json:"total_size"`
+	Complete   bool   `json:"complete"`
 }
 
 type ValidationRequestResponse struct {

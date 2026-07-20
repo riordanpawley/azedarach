@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -119,15 +120,37 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 			return err
 		}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			result, err := deps.DaemonClient.ValidationArtifactRead(context.Background(), protocol.ValidationArtifactReadRequest{Reference: *reference})
-			if err != nil {
-				return err
+			writer := io.Writer(os.Stdout)
+			var file *os.File
+			if strings.TrimSpace(*output) != "" {
+				var err error
+				file, err = os.OpenFile(*output, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+				if err != nil {
+					return err
+				}
+				defer file.Close()
+				writer = file
 			}
-			if strings.TrimSpace(*output) == "" {
-				_, err = os.Stdout.Write(result.Content)
-				return err
+			var offset int64
+			for {
+				result, err := deps.DaemonClient.ValidationArtifactRead(context.Background(), protocol.ValidationArtifactReadRequest{Reference: *reference, Offset: offset})
+				if err != nil {
+					return err
+				}
+				if result.Offset != offset || result.NextOffset != offset+int64(len(result.Content)) {
+					return fmt.Errorf("validation artifact returned non-contiguous chunk")
+				}
+				if _, err = writer.Write(result.Content); err != nil {
+					return err
+				}
+				if result.Complete {
+					return nil
+				}
+				if result.NextOffset <= offset {
+					return fmt.Errorf("validation artifact read made no progress")
+				}
+				offset = result.NextOffset
 			}
-			return os.WriteFile(*output, result.Content, 0o600)
 		})
 	case "evidence-record":
 		flags := flag.NewFlagSet("validation evidence-record", flag.ContinueOnError)

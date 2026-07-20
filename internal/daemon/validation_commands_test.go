@@ -152,6 +152,8 @@ func TestValidationArtifactReadCommandIsProjectScopedAndDigestVerified(t *testin
 	require.NoError(t, json.Unmarshal(read.Body, &result))
 	assert.Equal(t, "complete output\n", string(result.Content))
 	assert.Equal(t, reference.Digest, result.Digest)
+	assert.True(t, result.Complete)
+	assert.Equal(t, int64(len(result.Content)), result.TotalSize)
 
 	unauthorized, err := d.handleValidationCommand(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "read-other", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationArtifactRead, Meta: protocol.Metadata{ProjectID: "project-b"}, Body: body})
 	require.NoError(t, err)
@@ -164,6 +166,13 @@ func TestValidationArtifactReadCommandIsProjectScopedAndDigestVerified(t *testin
 	require.NoError(t, err)
 	assert.False(t, bad.OK)
 	assert.Contains(t, bad.Error.Message, "invalid validation artifact")
+
+	tooLargeBody, err := json.Marshal(protocol.ValidationArtifactReadRequest{Reference: reference.Reference, Limit: protocol.ValidationArtifactReadMaxBytes + 1})
+	require.NoError(t, err)
+	tooLarge, err := d.handleValidationCommand(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "read-large", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationArtifactRead, Meta: protocol.Metadata{ProjectID: "project-a"}, Body: tooLargeBody})
+	require.NoError(t, err)
+	assert.False(t, tooLarge.OK)
+	assert.Contains(t, tooLarge.Error.Message, "limit exceeds")
 }
 
 func TestRetainValidationArtifactFailsClosedWhenStorageUnavailable(t *testing.T) {
