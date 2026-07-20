@@ -15,6 +15,34 @@
     "environmentFingerprint": "azedarach-go-review-v1",
     "failureArtifactPaths": [
       ".tmp/test-timing"
+    ],
+    "stages": [
+      {
+        "id": "build",
+        "command": "just build",
+        "resources": ["go-build-cache"]
+      },
+      {
+        "id": "cold-semantic-suite",
+        "command": "just test",
+        "resources": ["go-test-cache"],
+        "artifactPaths": [".tmp/test-timing"]
+      },
+      {
+        "id": "artifact-install-contract",
+        "command": "just test-build-contract",
+        "resources": ["go-build-cache"]
+      },
+      {
+        "id": "local-tracing-contract",
+        "command": "just test-jaeger-contract",
+        "resources": ["container-engine", "loopback-ports"]
+      },
+      {
+        "id": "static-boundary-contract",
+        "command": "just check-boundaries",
+        "resources": ["go-build-cache"]
+      }
     ]
   },
   "git": {
