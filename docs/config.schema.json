@@ -40,6 +40,24 @@
             "minLength": 1
           },
           "default": []
+        },
+        "stages": {
+          "type": "array",
+          "description": "Consumer-owned authoritative validation stage DAG. Commands, dependencies, resource capabilities, and artifacts are explicit; no project conventions are inferred.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "command"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "command": {"type": "string", "minLength": 1},
+              "dependsOn": {"type": "array", "items": {"type": "string", "minLength": 1}, "default": []},
+              "resources": {"type": "array", "items": {"type": "string", "minLength": 1}, "default": []},
+              "artifactPaths": {"type": "array", "items": {"type": "string", "minLength": 1}, "default": []},
+              "required": {"type": "boolean", "default": true}
+            }
+          },
+          "default": []
         }
       },
       "default": {}

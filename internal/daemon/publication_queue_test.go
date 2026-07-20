@@ -1528,6 +1528,24 @@ func TestPublicationStoreRoutesRegisteredProjectIntentAtomically(t *testing.T) {
 	}
 }
 
+func TestPublicationValidationIdentityIsOrderStableAndConsumerNeutral(t *testing.T) {
+	left := &appconfig.Config{Gate: appconfig.GateConfig{Stages: []appconfig.GateStageConfig{
+		{ID: "package", Command: "acme package", DependsOn: []string{"inspect"}, Resources: []string{"disk", "cpu"}},
+		{ID: "inspect", Command: "acme inspect"},
+	}}}
+	right := &appconfig.Config{Gate: appconfig.GateConfig{Stages: []appconfig.GateStageConfig{
+		{ID: "inspect", Command: "acme inspect"},
+		{ID: "package", Command: "acme package", DependsOn: []string{"inspect"}, Resources: []string{"cpu", "disk"}},
+	}}}
+	if got, want := publicationValidationIdentity(left), publicationValidationIdentity(right); got != want || !strings.HasPrefix(got, "stage-dag:") {
+		t.Fatalf("stage DAG identities = (%q, %q), want equal typed identities", got, want)
+	}
+	right.Gate.Stages[1].Command = "acme package --strict"
+	if publicationValidationIdentity(left) == publicationValidationIdentity(right) {
+		t.Fatal("stage command change retained reusable validation identity")
+	}
+}
+
 func daemonTestPublicationOperation(projectID, operationID, issueID, intent, source string, created time.Time) domain.PublicationOperation {
 	return domain.PublicationOperation{
 		OperationID: operationID, ProjectID: projectID, IssueID: issueID, IntentKey: intent,

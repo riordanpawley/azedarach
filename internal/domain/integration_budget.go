@@ -19,6 +19,17 @@ type IntegrationCandidateValidationAttempt struct {
 	Status        IntegrationCandidateValidationStatus `json:"status"`
 	Canonical     bool                                 `json:"canonical"`
 	Message       string                               `json:"message,omitempty"`
+	Stages        []ValidationStageEvidence            `json:"stages,omitempty"`
+}
+
+type ValidationStageEvidence struct {
+	ID            string   `json:"id"`
+	Status        string   `json:"status"`
+	OutputRoot    string   `json:"output_root,omitempty"`
+	TempRoot      string   `json:"temp_root,omitempty"`
+	ArtifactPaths []string `json:"artifact_paths,omitempty"`
+	Stdout        string   `json:"stdout,omitempty"`
+	Stderr        string   `json:"stderr,omitempty"`
 }
 
 // Integration validation and lifecycle budgets are deliberately layered. The
