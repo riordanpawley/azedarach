@@ -937,10 +937,25 @@ func TestCanonicalChangeRetiresOnlyAffectedRuntimeHealth(t *testing.T) {
 				_, hasFailureA := reader.authoritativeRuntimeFailures[issueA]
 				_, hasFailureB := reader.authoritativeRuntimeFailures[issueB]
 				reader.mu.RUnlock()
-				if hasSequenceA || hasFailureA {
-					t.Fatalf("%s retained issue-a runtime state: sequence=%t failure=%t", operation, hasSequenceA, hasFailureA)
-				}
 				health := reader.snapshotMetadata().Health
+				if operation == "replace" {
+					if hasSequenceA || !hasFailureA || !strings.Contains(health, "issue-a stale failure") || strings.Contains(health, "late issue-a failure") || strings.Contains(health, "canonical generation advanced") {
+						t.Fatalf("replacement health = %q sequenceA=%t failureA=%t, want retained retryable issue-a failure", health, hasSequenceA, hasFailureA)
+					}
+					retryA := reader.beginAuthoritativeReadRefreshForIssues(authoritativeReadRefreshRuntime, []string{issueA})
+					if !reader.finishAuthoritativeReadRefresh(retryA, nil) {
+						t.Fatal("replacement retry completion was superseded")
+					}
+					reader.mu.RLock()
+					_, hasFailureA = reader.authoritativeRuntimeFailures[issueA]
+					reader.mu.RUnlock()
+					health = reader.snapshotMetadata().Health
+					if hasFailureA || strings.Contains(health, "issue-a stale failure") {
+						t.Fatalf("replacement retry health = %q failureA=%t, want issue-a recovery", health, hasFailureA)
+					}
+				} else if hasSequenceA || hasFailureA {
+					t.Fatalf("delete retained issue-a runtime state: sequence=%t failure=%t", hasSequenceA, hasFailureA)
+				}
 				if unrelatedFailure {
 					if !hasSequenceB || !hasFailureB || !strings.Contains(health, "issue-b retained failure") || strings.Contains(health, "issue-a stale failure") || strings.Contains(health, "late issue-a failure") || strings.Contains(health, "canonical generation advanced") {
 						t.Fatalf("%s health = %q sequenceB=%t failureB=%t, want only issue-b state", operation, health, hasSequenceB, hasFailureB)
