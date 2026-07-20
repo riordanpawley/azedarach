@@ -14,7 +14,7 @@ Commands:
   check [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>]  Alias for get
   doctor [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>]  Run integrity checks for one ticket
   create [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create a ticket; auto-parents to AZEDARACH_ISSUE_ID when set
-  split [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create a child ticket and launch it with az orchestrate start
+  split --intent-key <unique-invocation-key> [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create a child and launch it; reuse the key only for exact retries
   update [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update ticket fields and durable lifecycle actions (backlog/open/active/review/closed/cancelled)
   close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [<ticket-id>]  Integrate, clean up, and close a ticket
   cleanup [--project <project-id>] [--id <ticket-id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--per-ticket-timeout duration] [--json]  Safely clean up ticket lifecycles in one daemon operation

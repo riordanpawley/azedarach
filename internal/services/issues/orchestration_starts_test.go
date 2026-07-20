@@ -92,6 +92,33 @@ func TestRequestedOrchestrationStartIsDurableIdempotentAndCompletable(t *testing
 	}
 }
 
+func TestBeginOrchestrationStartSameIntentRetriesAfterCompensation(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, CreateTaskParams{Title: "worker", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := client.BeginOrchestrationStart(ctx, "project", issueID, "split-start", "actor", "dedupe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CompensateOrchestrationStart(ctx, first, errors.New("pre-dispatch failure")); err != nil {
+		t.Fatal(err)
+	}
+	retry, err := client.BeginOrchestrationStart(ctx, "project", issueID, "split-start", "actor", "dedupe")
+	if err != nil {
+		t.Fatalf("retry compensated intent: %v", err)
+	}
+	if retry.State != "claimed" || !retry.ClaimAcquired {
+		t.Fatalf("retry=%+v", retry)
+	}
+	if _, err := client.BeginOrchestrationStart(ctx, "project", issueID, "split-start", "actor", "changed"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("changed dedupe error=%v", err)
+	}
+}
+
 func TestCompensateOrchestrationStartDurablyReleasesOnlyAcquiredClaim(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()
@@ -291,14 +318,15 @@ func TestCompensateOrchestrationStartOperationClearsAllDedupedAttempts(t *testin
 	if err != nil || compensated {
 		t.Fatalf("idempotent shared-operation retry = %t, %v", compensated, err)
 	}
-	if _, err := client.BeginOrchestrationStart(ctx, "project", issueID, "intent-1", "orchestrator", dedupeKey); !errors.Is(err, domain.ErrConflict) {
-		t.Fatalf("same-intent retry error = %v, want compensated conflict", err)
+	retry, err := client.BeginOrchestrationStart(ctx, "project", issueID, "intent-1", "orchestrator", dedupeKey)
+	if err != nil || retry.State != "claimed" || !retry.ClaimAcquired {
+		t.Fatalf("same-intent retry = %+v, %v, want fresh claimed attempt", retry, err)
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM orchestration_start_attempts WHERE project_id=? AND dedupe_key=? AND state IN ('claimed','submitted')`, "project", dedupeKey).Scan(&residue); err != nil {
 		t.Fatal(err)
 	}
-	if residue != 0 {
-		t.Fatalf("same-intent retry recreated residue = %d", residue)
+	if residue != 1 {
+		t.Fatalf("same-intent retry active attempts = %d, want 1", residue)
 	}
 }
 

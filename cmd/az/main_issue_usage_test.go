@@ -29,7 +29,7 @@ func TestIssueSplitUsageExplainsParentFlagOwnsParentage(t *testing.T) {
 	text := out.String()
 
 	for _, want := range []string{
-		"Usage: az ticket split [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...]",
+		"Usage: az ticket split --intent-key <unique-invocation-key> [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...]",
 		"use --parent or AZEDARACH_ISSUE_ID for parentage",
 		"--impl only assigns implementation/spec variant metadata",
 	} {

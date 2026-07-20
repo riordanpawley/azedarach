@@ -933,6 +933,7 @@ type Client struct {
 	eventSearchMigrationFailureHook      func(stage string) error
 	legacyAttachmentMigrationFailureHook func(stage string) error
 	legacyAttachmentDirectorySyncHook    func(path string) error
+	taskCreationIntentFailureHook        func(stage string) error
 	requireExistingDB                    bool
 	interactionMu                        sync.RWMutex
 	interactionCache                     map[string]domain.InteractionRequest
@@ -3836,6 +3837,9 @@ func (c *Client) countOpenChildren(ctx context.Context, db sqlIssueQueryer, pare
 
 // CreateTaskParams contains parameters for creating a new issue.
 type CreateTaskParams struct {
+	ProjectID       string
+	IntentKey       string
+	RequestDigest   string
 	Title           string
 	Description     string
 	Type            domain.TaskType
@@ -3850,6 +3854,7 @@ type CreateTaskParams struct {
 	Acceptance      string
 	Estimate        *int
 	ParentID        *string
+	CreatedFromID   *string
 }
 
 type UpsertExternalIssueRefParams struct {
@@ -3864,63 +3869,91 @@ type UpsertExternalIssueRefParams struct {
 
 // Create inserts a new issue and returns its generated id.
 func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, error) {
-	var issueID string
-	err := c.retrySQLiteBusy(ctx, func() error {
-		var err error
-		issueID, err = c.createOnce(ctx, params)
-		return err
-	})
-	if err != nil {
-		return "", err
-	}
-	return issueID, nil
-}
-
-func (c *Client) createOnce(ctx context.Context, params CreateTaskParams) (string, error) {
-	var issueID string
-	err := c.withMutationLock(ctx, func(ctx context.Context) error {
-		var err error
-		issueID, err = c.createOnceLocked(ctx, params)
-		return err
-	})
+	issueID, _, err := c.createWithDisposition(ctx, params)
 	return issueID, err
 }
 
-func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) (string, error) {
+func (c *Client) createWithDisposition(ctx context.Context, params CreateTaskParams) (string, bool, error) {
+	var issueID string
+	var created bool
+	err := c.retrySQLiteBusy(ctx, func() error {
+		var err error
+		issueID, created, err = c.createOnce(ctx, params)
+		return err
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return issueID, created, nil
+}
+
+func (c *Client) createOnce(ctx context.Context, params CreateTaskParams) (string, bool, error) {
+	var issueID string
+	var created bool
+	err := c.withMutationLock(ctx, func(ctx context.Context) error {
+		var err error
+		issueID, created, err = c.createOnceLocked(ctx, params)
+		return err
+	})
+	return issueID, created, err
+}
+
+func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) (string, bool, error) {
 	db, err := c.dbHandle()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if strings.TrimSpace(params.Title) == "" {
-		return "", c.wrapError("create", "", errors.New("title is required"))
+		return "", false, c.wrapError("create", "", errors.New("title is required"))
+	}
+	projectID, intentKey, requestDigest := strings.TrimSpace(params.ProjectID), strings.TrimSpace(params.IntentKey), strings.TrimSpace(params.RequestDigest)
+	if (intentKey == "") != (requestDigest == "") || (intentKey != "" && projectID == "") {
+		return "", false, c.wrapError("create", "", errors.New("project, intent key, and request digest must be supplied together"))
 	}
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", c.wrapError("create", "", err)
+		return "", false, c.wrapError("create", "", err)
 	}
 	defer func() {
 		if tx != nil {
 			_ = tx.Rollback()
 		}
 	}()
+	if intentKey != "" {
+		var existingID, existingDigest string
+		err := tx.QueryRowContext(ctx, `SELECT issue_id, request_digest FROM task_creation_intents WHERE project_id=? AND intent_key=?`, projectID, intentKey).Scan(&existingID, &existingDigest)
+		if err == nil {
+			if existingDigest != requestDigest {
+				return "", false, c.wrapError("create", existingID, fmt.Errorf("%w: task creation intent %q reused with different request", domain.ErrConflict, intentKey))
+			}
+			if err := tx.Commit(); err != nil {
+				return "", false, c.wrapError("create", existingID, err)
+			}
+			tx = nil
+			return existingID, false, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", false, c.wrapError("create", "", err)
+		}
+	}
 
 	nextIndex := 0
 	if raw, err := c.getMetaValue(ctx, tx, nextAlphaIssueIndexMetaKey); err == nil {
 		nextIndex = parseNextAlphaIssueIndex(raw)
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		return "", c.wrapError("create", "", err)
+		return "", false, c.wrapError("create", "", err)
 	}
 
 	existing, err := c.loadAllocatedIssueIDs(ctx, tx)
 	if err != nil {
-		return "", c.wrapError("create", "", err)
+		return "", false, c.wrapError("create", "", err)
 	}
 
 	issueID, nextReserved := allocateNextAlphaIssueID(nextIndex, existing)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := c.reserveIssueID(ctx, tx, issueID, now, "issue.create"); err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
 	}
 	issueType := params.Type
 	if issueType == "" {
@@ -3932,25 +3965,25 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 	}
 	state, err := issueStateFromStatus(status)
 	if err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
 	}
 	if params.Lifecycle != "" {
 		if state.Workflow() != domain.IssueWorkflowBacklog && state.Workflow() != domain.IssueWorkflowOpen {
-			return "", c.wrapError("create", issueID, fmt.Errorf("lifecycle %s cannot be combined with status %s", params.Lifecycle, status))
+			return "", false, c.wrapError("create", issueID, fmt.Errorf("lifecycle %s cannot be combined with status %s", params.Lifecycle, status))
 		}
 		state, err = issueStateWithLifecycle(state, params.Lifecycle)
 		if err != nil {
-			return "", c.wrapError("create", issueID, err)
+			return "", false, c.wrapError("create", issueID, err)
 		}
 	}
 	writeState := issueStateWriteValuesFromState(state, nil)
 	labelsJSON, err := marshalOptionalStringSlice(params.Labels)
 	if err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
 	}
 	implementationsJSON, err := marshalOptionalStringSlice(params.Implementations)
 	if err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
 	}
 	var closedAt any
 	if state.Workflow() == domain.IssueWorkflowClosed {
@@ -3990,7 +4023,7 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 		)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, issueID, params.Title, nullableString(params.Description), writeState.LegacyStatus, writeState.Disposition, writeState.Engagement, writeState.Visibility, int(params.Priority), string(issueType), now, now, closedAt, nullableString(params.Assignee), labelsJSON, implementationsJSON, nullableString(params.Design), nullableString(params.Notes), nullableString(params.Acceptance), estimate, writeState.ArchivedAt, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Review, writeState.ArchivedAt); err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
 	}
 	createPayload := map[string]any{
 		"title":      params.Title,
@@ -4002,20 +4035,25 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 		createPayload["parent_id"] = strings.TrimSpace(*params.ParentID)
 	}
 	if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueCreated, createPayload); err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
+	}
+	if intentKey != "" && c.taskCreationIntentFailureHook != nil {
+		if err := c.taskCreationIntentFailureHook("after_issue"); err != nil {
+			return "", false, c.wrapError("create", issueID, err)
+		}
 	}
 
 	if params.ParentID != nil && strings.TrimSpace(*params.ParentID) != "" {
 		parentID := strings.TrimSpace(*params.ParentID)
 		parentExists, err := c.issueExists(ctx, tx, parentID)
 		if err != nil {
-			return "", c.wrapError("create", issueID, err)
+			return "", false, c.wrapError("create", issueID, err)
 		}
 		if !parentExists {
-			return "", c.wrapError("create", issueID, domain.ErrNotFound)
+			return "", false, c.wrapError("create", issueID, domain.ErrNotFound)
 		}
 		if err := c.reopenClosedParentForActiveChild(ctx, tx, issueID, parentID); err != nil {
-			return "", c.wrapError("create", issueID, err)
+			return "", false, c.wrapError("create", issueID, err)
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
@@ -4023,19 +4061,53 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 			ON CONFLICT(issue_id, depends_on_id, dependency_type)
 			DO UPDATE SET tombstoned_at = NULL
 		`, issueID, parentID, string(domain.DependencyParentChild)); err != nil {
-			return "", c.wrapError("create", issueID, err)
+			return "", false, c.wrapError("create", issueID, err)
 		}
 		if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueDependencyAdded, map[string]any{
 			"depends_on_id":   parentID,
 			"dependency_type": string(domain.DependencyParentChild),
 		}); err != nil {
-			return "", c.wrapError("create", issueID, err)
+			return "", false, c.wrapError("create", issueID, err)
 		}
 		if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
-			return "", c.wrapError("create", issueID, err)
+			return "", false, c.wrapError("create", issueID, err)
 		}
 		if err := c.enforceAncestorLifecycleFloor(ctx, tx, issueID, "ancestor_lifecycle_floor_create"); err != nil {
-			return "", c.wrapError("create", issueID, err)
+			return "", false, c.wrapError("create", issueID, err)
+		}
+		if intentKey != "" && c.taskCreationIntentFailureHook != nil {
+			if err := c.taskCreationIntentFailureHook("after_parent_edge"); err != nil {
+				return "", false, c.wrapError("create", issueID, err)
+			}
+		}
+	}
+	if params.CreatedFromID != nil && strings.TrimSpace(*params.CreatedFromID) != "" {
+		createdFromID := strings.TrimSpace(*params.CreatedFromID)
+		if createdFromID == issueID {
+			return "", false, c.wrapError("create", issueID, domain.ErrConflict)
+		}
+		exists, err := c.issueExists(ctx, tx, createdFromID)
+		if err != nil {
+			return "", false, c.wrapError("create", issueID, err)
+		}
+		if !exists {
+			return "", false, c.wrapError("create", issueID, domain.ErrNotFound)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_dependencies(issue_id,depends_on_id,dependency_type,tombstoned_at) VALUES(?,?,?,NULL) ON CONFLICT(issue_id,depends_on_id,dependency_type) DO UPDATE SET tombstoned_at=NULL`, issueID, createdFromID, string(domain.DependencyCreatedIn)); err != nil {
+			return "", false, c.wrapError("create", issueID, err)
+		}
+		if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueDependencyAdded, map[string]any{"depends_on_id": createdFromID, "dependency_type": string(domain.DependencyCreatedIn)}); err != nil {
+			return "", false, c.wrapError("create", issueID, err)
+		}
+		if intentKey != "" && c.taskCreationIntentFailureHook != nil {
+			if err := c.taskCreationIntentFailureHook("after_created_in_edge"); err != nil {
+				return "", false, c.wrapError("create", issueID, err)
+			}
+		}
+	}
+	if intentKey != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_creation_intents(project_id,intent_key,request_digest,issue_id,created_at) VALUES(?,?,?,?,?)`, projectID, intentKey, requestDigest, issueID, now); err != nil {
+			return "", false, c.wrapError("create", issueID, err)
 		}
 	}
 
@@ -4043,14 +4115,14 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 		INSERT INTO meta (key, value) VALUES (?, ?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value
 	`, nextAlphaIssueIndexMetaKey, strconv.Itoa(nextReserved)); err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
 	}
 	tx = nil
-	return issueID, nil
+	return issueID, true, nil
 }
 
 // CreateWithRuntime inserts a new issue and returns the created task with runtime projection fields.
@@ -4069,6 +4141,19 @@ func (c *Client) CreateWithRuntime(ctx context.Context, projectID string, params
 		return domain.Task{}, err
 	}
 	return task, nil
+}
+
+// CreateIdempotentWithRuntime creates a task once for a project-scoped intent.
+// Exact replays return the canonical task with created=false; conflicting reuse
+// fails with domain.ErrConflict.
+func (c *Client) CreateIdempotentWithRuntime(ctx context.Context, projectID string, params CreateTaskParams) (domain.Task, bool, error) {
+	params.ProjectID = projectID
+	id, created, err := c.createWithDisposition(ctx, params)
+	if err != nil {
+		return domain.Task{}, false, err
+	}
+	task, err := c.GetWithRuntime(ctx, projectID, id)
+	return task, created, err
 }
 
 func (c *Client) retrySQLiteBusy(ctx context.Context, fn func() error) error {

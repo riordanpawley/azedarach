@@ -43,6 +43,8 @@ const decisionIdempotencyMigrationID = "0051_decision_idempotency"
 const gitHookRefreshIntentsMigrationID = "0053_git_hook_refresh_intents"
 const orchestrationStartIntentsMigrationID = "0058_orchestration_start_intents"
 const orchestrationStartIntentsMigrationChecksum = "68b5ca7149782ade0701bd684e23379145b312805e022ad33e5f267c29cc3a00"
+const taskCreationIntentsMigrationID = "0059_task_creation_intents"
+const taskCreationIntentsMigrationChecksum = "cf9f4a7b9968f120d594183ddfe46abdd73d9a7a9823dd8a2febf2fdfc41bea2"
 
 const mailboxObservationReplayRepairMaxRows = 50000
 const legacyAttachmentBlobForwardMigrationID = "0056_legacy_attachment_blob_forward"
@@ -112,6 +114,7 @@ var orderedMigrations = []migration{
 	{id: legacyAttachmentBlobForwardMigrationID, path: "migrations/0056_legacy_attachment_blob_forward.manifest.sql"},
 	{id: agentInputDeliveryMigrationID, path: "migrations/0057_agent_input_delivery.sql"},
 	{id: orchestrationStartIntentsMigrationID, path: "migrations/0058_orchestration_start_intents.sql"},
+	{id: taskCreationIntentsMigrationID, path: "migrations/0059_task_creation_intents.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -179,6 +182,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: legacyAttachmentBlobForwardMigrationID, Path: "migrations/0056_legacy_attachment_blob_forward.manifest.sql", Checksum: "c6450a27423e68ebf4b662d485466a726ebcf3208c2858f2cb0f65c6efc6a62a"},
 	{ID: agentInputDeliveryMigrationID, Path: "migrations/0057_agent_input_delivery.sql", Checksum: agentInputDeliveryMigrationChecksum},
 	{ID: orchestrationStartIntentsMigrationID, Path: "migrations/0058_orchestration_start_intents.sql", Checksum: orchestrationStartIntentsMigrationChecksum},
+	{ID: taskCreationIntentsMigrationID, Path: "migrations/0059_task_creation_intents.sql", Checksum: taskCreationIntentsMigrationChecksum},
 }
 
 func validateMigrationRegistry() error {
@@ -469,6 +473,34 @@ func validateOrchestrationStartIntentsSchema(ctx context.Context, db *sql.DB) er
 		}
 		if normalize(actual) != normalize(canonical) {
 			return fmt.Errorf("orchestration start intents schema drifted: %s differs from immutable migration artifact: got %q want %q", object.name, normalize(actual), normalize(canonical))
+		}
+	}
+	return nil
+}
+
+func validateTaskCreationIntentsSchema(ctx context.Context, db *sql.DB) error {
+	sqlText, err := loadMigrationSQL("migrations/0059_task_creation_intents.sql")
+	if err != nil {
+		return fmt.Errorf("load task creation intents schema: %w", err)
+	}
+	for _, object := range []struct{ kind, name string }{{"table", "task_creation_intents"}, {"index", "idx_task_creation_intents_issue"}} {
+		canonical := ""
+		for _, statement := range strings.Split(sqlText, ";") {
+			if strings.Contains(strings.ToLower(statement), strings.ToLower(object.name)) {
+				canonical = strings.TrimSpace(statement)
+				break
+			}
+		}
+		var actual string
+		if canonical == "" {
+			return fmt.Errorf("task creation intents schema drifted: immutable artifact is missing %s", object.name)
+		}
+		if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type=? AND name=?`, object.kind, object.name).Scan(&actual); err != nil {
+			return fmt.Errorf("task creation intents schema drifted: missing %s: %w", object.name, err)
+		}
+		normalize := func(value string) string { return strings.ReplaceAll(normalizeSQLiteDDL(value), "ifnotexists", "") }
+		if normalize(actual) != normalize(canonical) {
+			return fmt.Errorf("task creation intents schema drifted: %s differs from immutable migration artifact", object.name)
 		}
 	}
 	return nil
@@ -782,6 +814,15 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	}
 	if orchestrationStartIntentsApplied {
 		if err := validateOrchestrationStartIntentsSchema(ctx, db); err != nil {
+			return err
+		}
+	}
+	taskCreationIntentsApplied, err := isMigrationApplied(ctx, db, taskCreationIntentsMigrationID)
+	if err != nil {
+		return fmt.Errorf("check task creation intents migration: %w", err)
+	}
+	if taskCreationIntentsApplied {
+		if err := validateTaskCreationIntentsSchema(ctx, db); err != nil {
 			return err
 		}
 	}
