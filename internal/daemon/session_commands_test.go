@@ -433,7 +433,7 @@ func TestCodexAppServerLaunchUsesStockRemoteTUIAndSupervisedResume(t *testing.T)
 	trace := filepath.Join(t.TempDir(), "trace")
 	fakeCodex := `codex() { printf '%s|%s\n' "$*" "$PWD" >> "$TRACE"; case "$*" in "mcp get --json floop") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon start") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon version") return 1 ;; "-c mcp_servers.floop.required=false app-server daemon restart") return 0 ;; "--remote unix://") return 1 ;; "resume --remote unix:// --last") return 0 ;; *) return 2 ;; esac; }; `
 	cmd := exec.Command("sh", "-c", fakeCodex+supervisor)
-	cmd.Env = append(os.Environ(), "TRACE="+trace)
+	cmd.Env = append(os.Environ(), "TRACE="+trace, "AZEDARACH_DAEMON_SCOPE=global")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("supervisor execution: %v\n%s", err, out)
 	}
@@ -475,7 +475,7 @@ func TestCodexAppServerRecoveryCoordinatesConcurrentSupervisors(t *testing.T) {
 	commands := []*exec.Cmd{exec.Command("sh", "-c", fakeCodex+supervisor), exec.Command("sh", "-c", fakeCodex+supervisor)}
 	outputs := make([]bytes.Buffer, len(commands))
 	for i, cmd := range commands {
-		cmd.Env = append(os.Environ(), "TRACE="+trace, "HEALTHY="+healthy)
+		cmd.Env = append(os.Environ(), "TRACE="+trace, "HEALTHY="+healthy, "AZEDARACH_DAEMON_SCOPE=global")
 		cmd.Stdout = &outputs[i]
 		cmd.Stderr = &outputs[i]
 		if err := cmd.Start(); err != nil {
@@ -504,7 +504,9 @@ func TestCodexAppServerRecoveryReclaimsDeadOwnerLock(t *testing.T) {
 	}
 	supervisor := codexAppServerSupervisedCommand("codex", stableDir, "codex first", "codex resume")
 	fakeCodex := `codex() { case "$*" in "mcp get --json floop"|"-c mcp_servers.floop.required=false app-server daemon start"|"-c mcp_servers.floop.required=false app-server daemon restart"|"resume") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon version"|"first") return 1 ;; *) return 2 ;; esac; }; `
-	if output, err := exec.Command("sh", "-c", fakeCodex+supervisor).CombinedOutput(); err != nil {
+	cmd := exec.Command("sh", "-c", fakeCodex+supervisor)
+	cmd.Env = append(os.Environ(), "AZEDARACH_DAEMON_SCOPE=global")
+	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("recover dead owner lock: %v\n%s", err, output)
 	}
 	if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
@@ -529,6 +531,43 @@ func TestCodexAppServerSupervisorRefusesGlobalControlFromWorktreeScopedDaemon(t 
 		t.Fatalf("worktree-scoped supervisor invoked Codex: %q", data)
 	} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		t.Fatal(readErr)
+	}
+}
+
+func TestCodexAppServerSupervisorRequiresExplicitGlobalDaemonScope(t *testing.T) {
+	stableDir := t.TempDir()
+	trace := filepath.Join(t.TempDir(), "trace")
+	supervisor := codexAppServerSupervisedCommand("codex", stableDir, "codex first", "codex resume")
+	cmd := exec.Command("sh", "-c", `codex() { printf '%s\n' "$*" >> "$TRACE"; }; `+supervisor)
+	cmd.Env = append(os.Environ(), "TRACE="+trace, "AZEDARACH_DAEMON_SCOPE=")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("unscoped supervisor unexpectedly succeeded: %s", output)
+	}
+	if data, readErr := os.ReadFile(trace); readErr == nil && len(data) != 0 {
+		t.Fatalf("unscoped supervisor invoked Codex: %q", data)
+	} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatal(readErr)
+	}
+}
+
+func TestDaemonScopeTmuxEnvironmentNormalizesTrustedMarker(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  string
+	}{
+		{input: "", want: "global"},
+		{input: "shared", want: "global"},
+		{input: "worktree", want: "worktree"},
+		{input: "scoped", want: "worktree"},
+		{input: "unexpected", want: "invalid"},
+	} {
+		t.Run(test.input, func(t *testing.T) {
+			t.Setenv("AZEDARACH_DAEMON_SCOPE", test.input)
+			if got := daemonScopeTmuxEnvironment()["AZEDARACH_DAEMON_SCOPE"]; got != test.want {
+				t.Fatalf("scope marker = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -4132,6 +4171,7 @@ func TestSessionStartInjectsIssueImageAttachments(t *testing.T) {
 }
 
 func TestSessionStartLargeCodexPromptUsesFileBootstrap(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID := "proj-large-codex-prompt"
@@ -4160,11 +4200,12 @@ func TestSessionStartLargeCodexPromptUsesFileBootstrap(t *testing.T) {
 
 	d := &Daemon{
 		cfg: Config{
-			RepoDir:      repoDir,
-			BaseBranch:   "main",
-			CLITool:      "codex",
-			SessionShell: "zsh",
-			Logger:       slog.Default(),
+			RepoDir:        repoDir,
+			BaseBranch:     "main",
+			CLITool:        "codex",
+			CodexAppServer: true,
+			SessionShell:   "zsh",
+			Logger:         slog.Default(),
 		},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		issues:       issuesClient,
@@ -4204,6 +4245,16 @@ func TestSessionStartLargeCodexPromptUsesFileBootstrap(t *testing.T) {
 
 	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
 	launchCommand := requireNewSessionLaunchCommand(t, tmuxRunner, sessionID)
+	var launchArgs []string
+	for _, command := range tmuxRunner.commands {
+		if len(command) > 0 && command[0] == "new-session" {
+			launchArgs = command
+			break
+		}
+	}
+	if got, ok := tmuxCommandEnvironmentValue(launchArgs, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "worktree" {
+		t.Fatalf("active tmux launch scope = %q, present=%t; command=%v", got, ok, launchArgs)
+	}
 	if strings.Contains(launchCommand, "large prompt line") || strings.Contains(launchCommand, initialPromptShellVariable) {
 		t.Fatalf("launch command contains large prompt payload or prompt variable")
 	}

@@ -149,7 +149,7 @@ func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID stri
 				fence.remove()
 				return fmt.Errorf("prepare advisor launch artifact: %w", commandErr)
 			}
-			if launchErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, advisor.SessionID, workdir, artifact.Command, nil); launchErr != nil {
+			if launchErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, advisor.SessionID, workdir, artifact.Command, daemonScopeTmuxEnvironment()); launchErr != nil {
 				artifact.remove()
 				fence.remove()
 				return fmt.Errorf("%w%s", launchErr, d.retireAmbiguousAdvisorSession(ctx, advisor.SessionID))

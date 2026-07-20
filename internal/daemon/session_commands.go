@@ -1230,7 +1230,7 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 	}
 	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
 	if cmd.StartWork {
-		if err := d.tmux.NewSessionWithCommandAndEnvironment(ctx, cmd.SessionID, worktree.Path, launchCommand, nil); err != nil {
+		if err := d.tmux.NewSessionWithCommandAndEnvironment(ctx, cmd.SessionID, worktree.Path, launchCommand, daemonScopeTmuxEnvironment()); err != nil {
 			cleanupNote := d.reconcileAmbiguousSessionStartCreateError(ctx, req, cmd, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, sessionStartLaunchFailureMessage("tmux_launch", cmd, worktree.Path, launchCommand, true, err, cleanupNote)), nil
 		}
@@ -4045,7 +4045,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			}
 			continue
 		}
-		if newErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, canonicalSessionID, wt.Path, launchArtifact.Command, nil); newErr != nil {
+		if newErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, canonicalSessionID, wt.Path, launchArtifact.Command, daemonScopeTmuxEnvironment()); newErr != nil {
 			launchArtifact.remove()
 			if live, probeErr := d.tmux.HasSession(ctx, canonicalSessionID); probeErr == nil && live {
 				_ = d.tmux.KillSession(ctx, canonicalSessionID)
@@ -6260,8 +6260,21 @@ func codexAppServerSupervisedCommand(tool, stableDir, firstCommand, resumeComman
 		recoverDaemon,
 		"sleep 1",
 	}
-	scopeGuard := "case ${AZEDARACH_DAEMON_SCOPE:-global} in worktree|scoped|local) echo 'refusing to control the user-global Codex app-server from a worktree-scoped Azedarach daemon' >&2; exit 1;; esac"
+	scopeGuard := "case ${AZEDARACH_DAEMON_SCOPE:-} in global) ;; *) echo 'refusing to control the user-global Codex app-server without trusted global Azedarach daemon scope' >&2; exit 1;; esac"
 	return scopeGuard + "; " + codexFloopFailOpenProbe(tool) + "; " + startDaemon + " || exit $?; __az_codex_remote_first=1; __az_codex_remote_failures=0; while :; do " + strings.Join(steps, "; ") + "; done"
+}
+
+func daemonScopeTmuxEnvironment() map[string]string {
+	scope := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
+	switch scope {
+	case "worktree", "scoped", "local":
+		scope = "worktree"
+	case "", "global", "shared", "user", "off", "none":
+		scope = "global"
+	default:
+		scope = "invalid"
+	}
+	return map[string]string{"AZEDARACH_DAEMON_SCOPE": scope}
 }
 
 const initialPromptShellVariable = "__AZEDARACH_INITIAL_PROMPT"
