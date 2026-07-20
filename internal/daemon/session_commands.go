@@ -6164,7 +6164,10 @@ func buildStartWorkPromptWithContext(task domain.Task, sourceRevision string, or
 	if err != nil {
 		return "", err
 	}
-	base := buildStartWorkPrompt(task.ID.String(), task.Type.String(), task.Title, orchestratedWorker, parentIssueID)
+	// The human-readable prefix is part of the active launch prompt too. Build it
+	// from the already-filtered packet so raw issue fields cannot bypass the
+	// bounded-context sensitive-value policy.
+	base := buildStartWorkPrompt(task.ID.String(), task.Type.String(), packet.Summary, orchestratedWorker, parentIssueID)
 	return base + "\n\nBounded semantic workflow context (authoritative for this phase; do not reconstruct it from inherited transcript or workflow scrollback):\n" + string(encoded), nil
 }
 

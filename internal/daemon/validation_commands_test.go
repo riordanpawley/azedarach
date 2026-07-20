@@ -116,7 +116,35 @@ func TestValidationFinishReturnsBoundedPortableFailureSummary(t *testing.T) {
 	assert.Equal(t, "candidate-123", result.Summary.Provenance.SourceRevision)
 	assert.Equal(t, "retained", result.Summary.OutputRetention)
 	assert.NotContains(t, string(summary), retainedOutput)
-	assert.Contains(t, result.Summary.ArtifactLinks[0].Reference, "validation:npm-check/report/")
+	reference := result.Summary.ArtifactLinks[0]
+	assert.Contains(t, reference.Reference, "artifact:sha256/")
+	assert.Contains(t, reference.Digest, "sha256:")
+	retainedPath, err := d.resolveValidationArtifact(reference.Reference)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(retainedOutput, []byte("mutated caller output\n"), 0o600))
+	retained, err := os.ReadFile(retainedPath)
+	require.NoError(t, err)
+	assert.Equal(t, "complete npm output\n", string(retained), "retained artifact must be independent of source mutation")
+	require.NoError(t, os.Remove(retainedOutput))
+	retained, err = os.ReadFile(retainedPath)
+	require.NoError(t, err)
+	assert.Equal(t, "complete npm output\n", string(retained), "retained artifact must survive source deletion")
+	require.NoError(t, os.Chmod(retainedPath, 0o600))
+	require.NoError(t, os.WriteFile(retainedPath, []byte("corrupt"), 0o600))
+	_, err = d.resolveValidationArtifact(reference.Reference)
+	assert.ErrorContains(t, err, "digest mismatch")
+}
+
+func TestRetainValidationArtifactFailsClosedWhenStorageUnavailable(t *testing.T) {
+	root := t.TempDir()
+	blocked := filepath.Join(root, "not-a-directory")
+	require.NoError(t, os.WriteFile(blocked, []byte("block"), 0o600))
+	source := filepath.Join(root, "output.log")
+	require.NoError(t, os.WriteFile(source, []byte("output"), 0o600))
+	d := &Daemon{cfg: Config{LockPath: filepath.Join(blocked, "daemon.lock")}}
+	_, err := d.retainValidationArtifact(source)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a directory")
 }
 
 func TestPublicationCoverageForPathsRejectsNonRepoRelativeGitPaths(t *testing.T) {

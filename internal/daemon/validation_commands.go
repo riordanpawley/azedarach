@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -153,18 +155,13 @@ func (d *Daemon) validationRequestSuccessResponse(req protocol.RequestEnvelope, 
 	if request.Evidence.ReportPath != "" {
 		paths = append(paths, request.Evidence.ReportPath)
 	}
-	retainedPaths := make([]string, 0, len(paths))
+	outputPresent := request.Evidence.FailureSummary != "" || len(paths) > 0
 	for _, path := range uniqueNonEmpty(paths) {
-		info, statErr := os.Stat(path)
-		if statErr != nil || !info.Mode().IsRegular() {
+		artifact, retainErr := d.retainValidationArtifact(path)
+		if retainErr != nil {
 			continue
 		}
-		retainedPaths = append(retainedPaths, path)
-	}
-	for index := range retainedPaths {
-		artifacts = append(artifacts, domain.WorkflowArtifactReference{
-			Label: "validation report", Reference: fmt.Sprintf("validation:%s/report/%d", request.RequestID, index+1),
-		})
+		artifacts = append(artifacts, artifact)
 	}
 	contextPacket, err := domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
 		Role: domain.WorkflowRoleValidator, IssueID: issueID, ScopeID: scopeID, SourceRevision: request.SourceRevision,
@@ -178,7 +175,7 @@ func (d *Daemon) validationRequestSuccessResponse(req protocol.RequestEnvelope, 
 	summary, err := domain.BuildWorkflowResultSummary(domain.WorkflowResultInput{
 		Role: domain.WorkflowRoleValidator, IssueID: issueID, ScopeID: scopeID, SourceRevision: request.SourceRevision,
 		Status: string(request.State), Outcome: request.Outcome, FailureSummary: request.Evidence.FailureSummary,
-		ArtifactLinks: artifacts, OutputPresent: request.Evidence.FailureSummary != "" || len(paths) > 0,
+		ArtifactLinks: artifacts, OutputPresent: outputPresent,
 	})
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "build bounded validation result: "+err.Error()), nil
@@ -189,6 +186,100 @@ func (d *Daemon) validationRequestSuccessResponse(req protocol.RequestEnvelope, 
 	responseRequest.Outcome = ""
 	responseRequest.Evidence = domain.ValidationEvidence{}
 	return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: responseRequest, Context: contextPacket, Summary: summary})
+}
+
+func (d *Daemon) validationArtifactRoot() string {
+	base := strings.TrimSpace(d.cfg.LockPath)
+	if base != "" {
+		return filepath.Join(filepath.Dir(base), "artifacts", "validation", "sha256")
+	}
+	repoDir := strings.TrimSpace(d.cfg.RepoDir)
+	if repoDir == "" && d.operationRuntime != nil {
+		repoDir = strings.TrimSpace(d.operationRuntime.repoDir)
+	}
+	return filepath.Join(repoDir, ".azedarach", "artifacts", "validation", "sha256")
+}
+
+// retainValidationArtifact creates an immutable, content-addressed copy before
+// a result claims that command output was retained. The opaque reference is
+// resolvable independently of the caller-owned source path.
+func (d *Daemon) retainValidationArtifact(source string) (domain.WorkflowArtifactReference, error) {
+	in, err := os.Open(strings.TrimSpace(source))
+	if err != nil {
+		return domain.WorkflowArtifactReference{}, err
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return domain.WorkflowArtifactReference{}, fmt.Errorf("validation artifact source is not a regular file")
+	}
+	root := d.validationArtifactRoot()
+	if err = os.MkdirAll(root, 0o700); err != nil {
+		return domain.WorkflowArtifactReference{}, err
+	}
+	tmp, err := os.CreateTemp(root, ".staged-*")
+	if err != nil {
+		return domain.WorkflowArtifactReference{}, err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	hash := sha256.New()
+	if _, err = io.Copy(io.MultiWriter(tmp, hash), in); err != nil {
+		tmp.Close()
+		return domain.WorkflowArtifactReference{}, err
+	}
+	if err = tmp.Sync(); err != nil {
+		tmp.Close()
+		return domain.WorkflowArtifactReference{}, err
+	}
+	if err = tmp.Close(); err != nil {
+		return domain.WorkflowArtifactReference{}, err
+	}
+	digest := fmt.Sprintf("%x", hash.Sum(nil))
+	if err = os.Chmod(tmpPath, 0o400); err != nil {
+		return domain.WorkflowArtifactReference{}, err
+	}
+	target := filepath.Join(root, digest)
+	if err = os.Rename(tmpPath, target); err != nil {
+		return domain.WorkflowArtifactReference{}, err
+	}
+	if dir, openErr := os.Open(root); openErr == nil {
+		err = dir.Sync()
+		_ = dir.Close()
+		if err != nil {
+			return domain.WorkflowArtifactReference{}, err
+		}
+	}
+	return domain.WorkflowArtifactReference{Label: "validation report", Reference: "artifact:sha256/" + digest, Digest: "sha256:" + digest}, nil
+}
+
+func (d *Daemon) resolveValidationArtifact(reference string) (string, error) {
+	const prefix = "artifact:sha256/"
+	digest := strings.TrimPrefix(strings.TrimSpace(reference), prefix)
+	if len(digest) != sha256.Size*2 || prefix+digest != strings.TrimSpace(reference) {
+		return "", fmt.Errorf("invalid validation artifact reference")
+	}
+	for _, char := range digest {
+		if !strings.ContainsRune("0123456789abcdef", char) {
+			return "", fmt.Errorf("invalid validation artifact digest")
+		}
+	}
+	path := filepath.Join(d.validationArtifactRoot(), digest)
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("validation artifact unavailable")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("validation artifact unavailable")
+	}
+	hash := sha256.New()
+	_, copyErr := io.Copy(hash, file)
+	closeErr := file.Close()
+	if copyErr != nil || closeErr != nil || fmt.Sprintf("%x", hash.Sum(nil)) != digest {
+		return "", fmt.Errorf("validation artifact digest mismatch")
+	}
+	return path, nil
 }
 
 func (d *Daemon) validatePublicationEvidenceIssue(ctx context.Context, projectID, issueID string) error {

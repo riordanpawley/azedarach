@@ -643,6 +643,9 @@ func TestProjectOrchestrationRejectsDirectStartOfParentedTicket(t *testing.T) {
 	if result.Skipped[childID] != "outside-project-root-candidate-scope" || len(result.Started) != 0 {
 		t.Fatalf("direct child start result = %+v", result)
 	}
+	if len(result.Results) != 1 || result.Results[0].Summary.Role != domain.WorkflowRoleWorker || result.Results[0].Summary.Status != "skipped" {
+		t.Fatalf("bounded worker result = %+v", result.Results)
+	}
 }
 
 func TestRootedOrchestrationReviewQueueStopsAtDirectChildren(t *testing.T) {

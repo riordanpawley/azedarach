@@ -956,6 +956,9 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	if len(result.Returned) != 1 || result.Returned[0] != issueID || len(result.Launched) != 0 || len(result.Pending) != 0 || len(result.Failed) != 0 {
 		t.Fatalf("return result = %+v", result)
 	}
+	if len(result.Results) != 1 || result.Results[0].Summary.Role != domain.WorkflowRoleReviewer || result.Results[0].Summary.Status != "returned" {
+		t.Fatalf("bounded reviewer result = %+v", result.Results)
+	}
 	task, err := client.GetWithRuntime(ctx, "project", issueID)
 	if err != nil {
 		t.Fatal(err)
@@ -1771,6 +1774,9 @@ func TestReviewAcceptTrustsDecisionOverInternalReviewArtifactWithoutTreatingArti
 	}
 	if len(result.Failed) != 0 || len(result.Closed) != 1 || result.Closed[0] != issueID {
 		t.Fatalf("result = %+v, want authoritative tracking-only close", result)
+	}
+	if len(result.Results) != 1 || result.Results[0].Summary.Role != domain.WorkflowRoleIntegrator || result.Results[0].Summary.Status != "completed" {
+		t.Fatalf("bounded integrator result = %+v", result.Results)
 	}
 	after, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{})
 	if err != nil {

@@ -308,6 +308,14 @@ type OrchestrationIntentResult struct {
 	Routed       []OrchestrationRouteResult    `json:"routed,omitempty"`
 	Skipped      map[string]string             `json:"skipped,omitempty"`
 	Failed       map[string]string             `json:"failed,omitempty"`
+	Results      []WorkflowPhaseResult         `json:"result_summaries,omitempty"`
+}
+
+// WorkflowPhaseResult binds a bounded phase result to the issue whose raw
+// orchestration fields were deliberately excluded from the response.
+type WorkflowPhaseResult struct {
+	IssueID string                       `json:"issue_id"`
+	Summary domain.WorkflowResultSummary `json:"summary"`
 }
 
 type OrchestrationRouteResult struct {

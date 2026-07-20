@@ -10294,6 +10294,20 @@ func TestBuildStartWorkPromptWithContextCarriesBoundedExactRevisionPacket(t *tes
 	}
 }
 
+func TestBuildStartWorkPromptWithContextDoesNotBypassPacketRedactionThroughTitle(t *testing.T) {
+	task := domain.Task{ID: naming.IssueID("secret-title"), Title: "deploy token=never-include", Type: domain.TypeTask}
+	prompt, err := buildStartWorkPromptWithContext(task, "candidate-deadbeef", false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(prompt, "never-include") || strings.Contains(prompt, task.Title) {
+		t.Fatalf("active launch prompt leaked rejected title: %s", prompt)
+	}
+	if !strings.Contains(prompt, "work on issue secret-title (task): secret-title") {
+		t.Fatalf("active launch prompt did not use issue fallback: %s", prompt)
+	}
+}
+
 func TestBuildStartWorkPromptOmitsMailboxGuidanceForStandaloneTask(t *testing.T) {
 	prompt := buildStartWorkPrompt("az-42", "task", "Fix startup shell", false, "")
 	if !strings.Contains(prompt, "Role: contributor") {

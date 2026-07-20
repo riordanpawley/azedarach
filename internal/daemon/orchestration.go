@@ -1549,7 +1549,56 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	if err := completeRequestedOrchestrationStarts(ctx, issueClient, requestedIntents, nil); err != nil {
 		return protocol.OrchestrationIntentResult{}, err
 	}
+	result.Results = buildOrchestrationResultSummaries(result, scopeTasks, domain.WorkflowRoleWorker, nil)
 	return result, nil
+}
+
+func buildOrchestrationResultSummaries(result protocol.OrchestrationIntentResult, tasks []domain.Task, defaultRole domain.WorkflowRole, revisions map[string]string) []protocol.WorkflowPhaseResult {
+	taskByID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		taskByID[task.ID.String()] = task
+	}
+	returned := workflowStringSet(result.Returned)
+	closed := workflowStringSet(result.Closed)
+	started := workflowStringSet(result.Started)
+	out := make([]protocol.WorkflowPhaseResult, 0, len(result.Requested))
+	for _, issueID := range result.Requested {
+		task, ok := taskByID[issueID]
+		if !ok {
+			continue
+		}
+		role := defaultRole
+		if defaultRole == domain.WorkflowRoleWorker && task.Type == domain.TypeEpic {
+			role = domain.WorkflowRoleIntegrator
+		}
+		status, outcome, failure := "skipped", result.Skipped[issueID], result.Failed[issueID]
+		if failure != "" {
+			status = "failed"
+		} else if _, ok := started[issueID]; ok {
+			status = "started"
+		} else if _, ok := returned[issueID]; ok {
+			status = "returned"
+		} else if _, ok := closed[issueID]; ok {
+			status = "completed"
+		}
+		revision := domain.WorkflowIssueContextRevision(task)
+		if exact := strings.TrimSpace(revisions[issueID]); exact != "" {
+			revision = exact
+		}
+		summary, err := domain.BuildWorkflowResultSummary(domain.WorkflowResultInput{Role: role, IssueID: issueID, SourceRevision: revision, Status: status, Outcome: outcome, FailureSummary: failure})
+		if err == nil {
+			out = append(out, protocol.WorkflowPhaseResult{IssueID: issueID, Summary: summary})
+		}
+	}
+	return out
+}
+
+func workflowStringSet(values []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		out[value] = struct{}{}
+	}
+	return out
 }
 
 func completeRequestedOrchestrationStarts(ctx context.Context, issueClient *issues.Client, requestedIntents []issues.RequestedOrchestrationStart, cause error) error {

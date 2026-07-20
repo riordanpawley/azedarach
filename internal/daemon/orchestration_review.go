@@ -792,6 +792,24 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 			result.Failed[issueID] = actionErr.Error()
 		}
 	}
+	tasks := make([]domain.Task, 0, len(requested))
+	revisions := make(map[string]string, len(requested))
+	for _, issueID := range requested {
+		if task, err := issueClient.GetWithRuntime(ctx, projectID, issueID); err == nil {
+			tasks = append(tasks, task)
+		}
+		if inspection, ok := queue[issueID]; ok {
+			revisions[issueID] = strings.TrimSpace(inspection.HeadRevision)
+			if revisions[issueID] == "" {
+				revisions[issueID] = strings.TrimSpace(inspection.SourceOID)
+			}
+		}
+	}
+	role := domain.WorkflowRoleReviewer
+	if request.Kind == protocol.OrchestrationIntentReviewAccept {
+		role = domain.WorkflowRoleIntegrator
+	}
+	result.Results = buildOrchestrationResultSummaries(result, tasks, role, revisions)
 	return result, nil
 }
 
