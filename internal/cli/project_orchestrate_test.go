@@ -72,6 +72,20 @@ func TestParseOrchestrateReviewArgsEnforcesDecisionShape(t *testing.T) {
 	if returned.Action != "return" || len(returned.Findings) != 2 || returned.Severity != "medium" || !returned.RestartWorker {
 		t.Fatalf("return options = %+v", returned)
 	}
+	for _, reviewPass := range []string{
+		`{"verdict":"returned","angle":"concurrency","reused_layers":[],"broader_invalidation":false,"matrix":{"type":"stateful","covered_cells":["recovery"]}}`,
+		`{"verdict":"returned","angle":"concurrency","reused_layers":[],"affected_invariants":[],"broader_invalidation":false,"matrix":{"type":"stateful","covered_cells":["recovery"]}}`,
+		`{"verdict":"returned","angle":"concurrency","reused_layers":[],"affected_invariants":["unknown.invariant"],"broader_invalidation":false,"matrix":{"type":"stateful","covered_cells":["recovery"]}}`,
+		`{"verdict":"returned","angle":"concurrency","reused_layers":[],"affected_invariants":["task.publication_queue","unknown.invariant"],"broader_invalidation":false,"matrix":{"type":"stateful","covered_cells":["recovery"]}}`,
+	} {
+		var decoded protocol.OrchestrationReviewPass
+		if err := json.Unmarshal([]byte(reviewPass), &decoded); err != nil {
+			t.Fatalf("decode JSON review pass: %v", err)
+		}
+		if err := validateReturnedReviewPass(decoded); err == nil {
+			t.Fatalf("invalid JSON review pass succeeded: %s", reviewPass)
+		}
+	}
 	for _, tt := range []struct {
 		action string
 		args   []string
@@ -107,6 +121,13 @@ func TestValidateReturnedReviewPassRequiresPresenceAndAffectedInvariant(t *testi
 	emptyInvariants.AffectedInvariants = []string{}
 	if err := validateReturnedReviewPass(emptyInvariants); err == nil {
 		t.Fatal("empty affected_invariants succeeded")
+	}
+	for _, invariants := range [][]string{{"unknown.invariant"}, {"task.publication_queue", "unknown.invariant"}, {""}} {
+		invalid := valid
+		invalid.AffectedInvariants = invariants
+		if err := validateReturnedReviewPass(invalid); err == nil {
+			t.Fatalf("invalid affected_invariants %v succeeded", invariants)
+		}
 	}
 	broaderInvalidation := valid
 	broader := true

@@ -237,6 +237,11 @@ func validateReturnedReviewPass(reviewPass protocol.OrchestrationReviewPass) err
 	if strings.TrimSpace(reviewPass.Verdict) != "returned" || strings.TrimSpace(reviewPass.Angle) == "" || strings.TrimSpace(reviewPass.Matrix.Type) == "" || len(reviewPass.Matrix.CoveredCells)+len(reviewPass.Matrix.SkippedCells) == 0 || reviewPass.ReusedLayers == nil || !containsNonEmptyString(reviewPass.AffectedInvariants) || reviewPass.BroaderInvalidation == nil {
 		return fmt.Errorf("--review-pass must record returned verdict, angle, reused layers, affected invariants, explicit broader_invalidation, and covered or deliberately skipped matrix cells")
 	}
+	for _, invariant := range reviewPass.AffectedInvariants {
+		if value := strings.TrimSpace(invariant); value == "" || !protocol.KnownDaemonInvariant(value) {
+			return fmt.Errorf("--review-pass affected invariant %q is not canonical", invariant)
+		}
+	}
 	return nil
 }
 

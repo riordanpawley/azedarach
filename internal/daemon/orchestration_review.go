@@ -75,13 +75,29 @@ func validateOrchestrationReviewIntent(request protocol.OrchestrationIntentReque
 		if request.ReviewPass == nil || request.ReviewPass.BroaderInvalidation == nil {
 			return fmt.Errorf("review-return intent requires an explicit broader-invalidation judgment")
 		}
-		if len(uniqueNonEmpty(request.ReviewPass.AffectedInvariants)) == 0 {
-			return fmt.Errorf("review-return intent requires at least one affected invariant")
+		if err := validateReviewAffectedInvariants(request.ReviewPass.AffectedInvariants); err != nil {
+			return fmt.Errorf("review-return intent affected invariants: %w", err)
 		}
 		return nil
 	default:
 		return fmt.Errorf("unsupported orchestration intent %q", request.Kind)
 	}
+}
+
+func validateReviewAffectedInvariants(values []string) error {
+	if len(values) == 0 {
+		return fmt.Errorf("require at least one canonical invariant")
+	}
+	for _, value := range values {
+		invariant := strings.TrimSpace(value)
+		if invariant == "" {
+			return fmt.Errorf("must not contain an empty invariant")
+		}
+		if !protocol.KnownDaemonInvariant(invariant) {
+			return fmt.Errorf("unknown invariant %q", invariant)
+		}
+	}
+	return nil
 }
 
 func (a daemonOrchestrationAuthority) reviewQueue(ctx context.Context, projectID string, request protocol.OrchestrationSnapshotRequest, tasks []domain.Task) ([]protocol.OrchestrationReview, error) {
@@ -501,7 +517,7 @@ func reviewCheckpointSemantics(payload map[string]any) ([]protocol.Orchestration
 	findingsOK := decodeReviewCheckpointValue(payload["review_unique_findings"], &findings) && len(findings) > 0
 	matrixOK := decodeReviewCheckpointValue(payload["review_matrix"], &matrix) && strings.TrimSpace(matrix.Type) != "" && len(matrix.CoveredCells)+len(matrix.SkippedCells) > 0
 	reusedOK := decodeReviewCheckpointValue(payload["review_reused_layers"], &reused)
-	affectedOK := decodeReviewCheckpointValue(payload["review_affected_invariants"], &affected)
+	affectedOK := decodeReviewCheckpointValue(payload["review_affected_invariants"], &affected) && validateReviewAffectedInvariants(affected) == nil
 	seenFindings := make(map[string]struct{}, len(findings))
 	for _, finding := range findings {
 		key := strings.ToLower(strings.TrimSpace(finding.Severity)) + "\x00" + strings.TrimSpace(finding.Finding)

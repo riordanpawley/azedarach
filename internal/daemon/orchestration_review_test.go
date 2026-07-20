@@ -177,6 +177,12 @@ func TestReviewCheckpointSemanticsFailClosed(t *testing.T) {
 		{name: "broader invalidation", fallback: "checkpoint_broader_invalidation", mutate: func(p map[string]any) { p["review_broader_invalidation"] = true }},
 		{name: "malformed findings", fallback: "checkpoint_malformed", mutate: func(p map[string]any) { p["review_unique_findings"] = "not-findings" }},
 		{name: "missing reused layers", fallback: "checkpoint_malformed", mutate: func(p map[string]any) { delete(p, "review_reused_layers") }},
+		{name: "missing affected invariants", fallback: "checkpoint_malformed", mutate: func(p map[string]any) { delete(p, "review_affected_invariants") }},
+		{name: "empty affected invariants", fallback: "checkpoint_malformed", mutate: func(p map[string]any) { p["review_affected_invariants"] = []string{} }},
+		{name: "unknown affected invariant", fallback: "checkpoint_malformed", mutate: func(p map[string]any) { p["review_affected_invariants"] = []string{"unknown.invariant"} }},
+		{name: "mixed affected invariants", fallback: "checkpoint_malformed", mutate: func(p map[string]any) {
+			p["review_affected_invariants"] = []string{"task.publication_queue", "unknown.invariant"}
+		}},
 		{name: "duplicate reused layers", fallback: "checkpoint_malformed", mutate: func(p map[string]any) { p["review_reused_layers"] = []string{"patch", "PATCH"} }},
 		{name: "duplicate findings", fallback: "checkpoint_malformed", mutate: func(p map[string]any) {
 			p["review_unique_findings"] = []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "same"}, {Severity: "HIGH", Finding: "same"}}
@@ -380,7 +386,9 @@ func TestReviewIntentValidationRejectsNonActionableOrConflictingOutcomes(t *test
 		{name: "return without findings", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn}, want: "requires at least one"},
 		{name: "empty finding", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high"}}}, want: "requires finding text"},
 		{name: "missing broader invalidation", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: &protocol.OrchestrationReviewPass{AffectedInvariants: []string{"task.publication_queue"}}}, want: "explicit broader-invalidation"},
-		{name: "empty affected invariants", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: &protocol.OrchestrationReviewPass{BroaderInvalidation: &noBroaderInvalidation}}, want: "at least one affected invariant"},
+		{name: "empty affected invariants", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: &protocol.OrchestrationReviewPass{BroaderInvalidation: &noBroaderInvalidation}}, want: "at least one canonical invariant"},
+		{name: "unknown affected invariant", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: &protocol.OrchestrationReviewPass{AffectedInvariants: []string{"unknown.invariant"}, BroaderInvalidation: &noBroaderInvalidation}}, want: "unknown invariant"},
+		{name: "mixed affected invariants", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: &protocol.OrchestrationReviewPass{AffectedInvariants: []string{"task.publication_queue", "unknown.invariant"}, BroaderInvalidation: &noBroaderInvalidation}}, want: "unknown invariant"},
 		{name: "accept with findings", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewAccept, Findings: []protocol.OrchestrationReviewFinding{{Finding: "conflict"}}}, want: "cannot include findings"},
 	}
 	for _, tt := range tests {
