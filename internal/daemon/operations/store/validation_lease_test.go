@@ -551,6 +551,32 @@ func TestLatestAggregateValidationRetainsMachineEvidence(t *testing.T) {
 	assert.Equal(t, want, got.Evidence)
 }
 
+func TestLatestReviewValidationSkipsLegacyAuthorityRows(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
+	review := reusableValidationAcquire("review-complete")
+	review.Purpose = domain.ValidationPurposeReviewEvidence
+	review.ReviewerID = "reviewer"
+	review.ReviewerKind = domain.ReviewerOwnerKindOrchestrator
+	review.ReviewEpochEventID = 42
+	review.PublicationOperationID = "publication"
+	review.AcceptedReviewEventID = 43
+	review.AcceptedPublicationOperationID = "publication"
+	complete, err := store.AcquireValidation(ctx, review, now)
+	require.NoError(t, err)
+
+	db, err := store.dbHandle()
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `UPDATE daemon_validation_requests SET reviewer_kind='', publication_operation_id='', accepted_review_event_id=0, accepted_publication_operation_id='' WHERE request_id=?`, complete.RequestID)
+	require.NoError(t, err)
+
+	latest, err := store.LatestReviewValidation(ctx, "project", review.IssueID, now.Add(time.Second), time.Minute)
+	require.NoError(t, err)
+	assert.Nil(t, latest, "legacy review evidence must not authorize readiness")
+}
+
 func TestValidationLeaseRejectsSpoofedMachineEvidenceIdentity(t *testing.T) {
 	ctx := context.Background()
 	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)

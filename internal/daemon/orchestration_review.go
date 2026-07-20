@@ -641,6 +641,21 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 				result.Failed[issueID] = failure
 				continue
 			}
+			admission, admissionErr := reviewAdmissionPinFromInspection(inspection)
+			if admissionErr != nil || admission.ReviewEpochEventID != storedPin.ReviewEpochEventID {
+				result.Failed[issueID] = "restore accepted reviewer lease: accepted review epoch no longer matches current admission"
+				continue
+			}
+			acceptedTask, taskErr := issueClient.GetWithRuntime(ctx, projectID, issueID)
+			if taskErr != nil {
+				result.Failed[issueID] = "inspect accepted reviewer lease: " + taskErr.Error()
+				continue
+			}
+			lease := coordinationLease(acceptedTask, domain.CoordinationLeaseReview)
+			if lease == nil || lease.IsExpired(time.Now().UTC()) || !storedPin.Reviewer.Matches(lease.OwnerID, lease.OwnerKind) {
+				result.Failed[issueID] = "restore accepted reviewer lease: exact typed accepted reviewer lease is unavailable"
+				continue
+			}
 			var target taskMergeBaseTargetResult
 			queueAvailable := integrateBeforeClose && a.daemon.operationRuntime != nil && a.daemon.operationRuntime.store != nil && a.daemon.operationRuntime.manager != nil && a.daemon.worktreeAdapter != nil && a.daemon.git != nil
 			if queueAvailable {
@@ -1253,7 +1268,7 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 		return false, fmt.Errorf("accepted review requires structured high-context-risk closeout evidence")
 	}
 	integrateBeforeClose := inspection.Evidence != nil || strings.TrimSpace(inspection.WorktreePath) != ""
-	pin, err := a.captureAcceptedReviewPin(ctx, projectID, candidatePath, inspection, integrateBeforeClose)
+	pin, err := a.captureAcceptedReviewPin(ctx, projectID, candidatePath, inspection, integrateBeforeClose, request.ActorID)
 	if err != nil {
 		return false, err
 	}
@@ -1374,8 +1389,12 @@ func (d *Daemon) exactReviewedCandidateRevision(ctx context.Context, projectID s
 	return candidatePath, currentHead, nil
 }
 
-func (a daemonOrchestrationAuthority) captureAcceptedReviewPin(ctx context.Context, projectID, repoDir string, inspection protocol.OrchestrationReview, integrateBeforeClose bool) (acceptedReviewPin, error) {
-	pin := acceptedReviewPin{ReviewEpochEventID: inspection.ReviewEpochEventID}
+func (a daemonOrchestrationAuthority) captureAcceptedReviewPin(ctx context.Context, projectID, repoDir string, inspection protocol.OrchestrationReview, integrateBeforeClose bool, reviewerID string) (acceptedReviewPin, error) {
+	reviewer, err := domain.CanonicalReviewerIdentity(reviewerID, domain.ReviewerOwnerKindOrchestrator)
+	if err != nil {
+		return acceptedReviewPin{}, fmt.Errorf("capture accepted reviewer authority: %w", err)
+	}
+	pin := acceptedReviewPin{Reviewer: reviewer, ReviewEpochEventID: inspection.ReviewEpochEventID}
 	if pin.ReviewEpochEventID <= 0 {
 		return pin, fmt.Errorf("capture accepted review authority: review epoch is missing")
 	}
@@ -1671,7 +1690,7 @@ func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context
 	if err != nil {
 		return err
 	}
-	payload := map[string]any{"outcome": outcome, "actor_id": request.ActorID, "intent_key": request.IntentKey, "request_fingerprint": fingerprint, "findings": request.Findings}
+	payload := map[string]any{"outcome": outcome, "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "intent_key": request.IntentKey, "request_fingerprint": fingerprint, "findings": request.Findings}
 	for key, value := range metadata {
 		payload[key] = value
 	}

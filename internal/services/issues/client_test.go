@@ -2913,7 +2913,7 @@ func TestClient_ReviewLeaseFenceIsScopedToCurrentReviewRequestEpochAcrossClients
 		Type:          domain.IssueEventReviewCompleted,
 		Source:        "daemon-orchestration",
 		SourceCommand: "review-accept",
-		Payload:       map[string]any{"outcome": "accepted", "actor_id": "reviewer-a"},
+		Payload:       map[string]any{"outcome": "accepted", "actor_id": "reviewer-a", "actor_kind": domain.ReviewerOwnerKindOrchestrator},
 	})
 	require.NoError(t, err)
 	_, err = reviewer.ReleaseOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-a", Purpose: domain.CoordinationLeaseReview})
@@ -2945,7 +2945,7 @@ func TestClient_ReviewLeaseFenceIsScopedToCurrentReviewRequestEpochAcrossClients
 		Type:          domain.IssueEventReviewCompleted,
 		Source:        "daemon-orchestration",
 		SourceCommand: "review-accept",
-		Payload:       map[string]any{"outcome": "accepted", "actor_id": "reviewer-b"},
+		Payload:       map[string]any{"outcome": "accepted", "actor_id": "reviewer-b", "actor_kind": domain.ReviewerOwnerKindOrchestrator},
 	})
 	require.NoError(t, err)
 	_, err = competitor.ReleaseOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-b", Purpose: domain.CoordinationLeaseReview})
@@ -2957,7 +2957,7 @@ func TestClient_ReviewLeaseFenceIsScopedToCurrentReviewRequestEpochAcrossClients
 		Type:          domain.IssueEventReviewCompleted,
 		Source:        "daemon-orchestration",
 		SourceCommand: "review-accept",
-		Payload:       map[string]any{"outcome": "integration_failed", "actor_id": "reviewer-b"},
+		Payload:       map[string]any{"outcome": "integration_failed", "actor_id": "reviewer-b", "actor_kind": domain.ReviewerOwnerKindOrchestrator},
 	})
 	require.NoError(t, err)
 	lease, err = reviewer.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-a", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview})

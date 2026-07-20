@@ -308,9 +308,30 @@ func ValidationRequestCanSatisfy(source ValidationRequest, target ValidationAcqu
 	}
 	if target.Scope == ValidationScopeRepository && target.Purpose == ValidationPurposePushGate {
 		return (source.Scope == ValidationScopeRepository && source.Purpose == ValidationPurposePushGate) ||
-			(source.Scope == ValidationScopeTicket && source.Purpose == ValidationPurposeReviewEvidence && source.ReviewerID != "" && source.ReviewEpochEventID > 0)
+			(source.Scope == ValidationScopeTicket && source.Purpose == ValidationPurposeReviewEvidence && source.HasCompleteReviewAuthority())
 	}
-	return source.Scope == target.Scope && source.Purpose == target.Purpose && source.IssueID == target.IssueID && source.ReviewerID == target.ReviewerID && source.ReviewerKind == target.ReviewerKind && source.ReviewEpochEventID == target.ReviewEpochEventID && source.PublicationOperationID == target.PublicationOperationID && source.AcceptedReviewEventID == target.AcceptedReviewEventID && source.AcceptedPublicationOperationID == target.AcceptedPublicationOperationID
+	if source.Scope != target.Scope || source.Purpose != target.Purpose || source.IssueID != target.IssueID {
+		return false
+	}
+	if target.Purpose != ValidationPurposeReviewEvidence {
+		return source.ReviewerID == target.ReviewerID && source.ReviewerKind == target.ReviewerKind && source.ReviewEpochEventID == target.ReviewEpochEventID && source.PublicationOperationID == target.PublicationOperationID && source.AcceptedReviewEventID == target.AcceptedReviewEventID && source.AcceptedPublicationOperationID == target.AcceptedPublicationOperationID
+	}
+	sourceReviewer, sourceOK := source.reviewAuthority()
+	targetReviewer, targetErr := CanonicalReviewerIdentity(target.ReviewerID, target.ReviewerKind)
+	return sourceOK && targetErr == nil && sourceReviewer == targetReviewer && source.ReviewEpochEventID == target.ReviewEpochEventID && source.PublicationOperationID == target.PublicationOperationID && source.AcceptedReviewEventID == target.AcceptedReviewEventID && source.AcceptedPublicationOperationID == target.AcceptedPublicationOperationID
+}
+
+// HasCompleteReviewAuthority reports whether persisted validation evidence has
+// every typed identity and immutable acceptance binding required to authorize
+// publication. Legacy rows intentionally fail closed.
+func (a ValidationRequest) HasCompleteReviewAuthority() bool {
+	_, ok := a.reviewAuthority()
+	return ok
+}
+
+func (a ValidationRequest) reviewAuthority() (ReviewerIdentity, bool) {
+	reviewer, err := CanonicalReviewerIdentity(a.ReviewerID, a.ReviewerKind)
+	return reviewer, err == nil && a.ReviewEpochEventID > 0 && strings.TrimSpace(a.PublicationOperationID) != "" && a.AcceptedReviewEventID > 0 && strings.TrimSpace(a.AcceptedPublicationOperationID) != ""
 }
 
 func validSafeValidation(profile, command string) bool {

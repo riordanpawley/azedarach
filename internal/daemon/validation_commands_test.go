@@ -333,7 +333,8 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 		RequestID: "merge-review", LeaseToken: "secret", ProjectID: projectID, IssueID: issueID,
 		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence,
 		IsolationMode: "worktree", EnvironmentFingerprint: "node-consumer", Profile: "consumer-integration", Command: "npm test",
-		SourceRevision: sourceOID, ReviewerID: "reviewer", ReviewEpochEventID: 1, TTL: time.Minute,
+		SourceRevision: sourceOID, ReviewerID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: 1,
+		PublicationOperationID: "publication-close-exact", AcceptedReviewEventID: 2, AcceptedPublicationOperationID: "publication-close-exact", TTL: time.Minute,
 	}, started)
 	require.NoError(t, err)
 	_, err = runtime.store.FinishValidation(ctx, "merge-review", "secret", domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{
@@ -356,8 +357,6 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 		Requested: true, Integrated: true, ConfiguredBaseTarget: true, TargetID: "base", SourceBranch: "feature", TargetBranch: "main",
 		BaseOID: baseOID, SourceOID: sourceOID, TargetOID: targetOID, ValidationAttempts: merge.ValidationAttempts,
 	}
-	_, _, err = d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, "portable-v1", "npm run verify-publication", "node-consumer")
-	require.ErrorContains(t, err, "missing publication operation identity", "ticket-only review evidence must not authorize task close")
 	_, err = runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{
 		RequestID: "candidate-authority", LeaseToken: "candidate-authority-secret", ProjectID: projectID,
 		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate,
@@ -382,12 +381,14 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	require.Equal(t, domain.ValidationExecutionReused, push.Execution)
 	publication := domain.PublicationOperation{
 		OperationID: "publication-close-exact", ProjectID: projectID, IssueID: issueID, IntentKey: "review-accept",
-		RequestFingerprint: "fingerprint", ActorID: "reviewer", TargetID: "base", TargetBranch: "main",
+		RequestFingerprint: "fingerprint", ActorID: "reviewer", ActorKind: domain.ReviewerOwnerKindOrchestrator,
+		ReviewEpochEventID: 1, AcceptedReviewEventID: 2, AcceptedPublicationOperationID: "publication-close-exact", TargetID: "base", TargetBranch: "main",
 		SourceRevision: sourceOID, BaseRevision: baseOID, PolicyVersion: "portable-v1", EnvironmentFingerprint: "node-consumer",
 		ValidationCommand: "npm run verify-publication", State: domain.PublicationOperationQueued, CreatedAt: started,
 	}
 	mergedA := publication
 	mergedA.OperationID = "publication-merged-a"
+	mergedA.AcceptedPublicationOperationID = mergedA.OperationID
 	mergedA.IntentKey = "review-accept-a"
 	storedMergedA, _, err := runtime.store.EnqueuePublication(ctx, mergedA, "publication-merged-a")
 	require.NoError(t, err)
@@ -456,7 +457,7 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	require.NoError(t, err)
 	_, err = issueClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
-		Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "intent_key": publication.IntentKey, "request_fingerprint": publication.RequestFingerprint, "reviewed_source_oid": sourceOID, "publication_operation_id": publication.OperationID},
+		Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": publication.ReviewEpochEventID, "intent_key": publication.IntentKey, "request_fingerprint": publication.RequestFingerprint, "reviewed_source_oid": sourceOID, "publication_operation_id": publication.OperationID},
 	})
 	require.NoError(t, err)
 	resolvedOperation, resolvedValidation, err := d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, "portable-v1", "npm run verify-publication", "node-consumer")

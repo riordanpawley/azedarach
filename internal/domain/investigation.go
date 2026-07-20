@@ -139,7 +139,7 @@ func TrustedReviewOutcome(event IssueObservationEvent) (ReviewOutcome, bool) {
 	if command != "review-accept" && command != "review-return" {
 		return "", false
 	}
-	if strings.TrimSpace(stringValue(event.Payload["actor_id"])) == "" {
+	if _, err := CanonicalReviewerIdentity(stringValue(event.Payload["actor_id"]), stringValue(event.Payload["actor_kind"])); err != nil {
 		return "", false
 	}
 	outcome := ReviewOutcome(strings.TrimSpace(stringValue(event.Payload["outcome"])))

@@ -42,6 +42,34 @@ func TestValidationReviewEvidenceRequiresFullAuthorityIdentity(t *testing.T) {
 	assert.NoError(t, a.Validate())
 }
 
+func TestValidationReviewEvidenceCompatibilityFailsClosedWithoutExactAuthority(t *testing.T) {
+	target := validValidationAcquire()
+	source := ValidationRequest{
+		ProjectID: target.ProjectID, Class: target.Class, Scope: ValidationScopeTicket, Purpose: ValidationPurposeReviewEvidence,
+		Profile: target.Profile, Command: target.Command, SourceRevision: target.SourceRevision, IsolationMode: target.IsolationMode, EnvironmentFingerprint: target.EnvironmentFingerprint,
+		ReviewerID: "reviewer", ReviewerKind: ReviewerOwnerKindOrchestrator, ReviewEpochEventID: 42, PublicationOperationID: "publication", AcceptedReviewEventID: 43, AcceptedPublicationOperationID: "publication",
+	}
+	assert.True(t, ValidationRequestCanSatisfy(source, target))
+
+	for name, edit := range map[string]func(*ValidationRequest){
+		"legacy untyped reviewer": func(request *ValidationRequest) { request.ReviewerKind = "" },
+		"wrong reviewer kind":     func(request *ValidationRequest) { request.ReviewerKind = "agent" },
+		"missing current operation": func(request *ValidationRequest) {
+			request.PublicationOperationID = ""
+		},
+		"missing accepted event": func(request *ValidationRequest) { request.AcceptedReviewEventID = 0 },
+		"missing accepted operation": func(request *ValidationRequest) {
+			request.AcceptedPublicationOperationID = ""
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := source
+			edit(&candidate)
+			assert.False(t, ValidationRequestCanSatisfy(candidate, target))
+		})
+	}
+}
+
 func TestValidationDevelopmentDoesNotUseDaemonAdmission(t *testing.T) {
 	a := validValidationAcquire()
 	a.Scope, a.Purpose, a.IssueID = ValidationScopeTicket, ValidationPurposeDevelopment, "dnb"

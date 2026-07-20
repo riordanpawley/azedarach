@@ -470,20 +470,35 @@ func (s *SQLiteStore) LatestReviewValidation(ctx context.Context, projectID, iss
 	if err := expireAndReconcileValidationTx(ctx, tx, strings.TrimSpace(projectID), now.UTC(), ttl); err != nil {
 		return nil, err
 	}
-	request, err := scanValidationRequest(tx.QueryRowContext(ctx, validationSelect+` WHERE project_id=? AND issue_id=? AND class='aggregate' AND scope='ticket' AND purpose='review_evidence' ORDER BY sequence DESC LIMIT 1`, strings.TrimSpace(projectID), strings.TrimSpace(issueID)))
-	if errors.Is(err, sql.ErrNoRows) {
+	rows, err := tx.QueryContext(ctx, validationSelect+` WHERE project_id=? AND issue_id=? AND class='aggregate' AND scope='ticket' AND purpose='review_evidence' ORDER BY sequence DESC`, strings.TrimSpace(projectID), strings.TrimSpace(issueID))
+	if err != nil {
+		return nil, fmt.Errorf("query latest review validation: %w", err)
+	}
+	defer rows.Close()
+	var latest *domain.ValidationRequest
+	for rows.Next() {
+		request, scanErr := scanValidationRequest(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		if request.HasCompleteReviewAuthority() {
+			latest = &request
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if latest == nil {
 		if commitErr := tx.Commit(); commitErr != nil {
 			return nil, fmt.Errorf("commit latest aggregate validation reconciliation: %w", commitErr)
 		}
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit latest aggregate validation reconciliation: %w", err)
 	}
-	return &request, nil
+	return latest, nil
 }
 
 func (s *SQLiteStore) ValidationRequest(ctx context.Context, projectID, requestID string) (domain.ValidationRequest, error) {

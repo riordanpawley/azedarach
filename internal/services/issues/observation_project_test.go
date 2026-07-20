@@ -286,7 +286,7 @@ func TestListLatestIssueObservationEventsByIssueScopesAndRanksCandidates(t *test
 		t.Fatal(err)
 	}
 	for _, event := range []IssueObservationEventParams{
-		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"actor_id": "reviewer", "outcome": "accepted"}},
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator, "outcome": "accepted"}},
 		{Type: domain.IssueEventReviewCompleted, Source: " daemon-orchestration ", SourceCommand: " review-return ", Payload: map[string]any{"actor_id": "reviewer", "outcome": "returned"}},
 		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"actor_id": "reviewer", "outcome": "accepted"}},
 		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"actor_id": 42, "outcome": "returned"}},
@@ -468,7 +468,7 @@ func TestInvestigationAcceptancesScopeAuthorityToCurrentReviewEpoch(t *testing.T
 	if _, err := client.AppendIssueObservationEvent(ctx, humanID, IssueObservationEventParams{Type: domain.IssueEventHumanInputProvided, Source: "human", Payload: map[string]any{"investigation_findings_accepted": true}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.AppendIssueObservationEvent(ctx, internalID, IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"actor_id": "reviewer", "outcome": "accepted"}}); err != nil {
+	if _, err := client.AppendIssueObservationEvent(ctx, internalID, IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator, "outcome": "accepted"}}); err != nil {
 		t.Fatal(err)
 	}
 	acceptances, err = client.InvestigationAcceptances(ctx, tasks)

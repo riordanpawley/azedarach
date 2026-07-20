@@ -411,7 +411,7 @@ func TestCloseWithRuntimeReviewLeaseRequiresTrustedAcceptedActor(t *testing.T) {
 	for _, actor := range []string{"other-reviewer", "reviewer"} {
 		if _, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
 			Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept",
-			Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": actor},
+			Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": actor, "actor_kind": domain.ReviewerOwnerKindOrchestrator},
 		}); err != nil {
 			t.Fatal(err)
 		}

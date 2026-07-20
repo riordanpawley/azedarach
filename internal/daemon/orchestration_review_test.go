@@ -1775,15 +1775,15 @@ func TestReviewAcceptTrustsDecisionOverInternalReviewArtifactWithoutTreatingArti
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reopened.Failed) != 0 || len(reopened.Closed) != 1 || reopened.Closed[0] != issueID {
-		t.Fatalf("reopened retry = %+v, want current-state authoritative close", reopened)
+	if got := reopened.Failed[issueID]; !strings.Contains(got, "accepted review epoch no longer matches current admission") || len(reopened.Closed) != 0 {
+		t.Fatalf("reopened retry = %+v, want stale accepted epoch rejection", reopened)
 	}
 	task, err = client.GetWithRuntime(ctx, "project", issueID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task.Status != domain.StatusDone {
-		t.Fatalf("reopened review status = %s, want done after same-key recovery", task.Status)
+	if task.Status != domain.StatusOpen {
+		t.Fatalf("reopened review status = %s, want open after stale acceptance rejection", task.Status)
 	}
 }
 
@@ -1915,7 +1915,7 @@ func TestReviewAcceptSameIntentRecoversAfterCloseFailure(t *testing.T) {
 		Type:          domain.IssueEventReviewCompleted,
 		Source:        "daemon-orchestration",
 		SourceCommand: string(protocol.OrchestrationIntentReviewReturn),
-		Payload:       map[string]any{"actor_id": "orchestrator", "intent_key": "newer-return", "outcome": "returned"},
+		Payload:       map[string]any{"actor_id": "orchestrator", "actor_kind": domain.ReviewerOwnerKindOrchestrator, "intent_key": "newer-return", "outcome": "returned"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1976,7 +1976,21 @@ func TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion(t *t
 	}
 	request := protocol.OrchestrationIntentRequest{Scope: rootedScope, Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-review-batch", ActorID: "orchestrator", IssueIDs: ids, RepoDir: repoDir}
 	authority := daemonOrchestrationAuthority{daemon: d}
-	if err := authority.recordReviewOutcome(ctx, "project", ids[0], request, "accepted", ""); err != nil {
+	admission, err := client.CaptureReviewAdmissionPin(ctx, ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", ids[0], issues.OwnershipClaimParams{
+		OwnerID: request.ActorID, OwnerKind: domain.ReviewerOwnerKindOrchestrator, Purpose: domain.CoordinationLeaseReview,
+		ExpectedReviewAdmission: &admission, ExpectedParentIssueID: rootID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	params := issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
+		Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request), "review_epoch_event_id": admission.ReviewEpochEventID},
+	}
+	if _, err := client.AppendIssueObservationEventWithReviewAdmission(ctx, ids[0], params, admission, rootID, request.ActorID); err != nil {
 		t.Fatal(err)
 	}
 	result, err := authority.Apply(ctx, "project", request)
@@ -2049,8 +2063,8 @@ func TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState(t *tes
 	if task.Status != domain.StatusInReview {
 		t.Fatalf("failed integration task = %+v, want review state preserved", task)
 	}
-	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease != nil {
-		t.Fatalf("failed integration review lease = %+v, want released after durable acceptance", lease)
+	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease == nil || !(domain.ReviewerIdentity{OwnerID: "orchestrator", OwnerKind: domain.ReviewerOwnerKindOrchestrator}).Matches(lease.OwnerID, lease.OwnerKind) {
+		t.Fatalf("failed integration review lease = %+v, want accepted reviewer authority retained", lease)
 	}
 	reviewEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
 	if err != nil {
