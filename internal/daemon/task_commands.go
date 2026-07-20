@@ -3040,25 +3040,18 @@ func (d *Daemon) persistTaskCloseIntegrationReceipt(ctx context.Context, project
 	if receipt.TargetID == "" || receipt.SourceBranch == "" || receipt.TargetBranch == "" || receipt.BaseOID == "" || receipt.SourceOID == "" || receipt.TargetOID == "" {
 		return fmt.Errorf("integration result is missing exact typed target, base/source/target branch, or OID")
 	}
-	_, err := issueClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
-		Type:          domain.IssueEventTaskIntegrationCompleted,
-		Source:        "daemon-task-close",
-		SourceCommand: "integrate-before-close",
-		WorktreePath:  strings.TrimSpace(worktreePath),
-		Payload: map[string]any{
-			"project_id":               receipt.ProjectID,
-			"source_branch":            receipt.SourceBranch,
-			"target_branch":            receipt.TargetBranch,
-			"integrated":               receipt.Integrated,
-			"configured_base_target":   receipt.ConfiguredBaseTarget,
-			"target_id":                receipt.TargetID,
-			"base_oid":                 receipt.BaseOID,
-			"source_oid":               receipt.SourceOID,
-			"target_oid":               receipt.TargetOID,
-			"publication_operation_id": receipt.PublicationOperationID,
-		},
-	})
-	if err != nil {
+	if _, err := issueClient.AppendTaskIntegrationReceiptIfAbsent(ctx, taskID, issues.TaskIntegrationReceipt{
+		ProjectID:              receipt.ProjectID,
+		SourceBranch:           receipt.SourceBranch,
+		TargetBranch:           receipt.TargetBranch,
+		Integrated:             receipt.Integrated,
+		ConfiguredBaseTarget:   receipt.ConfiguredBaseTarget,
+		TargetID:               receipt.TargetID,
+		BaseOID:                receipt.BaseOID,
+		SourceOID:              receipt.SourceOID,
+		TargetOID:              receipt.TargetOID,
+		PublicationOperationID: receipt.PublicationOperationID,
+	}, worktreePath); err != nil {
 		return fmt.Errorf("persist exact integration receipt: %w", err)
 	}
 	return nil

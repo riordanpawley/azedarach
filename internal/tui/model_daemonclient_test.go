@@ -1907,8 +1907,9 @@ func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 				t.Fatalf("unmarshal close request: %v", err)
 			}
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-				TaskID: "az-4",
-				Status: string(domain.StatusDone),
+				TaskID:   "az-4",
+				Status:   string(domain.StatusDone),
+				Revision: 1,
 			})
 			if err != nil {
 				t.Fatalf("marshal close response: %v", err)
@@ -1996,8 +1997,9 @@ func TestTaskStatusCancelledRequiresCloseCleanupConfirmation(t *testing.T) {
 				t.Fatalf("unmarshal close request: %v", err)
 			}
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-				TaskID: "az-4",
-				Status: string(domain.StatusCancelled),
+				TaskID:   "az-4",
+				Status:   string(domain.StatusCancelled),
+				Revision: 1,
 			})
 			if err != nil {
 				t.Fatalf("marshal close response: %v", err)
@@ -2081,6 +2083,7 @@ func TestTaskStatusDoneCloseCleanChildrenConfirmationSetsDaemonOption(t *testing
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
 				TaskID:             "az-4",
 				Status:             string(domain.StatusDone),
+				Revision:           1,
 				AutoClosedChildren: []string{"az-child"},
 			})
 			if err != nil {
@@ -2143,6 +2146,7 @@ func TestTaskStatusDoneWithUnresolvedChildRejectsTargetOnlyConfirmation(t *testi
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
 				TaskID:             "az-4",
 				Status:             string(domain.StatusDone),
+				Revision:           1,
 				AutoClosedChildren: []string{"az-child"},
 			})
 			if err != nil {
@@ -2218,8 +2222,9 @@ func TestTaskStatusDoneUsesExtendedCloseTimeout(t *testing.T) {
 				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskClose)
 			}
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-				TaskID: "az-4",
-				Status: string(domain.StatusDone),
+				TaskID:   "az-4",
+				Status:   string(domain.StatusDone),
+				Revision: 1,
 			})
 			if err != nil {
 				t.Fatalf("marshal close response: %v", err)
@@ -2286,8 +2291,9 @@ func TestTaskStatusDoneSuccessKeepsOptimisticOverlayAcrossStaleHydration(t *test
 				}, nil
 			case daemonclient.CommandTaskClose:
 				respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-					TaskID: "az-4",
-					Status: string(domain.StatusDone),
+					TaskID:   "az-4",
+					Status:   string(domain.StatusDone),
+					Revision: 1,
 				})
 				if err != nil {
 					t.Fatalf("marshal close response: %v", err)
@@ -2377,8 +2383,9 @@ func TestSpaceFourYDoneKeepsOptimisticStatusAcrossStaleHydration(t *testing.T) {
 				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskClose)
 			}
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-				TaskID: "az-4",
-				Status: string(domain.StatusDone),
+				TaskID:   "az-4",
+				Status:   string(domain.StatusDone),
+				Revision: 1,
 			})
 			if err != nil {
 				t.Fatalf("marshal close response: %v", err)
@@ -2745,8 +2752,9 @@ func TestTaskStatusDoneFailureShowsRecoveryDialogWithRetryActions(t *testing.T) 
 				}, nil
 			}
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-				TaskID: "az-4",
-				Status: string(domain.StatusDone),
+				TaskID:   "az-4",
+				Status:   string(domain.StatusDone),
+				Revision: 1,
 			})
 			if err != nil {
 				t.Fatalf("marshal close response: %v", err)
@@ -2870,8 +2878,9 @@ func TestTaskStatusDoneFailureCanOverrideActiveSessionBlock(t *testing.T) {
 				}, nil
 			}
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-				TaskID: "az-4",
-				Status: string(domain.StatusDone),
+				TaskID:   "az-4",
+				Status:   string(domain.StatusDone),
+				Revision: 1,
 			})
 			if err != nil {
 				t.Fatalf("marshal close response: %v", err)
@@ -2958,8 +2967,9 @@ func TestCloseFailureRetryUsesFailedOperationProjectAfterProjectSwitch(t *testin
 			}
 			closeProjects = append(closeProjects, req.Meta.ProjectID.String())
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-				TaskID: "az-4",
-				Status: string(domain.StatusDone),
+				TaskID:   "az-4",
+				Status:   string(domain.StatusDone),
+				Revision: 1,
 			})
 			if err != nil {
 				t.Fatalf("marshal close response: %v", err)
@@ -3044,7 +3054,7 @@ func TestCloseFailureCreatesAncestorThenRetriesClose(t *testing.T) {
 					"worktree": map[string]any{"path": "/tmp/gat", "branch": "user/gat/parent", "issue_id": "gat"},
 				}
 			case daemonclient.CommandTaskClose:
-				body = daemonclient.TaskCloseResult{TaskID: "gav", Status: string(domain.StatusDone)}
+				body = daemonclient.TaskCloseResult{TaskID: "gav", Status: string(domain.StatusDone), Revision: 1}
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
@@ -3134,7 +3144,7 @@ func TestCloseFailureAcceptsInvestigationFindingsThenRetriesClose(t *testing.T) 
 					ID: 17, IssueID: "dhb", Type: domain.IssueEventHumanInputProvided, Source: "human", Payload: request.Payload,
 				}}
 			case daemonclient.CommandTaskClose:
-				body = daemonclient.TaskCloseResult{TaskID: "dhb", Status: string(domain.StatusDone)}
+				body = daemonclient.TaskCloseResult{TaskID: "dhb", Status: string(domain.StatusDone), Revision: 1}
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
@@ -12903,8 +12913,9 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 						t.Fatalf("close body = %+v, want integrate_before_close", body)
 					}
 					respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-						TaskID: body.TaskID,
-						Status: string(domain.StatusDone),
+						TaskID:   body.TaskID,
+						Status:   string(domain.StatusDone),
+						Revision: 1,
 					})
 					if err != nil {
 						t.Fatalf("marshal close response: %v", err)
@@ -13075,8 +13086,9 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 					t.Fatalf("close body = %+v, want az-1 cancelled without integration", body)
 				}
 				respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-					TaskID: "az-1",
-					Status: string(domain.StatusCancelled),
+					TaskID:   "az-1",
+					Status:   string(domain.StatusCancelled),
+					Revision: 1,
 				})
 				if err != nil {
 					t.Fatalf("marshal cancelled close response: %v", err)
@@ -13384,8 +13396,9 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 				}
 				closeBodies = append(closeBodies, body)
 				respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-					TaskID: body.TaskID,
-					Status: string(domain.StatusDone),
+					TaskID:   body.TaskID,
+					Status:   string(domain.StatusDone),
+					Revision: 1,
 				})
 				if err != nil {
 					t.Fatalf("marshal close response: %v", err)
