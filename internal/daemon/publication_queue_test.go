@@ -62,6 +62,12 @@ func TestPublicationReviewAuthorityRejectsSupersededAcceptance(t *testing.T) {
 		return event.ID
 	}
 	operation.AcceptedReviewEventID = appendAcceptance(operation.OperationID)
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept",
+		Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": operation.ActorID, "actor_kind": "worker"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	for range 501 {
 		if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
 			Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept",

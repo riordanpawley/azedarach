@@ -831,7 +831,8 @@ func (d *Daemon) validatePublicationReviewAuthority(ctx context.Context, operati
 			{SourceCommand: "review-accept", Outcomes: []string{string(domain.ReviewOutcomeAccepted)}},
 			{SourceCommand: "review-return", Outcomes: []string{string(domain.ReviewOutcomeReturned)}},
 		},
-		RequiredPayloadTextKeys: []string{"actor_id", "actor_kind"}, CurrentReviewEpoch: true,
+		RequiredPayloadTextKeys: []string{"actor_id"},
+		PayloadTextEquals:       map[string]string{"actor_kind": domain.ReviewerOwnerKindOrchestrator}, CurrentReviewEpoch: true,
 	})
 	if err != nil {
 		return fmt.Errorf("read accepted-review authority: %w", err)
