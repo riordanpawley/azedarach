@@ -31,6 +31,7 @@ var orderedMigrations = []migration{
 	{id: "daemon_operations_0007_layered_publication_evidence", path: "migrations/0007_layered_publication_evidence.sql"},
 	{id: "daemon_operations_0008_validation_priority_fairness", path: "migrations/0008_validation_priority_fairness.sql"},
 	{id: "daemon_operations_0009_publication_review_authority", path: "migrations/0009_publication_review_authority.sql"},
+	{id: "daemon_operations_0010_publication_evidence_authority", path: "migrations/0010_publication_evidence_authority.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -42,7 +43,8 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "daemon_operations_0006_publication_validation_priority", Path: "migrations/0006_publication_validation_priority.sql", Checksum: "bbbf9fd51c2d9289a295a6aeb7427d65d04d3d3a897cc995d2d91ea4577713fd"},
 	{ID: "daemon_operations_0007_layered_publication_evidence", Path: "migrations/0007_layered_publication_evidence.sql", Checksum: "59182365b3d9dd89464e1fdb2f0e5818d6d91bbcf0625bcfd4c3898f888a10ef"},
 	{ID: "daemon_operations_0008_validation_priority_fairness", Path: "migrations/0008_validation_priority_fairness.sql", Checksum: "9f6a4ae4af768b433880a310b1d4c5bb79453224c1c93bd9c7b7696d4cf476bf"},
-	{ID: "daemon_operations_0009_publication_review_authority", Path: "migrations/0009_publication_review_authority.sql", Checksum: "814c81c179a9de04987b0b54419b19ce79778a361ebcb92afd4e9b6df7fc7854"},
+	{ID: "daemon_operations_0009_publication_review_authority", Path: "migrations/0009_publication_review_authority.sql", Checksum: "645af760b30317d26d72ddcccf7a3a5934c009923c8f77260a503e48a39565b2"},
+	{ID: "daemon_operations_0010_publication_evidence_authority", Path: "migrations/0010_publication_evidence_authority.sql", Checksum: "69054f7d354374035f9012209b707a9b9ab629254f53f0fc12f0afa3eb5a7ff0"},
 }
 
 const migrationArtifactAuthority sqlitemigration.Authority = "project.daemon_operations"
@@ -106,12 +108,25 @@ func validatePublicationQueueSchema(ctx context.Context, db *sql.DB) error {
 	if _, err = canonicalDB.ExecContext(ctx, artifact); err != nil {
 		return fmt.Errorf("build canonical publication queue schema: %w", err)
 	}
+	// Executed 0009 also expanded validation authority. The publication-only
+	// canonical builder needs that sibling table shape solely so it can replay
+	// the immutable artifact before applying the forward 0010 rename.
+	if _, err = canonicalDB.ExecContext(ctx, `CREATE TABLE daemon_validation_requests(canonical_seed TEXT)`); err != nil {
+		return fmt.Errorf("seed canonical validation authority schema: %w", err)
+	}
 	upgrade, err := loadMigrationSQL("migrations/0009_publication_review_authority.sql")
 	if err != nil {
 		return fmt.Errorf("load canonical publication review authority schema: %w", err)
 	}
 	if _, err = canonicalDB.ExecContext(ctx, upgrade); err != nil {
 		return fmt.Errorf("build canonical publication review authority schema: %w", err)
+	}
+	evidenceAuthority, err := loadMigrationSQL("migrations/0010_publication_evidence_authority.sql")
+	if err != nil {
+		return fmt.Errorf("load canonical publication evidence authority schema: %w", err)
+	}
+	if _, err = canonicalDB.ExecContext(ctx, evidenceAuthority); err != nil {
+		return fmt.Errorf("build canonical publication evidence authority schema: %w", err)
 	}
 	for _, object := range []struct{ typeName, name string }{
 		{"table", "daemon_publication_operations"},

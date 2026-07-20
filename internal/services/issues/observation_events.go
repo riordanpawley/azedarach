@@ -840,6 +840,112 @@ type AcceptedReviewPublicationCommit struct {
 	PublicationOperationID string
 }
 
+// TerminalReviewPublicationDisposition atomically retires one accepted review
+// epoch with its terminal publication operation. The claim token fences stale
+// daemons; the immutable operation identity fences replay onto another review.
+type TerminalReviewPublicationDisposition struct {
+	Operation          domain.PublicationOperation
+	ExpectedClaimToken string
+	State              domain.PublicationOperationState
+	FailureKind        string
+	FailureDetail      string
+	FailureArtifact    string
+	FinishedAt         time.Time
+}
+
+// TerminalizeAcceptedReviewPublication records the terminal queue state and
+// the integration_failed semantic decision in one project-database transaction.
+// Legacy operations upgraded by migration 0009 retain zero-valued authority;
+// those exact immutable zero values are included in the disposition rather
+// than being upgraded into fabricated review authority.
+func (c *Client) TerminalizeAcceptedReviewPublication(ctx context.Context, disposition TerminalReviewPublicationDisposition) (domain.PublicationOperation, error) {
+	op := disposition.Operation
+	if !disposition.State.Terminal() || disposition.State == domain.PublicationOperationMerged {
+		return domain.PublicationOperation{}, errors.New("terminal review publication requires a failure terminal state")
+	}
+	if strings.TrimSpace(disposition.ExpectedClaimToken) == "" {
+		return domain.PublicationOperation{}, errors.New("terminal review publication requires claim token")
+	}
+	finished := disposition.FinishedAt.UTC()
+	if finished.IsZero() {
+		finished = time.Now().UTC()
+	}
+	var terminal domain.PublicationOperation
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			fenceNow := time.Now().UTC()
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+			var state string
+			var actor, intentKey, fingerprint string
+			var epochID, acceptedID int64
+			err = tx.QueryRowContext(ctx, `SELECT state,actor_id,intent_key,request_fingerprint,review_epoch_event_id,accepted_review_event_id FROM daemon_publication_operations WHERE operation_id=? AND project_id=? AND issue_id=?`, op.OperationID, op.ProjectID, op.IssueID).Scan(&state, &actor, &intentKey, &fingerprint, &epochID, &acceptedID)
+			if err != nil {
+				return fmt.Errorf("read terminal publication authority: %w", err)
+			}
+			if !strings.EqualFold(actor, op.ActorID) || intentKey != op.IntentKey || fingerprint != op.RequestFingerprint || epochID != op.ReviewEpochEventID || acceptedID != op.AcceptedReviewEventID {
+				return errors.New("terminal publication authority changed concurrently")
+			}
+			payload := map[string]any{"outcome": string(domain.ReviewOutcomeIntegrationFailed), "actor_id": op.ActorID, "intent_key": op.IntentKey, "request_fingerprint": op.RequestFingerprint, "publication_operation_id": op.OperationID, "accepted_review_event_id": op.AcceptedReviewEventID, "review_epoch_event_id": op.ReviewEpochEventID, "publication_state": string(disposition.State), "failure": strings.TrimSpace(disposition.FailureDetail)}
+			payloadJSON, err := json.Marshal(payload)
+			if err != nil {
+				return err
+			}
+			var existing int64
+			err = tx.QueryRowContext(ctx, `SELECT id FROM issue_observation_events WHERE issue_id=? AND event_type=? AND json_extract(payload_json,'$.outcome')=? AND json_extract(payload_json,'$.publication_operation_id')=? AND CAST(json_extract(payload_json,'$.accepted_review_event_id') AS INTEGER)=? AND CAST(json_extract(payload_json,'$.review_epoch_event_id') AS INTEGER)=? ORDER BY id DESC LIMIT 1`, op.IssueID, string(domain.IssueEventReviewCompleted), string(domain.ReviewOutcomeIntegrationFailed), op.OperationID, op.AcceptedReviewEventID, op.ReviewEpochEventID).Scan(&existing)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			if existing != 0 && state == string(disposition.State) {
+				if err := tx.Commit(); err != nil {
+					return err
+				}
+				terminal = op
+				terminal.State = disposition.State
+				terminal.LeaseOwner = ""
+				terminal.ClaimToken = ""
+				terminal.ClaimExpiresAt = nil
+				return nil
+			}
+			if errors.Is(err, sql.ErrNoRows) {
+				_, err = tx.ExecContext(ctx, `INSERT INTO issue_observation_events(issue_id,event_type,source,source_command,payload_json,observed_at) VALUES(?,?,?,?,?,?)`, op.IssueID, string(domain.IssueEventReviewCompleted), "daemon-orchestration", "review-accept", string(payloadJSON), finished.Format(time.RFC3339Nano))
+				if err != nil {
+					return fmt.Errorf("append terminal review disposition: %w", err)
+				}
+			}
+			result, err := tx.ExecContext(ctx, `UPDATE daemon_publication_operations SET state=?,lease_owner='',claim_token='',claim_expires_at=NULL,failure_kind=?,failure_detail=?,failure_artifact=?,finished_at=?,updated_at=? WHERE operation_id=? AND claim_token=? AND claim_expires_at>? AND state=?`, string(disposition.State), strings.TrimSpace(disposition.FailureKind), strings.TrimSpace(disposition.FailureDetail), strings.TrimSpace(disposition.FailureArtifact), finished.Format(time.RFC3339Nano), finished.Format(time.RFC3339Nano), op.OperationID, strings.TrimSpace(disposition.ExpectedClaimToken), fenceNow.UnixNano(), state)
+			if err != nil {
+				return fmt.Errorf("terminalize publication operation: %w", err)
+			}
+			if changed, _ := result.RowsAffected(); changed != 1 {
+				return fmt.Errorf("publication operation %s state changed concurrently", op.OperationID)
+			}
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+			terminal = op
+			terminal.State = disposition.State
+			terminal.LeaseOwner = ""
+			terminal.ClaimToken = ""
+			terminal.ClaimExpiresAt = nil
+			terminal.FailureKind = strings.TrimSpace(disposition.FailureKind)
+			terminal.FailureDetail = strings.TrimSpace(disposition.FailureDetail)
+			terminal.FailureArtifact = strings.TrimSpace(disposition.FailureArtifact)
+			terminal.FinishedAt = &finished
+			terminal.UpdatedAt = finished
+			return nil
+		})
+	})
+	return terminal, err
+}
+
 type acceptedReviewPublicationCommitHookKey struct{}
 
 // WithAcceptedReviewPublicationCommitHookForTest installs a deterministic

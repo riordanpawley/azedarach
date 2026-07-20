@@ -600,7 +600,7 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 			if errors.As(identityErr, &retry) {
 				terminal, _, transitionErr = d.transitionPublicationWithRetry(context.Background(), store, operation, claimToken, state, mutate, retry)
 			} else {
-				terminal, transitionErr = d.transitionPublicationOperation(context.Background(), operation, claimToken, state, mutate)
+				terminal, transitionErr = d.terminalizeAcceptedReviewPublication(context.Background(), operation, claimToken, state, kind, identityErr.Error(), artifact, finished)
 			}
 			if transitionErr != nil {
 				return nil, fmt.Errorf("%w; persist terminal publication continuation: %v", identityErr, transitionErr)
@@ -689,7 +689,7 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 		if errors.As(runErr, &retry) {
 			terminal, _, transitionErr = d.transitionPublicationWithRetry(context.Background(), store, current, claimToken, state, mutate, retry)
 		} else {
-			terminal, transitionErr = d.transitionPublicationOperation(context.Background(), current, claimToken, state, mutate)
+			terminal, transitionErr = d.terminalizeAcceptedReviewPublication(context.Background(), current, claimToken, state, kind, runErr.Error(), artifact, finished)
 		}
 		if transitionErr != nil {
 			return nil, fmt.Errorf("%w; persist terminal publication continuation: %v", runErr, transitionErr)
@@ -707,6 +707,22 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	d.ensurePublicationTargetContinuation(store, current)
 	_ = daemonops.ReportProgress(ctx, daemonops.Progress{Phase: "merged", Message: "exact candidate merged and accepted issue closed", Current: 100, Total: 100, Unit: "percent", Percent: 100})
 	return json.Marshal(current)
+}
+
+func (d *Daemon) terminalizeAcceptedReviewPublication(ctx context.Context, current domain.PublicationOperation, claimToken string, state domain.PublicationOperationState, failureKind, failureDetail, failureArtifact string, finished time.Time) (domain.PublicationOperation, error) {
+	issueClient := d.issueClientForProject(current.ProjectID)
+	if issueClient == nil {
+		return domain.PublicationOperation{}, fmt.Errorf("issue store unavailable for terminal publication disposition")
+	}
+	terminal, err := issueClient.TerminalizeAcceptedReviewPublication(ctx, issues.TerminalReviewPublicationDisposition{Operation: current, ExpectedClaimToken: claimToken, State: state, FailureKind: failureKind, FailureDetail: failureDetail, FailureArtifact: failureArtifact, FinishedAt: finished})
+	if err != nil {
+		return domain.PublicationOperation{}, err
+	}
+	d.publishPublicationOperationEvent(terminal)
+	if d.publicationStateChanged != nil {
+		d.publicationStateChanged(terminal)
+	}
+	return terminal, nil
 }
 
 func (d *Daemon) validatePublicationReviewAuthority(ctx context.Context, operation domain.PublicationOperation) error {

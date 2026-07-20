@@ -23,6 +23,67 @@ func acceptedPublicationTestEvidence(operation domain.PublicationOperation) doma
 	}
 }
 
+func TestTerminalizeAcceptedReviewPublicationAtomicallySupersedesExactEpoch(t *testing.T) {
+	for _, state := range []domain.PublicationOperationState{domain.PublicationOperationFailed, domain.PublicationOperationConflicted, domain.PublicationOperationStale, domain.PublicationOperationCanceled} {
+		t.Run(string(state), func(t *testing.T) {
+			ctx, repo := context.Background(), t.TempDir()
+			if err := os.MkdirAll(filepath.Join(repo, ".azedarach"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			client := NewClient(repo, nil)
+			t.Cleanup(func() { _ = client.CloseDB() })
+			queue := operationstore.New(repo, nil)
+			t.Cleanup(func() { _ = queue.Close() })
+			issueID, err := client.Create(ctx, CreateTaskParams{Title: "publish", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInReview})
+			if err != nil {
+				t.Fatal(err)
+			}
+			op := domain.PublicationOperation{OperationID: "publication-" + string(state), ProjectID: "project", IssueID: issueID, IntentKey: "intent", RequestFingerprint: "fingerprint", ActorID: "reviewer", TargetID: "base", TargetBranch: "main", SourceRevision: "source", BaseRevision: "base", ValidationCommand: "npm test", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC()}
+			// Zero authority is the immutable migration-0009 legacy shape. It must
+			// be retired, never upgraded into fabricated accepted-review authority.
+			stored, _, err := queue.EnqueuePublication(ctx, op, "candidate-"+string(state))
+			if err != nil {
+				t.Fatal(err)
+			}
+			expired, acquired, err := queue.ClaimPublicationOperation(ctx, stored.OperationID, operationstore.PublicationOperationClaim{Owner: "old-daemon", Token: "expired-claim", Now: time.Now().UTC().Add(-2 * time.Minute), TTL: time.Minute})
+			if err != nil || !acquired {
+				t.Fatalf("expired claim=(%+v,%t,%v)", expired, acquired, err)
+			}
+			if _, err := client.TerminalizeAcceptedReviewPublication(ctx, TerminalReviewPublicationDisposition{Operation: expired, ExpectedClaimToken: "expired-claim", State: state, FinishedAt: time.Now().UTC().Add(-90 * time.Second)}); err == nil {
+				t.Fatal("expired claim passed using stale failure timestamp")
+			}
+			claimed, acquired, err := queue.ClaimPublicationOperation(ctx, stored.OperationID, operationstore.PublicationOperationClaim{Owner: "daemon-a", Token: "claim", Now: time.Now().UTC(), TTL: time.Minute})
+			if err != nil || !acquired {
+				t.Fatalf("claim=(%+v,%t,%v)", claimed, acquired, err)
+			}
+			if _, err := client.TerminalizeAcceptedReviewPublication(ctx, TerminalReviewPublicationDisposition{Operation: claimed, ExpectedClaimToken: "wrong", State: state, FinishedAt: time.Now().UTC()}); err == nil {
+				t.Fatal("stale daemon terminalized active operation")
+			}
+			terminal, err := client.TerminalizeAcceptedReviewPublication(ctx, TerminalReviewPublicationDisposition{Operation: claimed, ExpectedClaimToken: "claim", State: state, FailureKind: "terminal", FailureDetail: "failed", FinishedAt: time.Now().UTC()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if terminal.State != state {
+				t.Fatalf("state=%s want %s", terminal.State, state)
+			}
+			events, err := client.ListIssueObservationEvents(ctx, issueID, IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+			if err != nil || len(events) != 1 {
+				t.Fatalf("events=(%+v,%v)", events, err)
+			}
+			if got := events[0].Payload["publication_operation_id"]; got != op.OperationID {
+				t.Fatalf("operation binding=%v", got)
+			}
+			if replay, err := client.TerminalizeAcceptedReviewPublication(ctx, TerminalReviewPublicationDisposition{Operation: claimed, ExpectedClaimToken: "wrong", State: state, FinishedAt: time.Now().UTC()}); err != nil || replay.State != state {
+				t.Fatalf("idempotent exact replay=(%+v,%v)", replay, err)
+			}
+			events, _ = client.ListIssueObservationEvents(ctx, issueID, IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+			if len(events) != 1 {
+				t.Fatalf("duplicate disposition events=%d", len(events))
+			}
+		})
+	}
+}
+
 func TestAcceptedReviewAndPublicationRejectsReplacedEpochBeforeAnySideEffect(t *testing.T) {
 	for _, rooted := range []bool{false, true} {
 		name := "project"

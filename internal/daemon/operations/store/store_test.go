@@ -935,7 +935,7 @@ func TestPublicationReviewAuthorityMigrationUpgradesHistoricalQueueAndReopens(t 
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_publication_operations') WHERE name IN ('reviewer_kind','review_epoch_event_id','accepted_review_event_id','patch_evidence_id')`).Scan(&columns); err != nil {
 		t.Fatal(err)
 	}
-	artifact := migrationArtifacts[8]
+	artifact := migrationArtifacts[len(migrationArtifacts)-1]
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, artifact.ID, artifact.Checksum).Scan(&ledgerRows); err != nil {
 		t.Fatal(err)
 	}
@@ -984,6 +984,44 @@ func TestPublicationReviewAuthorityMigrationRollsBackAtomically(t *testing.T) {
 	}
 	if columns != 0 || ledgerRows != 0 {
 		t.Fatalf("failed review authority migration residue columns=%d ledger=%d", columns, ledgerRows)
+	}
+}
+
+func TestPublicationEvidenceAuthorityMigrationRollsBackAtomically(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 9)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TRIGGER reject_publication_evidence_authority_ledger BEFORE INSERT ON schema_migrations WHEN NEW.id='daemon_operations_0010_publication_evidence_authority' BEGIN SELECT RAISE(ABORT, 'injected publication evidence authority ledger failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	failed := NewAtPath(dbPath, slog.Default())
+	if _, err = failed.PublicationOperations(context.Background(), "project", "", false); err == nil || !strings.Contains(err.Error(), "injected publication evidence authority ledger failure") {
+		t.Fatalf("migration error = %v", err)
+	}
+	_ = failed.Close()
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var oldColumns, newColumns, ledgerRows int
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_publication_operations') WHERE name IN ('actor_kind','accepted_publication_operation_id')`).Scan(&oldColumns); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_publication_operations') WHERE name IN ('reviewer_kind','patch_evidence_id')`).Scan(&newColumns); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='daemon_operations_0010_publication_evidence_authority'`).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if oldColumns != 2 || newColumns != 0 || ledgerRows != 0 {
+		t.Fatalf("failed 0010 residue old=%d new=%d ledger=%d", oldColumns, newColumns, ledgerRows)
 	}
 }
 

@@ -699,7 +699,15 @@ func TestPublicationQueueFailureIsTypedAndRetainsArtifact(t *testing.T) {
 	d.publicationClose = func(context.Context, domain.PublicationOperation) error {
 		return errors.New("candidate validation failed: npm test: unit suite failed")
 	}
-	operation := daemonTestPublicationOperation(runtime.canonicalProject, "publication-failed", "issue", "intent", "source", time.Now().UTC())
+	issueClient := issues.NewClient(repo, nil)
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "publish", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation := daemonTestPublicationOperation(runtime.canonicalProject, "publication-failed", issueID, "intent", "source", time.Now().UTC())
+	request := protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: operation.IntentKey, ActorID: operation.ActorID, IssueIDs: []string{issueID}}
+	operation.RequestFingerprint = reviewRequestFingerprint(request)
 	if _, _, err := runtime.store.EnqueuePublication(context.Background(), operation, "candidate-failed"); err != nil {
 		t.Fatal(err)
 	}
@@ -715,6 +723,9 @@ func TestPublicationQueueFailureIsTypedAndRetainsArtifact(t *testing.T) {
 	}
 	if _, err := os.Stat(failed.FailureArtifact); err != nil {
 		t.Fatalf("retained failure artifact: %v", err)
+	}
+	if outcome, err := (daemonOrchestrationAuthority{daemon: d}).reviewIntentTerminalOutcome(context.Background(), operation.ProjectID, issueID, request); err != nil || outcome != "superseded" {
+		t.Fatalf("terminal review outcome=(%q,%v), want superseded", outcome, err)
 	}
 }
 

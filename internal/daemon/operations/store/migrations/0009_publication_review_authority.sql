@@ -1,25 +1,35 @@
 -- Authority: project.daemon_operations.
--- Schema: bind every durable publication operation to the exact orchestrator
--- review epoch, accepted-review event, and immutable patch-review evidence.
--- Data: no legacy operation is upgraded into stronger authority; existing rows
--- remain visibly unbound and fail closed if recovery encounters them.
--- Validation: startup verifies the columns and immutable identity trigger.
--- Ledger: the shared migration runner records this immutable artifact and its
--- pinned SHA-256 exactly once in the same transaction as the schema expansion.
+-- Schema: bind every durable publication operation to one typed orchestrator
+-- reviewer, one review-request epoch, and one accepted review event.
+-- Data: legacy rows retain empty/zero authority and therefore fail closed;
+-- restart recovery requires a fresh, exactly bound acceptance operation.
+-- Validation: startup compares the migrated table/trigger with the composed
+-- immutable 0007+0009 artifacts and runtime admission rejects zero bindings.
+-- Ledger: project.daemon_operations records this immutable artifact checksum.
 
 ALTER TABLE daemon_publication_operations
+ADD COLUMN actor_kind TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE daemon_publication_operations
+ADD COLUMN review_epoch_event_id INTEGER NOT NULL DEFAULT 0 CHECK (review_epoch_event_id >= 0);
+
+ALTER TABLE daemon_publication_operations
+ADD COLUMN accepted_review_event_id INTEGER NOT NULL DEFAULT 0 CHECK (accepted_review_event_id >= 0);
+
+ALTER TABLE daemon_publication_operations
+ADD COLUMN accepted_publication_operation_id TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE daemon_validation_requests
 ADD COLUMN reviewer_kind TEXT NOT NULL DEFAULT '';
 
-ALTER TABLE daemon_publication_operations
-ADD COLUMN review_epoch_event_id INTEGER NOT NULL DEFAULT 0
-CHECK (review_epoch_event_id >= 0);
+ALTER TABLE daemon_validation_requests
+ADD COLUMN publication_operation_id TEXT NOT NULL DEFAULT '';
 
-ALTER TABLE daemon_publication_operations
-ADD COLUMN accepted_review_event_id INTEGER NOT NULL DEFAULT 0
-CHECK (accepted_review_event_id >= 0);
+ALTER TABLE daemon_validation_requests
+ADD COLUMN accepted_review_event_id INTEGER NOT NULL DEFAULT 0 CHECK (accepted_review_event_id >= 0);
 
-ALTER TABLE daemon_publication_operations
-ADD COLUMN patch_evidence_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE daemon_validation_requests
+ADD COLUMN accepted_publication_operation_id TEXT NOT NULL DEFAULT '';
 
 DROP TRIGGER daemon_publication_operation_identity_immutable;
 
@@ -31,10 +41,10 @@ WHEN NEW.operation_id != OLD.operation_id
   OR NEW.intent_key != OLD.intent_key
   OR NEW.request_fingerprint != OLD.request_fingerprint
   OR NEW.actor_id != OLD.actor_id
-  OR NEW.reviewer_kind != OLD.reviewer_kind
+  OR NEW.actor_kind != OLD.actor_kind
   OR NEW.review_epoch_event_id != OLD.review_epoch_event_id
   OR (OLD.accepted_review_event_id != 0 AND NEW.accepted_review_event_id != OLD.accepted_review_event_id)
-  OR NEW.patch_evidence_id != OLD.patch_evidence_id
+  OR NEW.accepted_publication_operation_id != OLD.accepted_publication_operation_id
   OR NEW.target_id != OLD.target_id
   OR NEW.target_branch != OLD.target_branch
   OR NEW.source_revision != OLD.source_revision
