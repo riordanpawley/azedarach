@@ -9,11 +9,12 @@ use File::Basename qw(dirname basename);
 use File::Path qw(remove_tree);
 use File::Spec;
 use JSON::PP qw(decode_json encode_json);
-use POSIX qw(strftime);
+use POSIX qw(strftime uname);
 use Time::Piece;
 
 my %arg;
 my $stage;
+my $openat_syscall;
 END {
     remove_tree($stage) if defined($stage) && safe_existing_directory($stage);
 }
@@ -21,19 +22,33 @@ while (@ARGV) {
     my $flag = shift @ARGV;
     die "unknown option $flag\n" unless $flag =~ /^--(.+)$/;
     my $name = $1;
-    if ($name eq 'prune-only') { $arg{$name} = 1; next; }
+    if ($name eq 'prune-only' || $name eq 'capability-check') { $arg{$name} = 1; next; }
     $arg{$name} = shift(@ARGV) // die "$flag requires a value\n";
 }
 
+if ($arg{'capability-check'}) {
+    my $platform = $arg{platform} // native_platform();
+    my $capability = openat_capability($platform);
+    print encode_json($capability) . "\n";
+    exit($capability->{available} ? 0 : 78);
+}
+
 my $project_root = canonical_directory($arg{'project-root'} // die "--project-root is required\n");
-my $artifact_root = safe_directory_chain($project_root, qw(.azedarach validation-artifacts));
-my $failure_root = safe_directory_chain($artifact_root, 'failures');
-prune_unreferenced($failure_root);
-exit 0 if $arg{'prune-only'};
+if ($arg{'prune-only'}) {
+    my $artifact_root = safe_directory_chain($project_root, qw(.azedarach validation-artifacts));
+    my $failure_root = safe_directory_chain($artifact_root, 'failures');
+    prune_unreferenced($failure_root);
+    exit 0;
+}
 
 for my $required (qw(candidate-root control-root evidence gate-output request revision exit-code)) {
     die "--$required is required\n" unless defined($arg{$required}) && $arg{$required} ne '';
 }
+$openat_syscall = require_openat_capability(native_platform());
+verify_openat_capability($openat_syscall, native_platform());
+my $artifact_root = safe_directory_chain($project_root, qw(.azedarach validation-artifacts));
+my $failure_root = safe_directory_chain($artifact_root, 'failures');
+prune_unreferenced($failure_root);
 my ($candidate_root, $candidate_root_handle) = canonical_directory_handle($arg{'candidate-root'});
 if (my $ready = delete($ENV{AZEDARACH_VALIDATION_TEST_CANDIDATE_ROOTFD_READY_FILE})) {
     sysopen(my $ready_fh, $ready, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
@@ -269,18 +284,79 @@ sub safe_candidate_file {
     return safe_existing_file($root, File::Spec->canonpath($path));
 }
 
-sub openat_syscall_number {
-    return 463 if $^O eq 'darwin';
-    return 257 if $^O eq 'linux' && $Config{archname} =~ /(?:x86_64|amd64)/;
-    return 56 if $^O eq 'linux' && $Config{archname} =~ /(?:aarch64|arm64)/;
-    die "openat is unsupported on $^O/$Config{archname}\n";
+sub native_platform {
+    my @uname = uname();
+    my $arch = lc($uname[4] // $Config{archname} // 'unknown');
+    $arch = 'amd64' if $arch =~ /(?:x86_64|amd64)/;
+    $arch = 'arm64' if $arch =~ /(?:aarch64|arm64)/;
+    return lc($^O) . '/' . $arch;
+}
+
+sub openat_capability {
+    my ($platform) = @_;
+    my %syscalls = (
+        'darwin/amd64' => 463,
+        'darwin/arm64' => 463,
+        'linux/amd64' => 257,
+    );
+    my $number = $syscalls{$platform};
+    return {
+        schema => 'azedarach.validation_artifact_capability.v1',
+        capability => 'descriptor_relative_openat_nofollow',
+        platform => $platform,
+        supported_platforms => [sort keys %syscalls],
+        available => defined($number) ? JSON::PP::true : JSON::PP::false,
+        (defined($number) ? (syscall_number => $number) :
+            (diagnostic => "validation artifact publication capability unavailable on $platform: descriptor-relative openat syscall is not registered")),
+    };
+}
+
+sub require_openat_capability {
+    my ($platform) = @_;
+    my $capability = openat_capability($platform);
+    unless ($capability->{available}) {
+        print STDERR encode_json($capability) . "\n";
+        exit 78;
+    }
+    return $capability->{syscall_number};
+}
+
+sub verify_openat_capability {
+    my ($number, $platform) = @_;
+    sysopen(my $root, File::Spec->rootdir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        or die "open filesystem root for openat capability probe: $!\n";
+    my $component = '.';
+    my $fd = syscall($number, fileno($root), $component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
+    if ($fd < 0) {
+        my $capability = {
+            %{openat_capability($platform)},
+            available => JSON::PP::false,
+            diagnostic => "validation artifact publication capability probe failed on $platform: descriptor-relative openat syscall $number: $!",
+        };
+        print STDERR encode_json($capability) . "\n";
+        exit 78;
+    }
+    open(my $probe, '<&=', $fd) or die "adopt openat capability probe descriptor: $!\n";
+    my @root_stat = stat($root);
+    my @probe_stat = stat($probe);
+    unless (@root_stat && @probe_stat && $root_stat[0] == $probe_stat[0] && $root_stat[1] == $probe_stat[1]) {
+        print STDERR encode_json({
+            %{openat_capability($platform)},
+            available => JSON::PP::false,
+            diagnostic => "validation artifact publication capability probe returned the wrong inode on $platform",
+        }) . "\n";
+        exit 78;
+    }
+    close $probe or die "close openat capability probe descriptor: $!\n";
+    close $root or die "close openat capability probe root: $!\n";
 }
 
 sub openat_handle {
     my ($directory, $name, $flags) = @_;
     die "unsafe openat component\n"
         unless defined($name) && $name ne '' && $name ne '.' && $name ne '..' && $name !~ m{[\\/]};
-    my $fd = syscall(openat_syscall_number(), fileno($directory), $name, $flags, 0);
+    die "openat capability was not initialized\n" unless defined($openat_syscall);
+    my $fd = syscall($openat_syscall, fileno($directory), $name, $flags, 0);
     return undef if $fd < 0;
     open(my $handle, '<&=', $fd) or die "adopt openat descriptor for $name: $!\n";
     return $handle;
