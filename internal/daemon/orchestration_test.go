@@ -1061,6 +1061,31 @@ func TestProjectOrchestrationRejectsDirectStartOfParentedTicket(t *testing.T) {
 	if result.Skipped[childID] != "outside-project-root-candidate-scope" || len(result.Started) != 0 {
 		t.Fatalf("direct child start result = %+v", result)
 	}
+	if len(result.Results) != 1 || result.Results[0].Summary.Role != domain.WorkflowRoleWorker || result.Results[0].Summary.Status != "skipped" {
+		t.Fatalf("bounded worker result = %+v", result.Results)
+	}
+}
+
+func TestBuildOrchestrationResultSummariesFailsClosedForMissingIssueInput(t *testing.T) {
+	_, err := buildOrchestrationResultSummaries(protocol.OrchestrationIntentResult{Requested: []string{"missing"}}, nil, domain.WorkflowRoleWorker, nil)
+	if err == nil || !strings.Contains(err.Error(), "result input unavailable") {
+		t.Fatalf("missing bounded result input error = %v", err)
+	}
+}
+
+func TestBuildOrchestrationResultSummariesReportsSubmittedOperationPending(t *testing.T) {
+	task := domain.Task{ID: "child", Type: domain.TypeTask, Title: "Child", Status: domain.StatusInProgress}
+	result, err := buildOrchestrationResultSummaries(protocol.OrchestrationIntentResult{
+		Requested: []string{"child"},
+		Started:   []string{"child"},
+		Pending:   []protocol.OrchestrationPending{{IssueID: "child", OperationID: "op-1", OperationState: string(protocol.OperationStateRunning)}},
+	}, []domain.Task{task}, domain.WorkflowRoleWorker, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 1 || result[0].Summary.Status != "pending" {
+		t.Fatalf("bounded result = %+v, want pending", result)
+	}
 }
 
 func TestRootedOrchestrationReviewQueueStopsAtDirectChildren(t *testing.T) {
@@ -1217,6 +1242,9 @@ func TestProjectOrchestrationExplicitStartQueuesBeforeSnapshotAdmissionContentio
 	}
 	if len(result.Pending) != 1 || result.Pending[0].IssueID != issueID || result.Pending[0].Phase != "projection_source_checkpoint" || !result.Pending[0].Retryable {
 		t.Fatalf("queued progress = %+v", result.Pending)
+	}
+	if len(result.Results) != 1 || result.Results[0].Summary.Role != domain.WorkflowRoleWorker || result.Results[0].Summary.Status != "pending" {
+		t.Fatalf("bounded pending worker result = %+v", result.Results)
 	}
 	queued, err := client.PendingRequestedOrchestrationStarts(ctx, "proj")
 	if err != nil || len(queued) != 1 || queued[0].IssueID != issueID || queued[0].IntentKey != request.IntentKey {

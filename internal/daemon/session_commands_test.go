@@ -857,6 +857,9 @@ func (r *worktreeCreateRunner) Run(_ context.Context, args ...string) (string, e
 		r.statusCalls++
 		return r.porcelainStatus, nil
 	}
+	if len(args) >= 5 && args[0] == "-C" && args[1] == r.worktreePath && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD" {
+		return "fixture-head-revision\n", nil
+	}
 	if len(args) >= 3 && args[0] == "worktree" && args[1] == "add" && args[2] == "-b" {
 		r.worktreeAddCalls++
 		r.worktreeRemoved = false
@@ -10522,6 +10525,51 @@ func TestBuildStartWorkPromptMatchesPrimeBootFormatForOrchestratedWorker(t *test
 	}
 	if strings.Contains(prompt, "events: , , and .") {
 		t.Fatalf("prompt = %q, contains blank mailbox event interpolation", prompt)
+	}
+}
+
+func TestBuildStartWorkPromptWithContextCarriesBoundedExactRevisionPacket(t *testing.T) {
+	task := domain.Task{
+		ID: naming.IssueID("npm-42"), Title: "Portable worker", Type: domain.TypeTask,
+		Description: "Run npm test", Acceptance: "Default and non-Azedarach fixtures pass",
+		Notes: "raw transcript and token=never-include",
+	}
+	prompt, err := buildStartWorkPromptWithContext(task, "candidate-deadbeef", true, "root-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := "Bounded semantic workflow context (authoritative for this phase; do not reconstruct it from inherited transcript or workflow scrollback):\n"
+	index := strings.Index(prompt, marker)
+	if index < 0 {
+		t.Fatalf("prompt has no bounded context packet: %s", prompt)
+	}
+	var packet domain.WorkflowContextPacket
+	if err := json.Unmarshal([]byte(prompt[index+len(marker):]), &packet); err != nil {
+		t.Fatalf("decode packet: %v", err)
+	}
+	if packet.Role != domain.WorkflowRoleWorker || packet.Provenance.IssueID != "npm-42" || packet.Provenance.SourceRevision != "candidate-deadbeef" {
+		t.Fatalf("packet provenance=%+v role=%s", packet.Provenance, packet.Role)
+	}
+	if strings.Contains(prompt, task.Notes) || strings.Contains(prompt, "never-include") {
+		t.Fatal("prompt leaked notes")
+	}
+	encoded, err := domain.MarshalWorkflowContextPacket(packet)
+	if err != nil || len(encoded) > domain.WorkflowContextPacketMaxBytes {
+		t.Fatalf("packet bytes=%d err=%v", len(encoded), err)
+	}
+}
+
+func TestBuildStartWorkPromptWithContextDoesNotBypassPacketRedactionThroughTitle(t *testing.T) {
+	task := domain.Task{ID: naming.IssueID("secret-title"), Title: "deploy token=never-include", Type: domain.TypeTask}
+	prompt, err := buildStartWorkPromptWithContext(task, "candidate-deadbeef", false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(prompt, "never-include") || strings.Contains(prompt, task.Title) {
+		t.Fatalf("active launch prompt leaked rejected title: %s", prompt)
+	}
+	if !strings.Contains(prompt, "work on issue secret-title (task): secret-title") {
+		t.Fatalf("active launch prompt did not use issue fallback: %s", prompt)
 	}
 }
 

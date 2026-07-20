@@ -472,12 +472,13 @@ type orchestrateContainmentRisk struct {
 }
 
 type orchestratePromptResult struct {
-	RootIssueID  string   `json:"root_issue_id"`
-	IssueID      string   `json:"issue_id"`
-	ParentIssue  string   `json:"parent_issue"`
-	Coordination string   `json:"coordination"`
-	Prompt       string   `json:"prompt"`
-	Commands     []string `json:"commands"`
+	RootIssueID  string                       `json:"root_issue_id"`
+	IssueID      string                       `json:"issue_id"`
+	ParentIssue  string                       `json:"parent_issue"`
+	Coordination string                       `json:"coordination"`
+	Context      domain.WorkflowContextPacket `json:"context_packet"`
+	Prompt       string                       `json:"prompt"`
+	Commands     []string                     `json:"commands"`
 }
 
 type orchestrateIntegrateResult struct {
@@ -2449,7 +2450,10 @@ func OrchestratePromptCommand(deps *Dependencies, opts OrchestratePromptOptions)
 	if coordination == "" {
 		coordination = "native"
 	}
-	result := buildOrchestratePromptResult(rootIssueID, parentIssueID, task, coordination)
+	result, err := buildOrchestratePromptResult(rootIssueID, parentIssueID, task, coordination)
+	if err != nil {
+		return err
+	}
 	if opts.JSON {
 		return printJSON(result)
 	}
@@ -3280,8 +3284,19 @@ func printCompactOrchestrateFrame(frame orchestrateCompactFrame) {
 	}
 }
 
-func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain.Task, coordination string) orchestratePromptResult {
+func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain.Task, coordination string) (orchestratePromptResult, error) {
 	issueID := task.ID.String()
+	contextPacket, contextErr := domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
+		Role: domain.WorkflowRoleWorker, IssueID: issueID, SourceRevision: domain.WorkflowIssueContextRevision(task), Summary: task.Title,
+		Requirements: domain.WorkflowIssueRequirements(task),
+	})
+	if contextErr != nil {
+		return orchestratePromptResult{}, fmt.Errorf("build bounded worker context: %w", contextErr)
+	}
+	contextJSON, err := domain.MarshalWorkflowContextPacket(contextPacket)
+	if err != nil {
+		return orchestratePromptResult{}, fmt.Errorf("marshal bounded worker context: %w", err)
+	}
 	commands := []string{
 		"az prime",
 		fmt.Sprintf("az issue get %s", issueID),
@@ -3300,7 +3315,11 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 		)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Work on issue %s: %s\n\n", issueID, task.Title)
+	safeTitle := contextPacket.Summary
+	if safeTitle == "" {
+		safeTitle = issueID
+	}
+	fmt.Fprintf(&b, "Work on issue %s: %s\n\n", issueID, safeTitle)
 	fmt.Fprintf(&b, "Start by running `az prime`, then continue this worker task using the issue context without waiting for further instruction.\n\n")
 	fmt.Fprintf(&b, "Root issue: %s\n", rootIssueID)
 	fmt.Fprintf(&b, "Coordination mode: %s\n", coordination)
@@ -3314,15 +3333,7 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 	if len(task.Implementations) > 0 {
 		fmt.Fprintf(&b, "Implementations: %s\n", strings.Join(task.Implementations, ", "))
 	}
-	if strings.TrimSpace(task.Description) != "" {
-		fmt.Fprintf(&b, "\nDescription:\n%s\n", strings.TrimSpace(task.Description))
-	}
-	if strings.TrimSpace(task.Design) != "" {
-		fmt.Fprintf(&b, "\nDesign:\n%s\n", strings.TrimSpace(task.Design))
-	}
-	if strings.TrimSpace(task.Acceptance) != "" {
-		fmt.Fprintf(&b, "\nAcceptance:\n%s\n", strings.TrimSpace(task.Acceptance))
-	}
+	fmt.Fprintf(&b, "\nBounded semantic workflow context (authoritative for this phase; do not reconstruct it from inherited transcript or workflow scrollback):\n%s\n", contextJSON)
 	if strings.TrimSpace(task.Notes) != "" {
 		fmt.Fprintf(&b, "\nCurrent notes: present but omitted from worker prompt. Run `az issue get %s --with-notes` only if full note history is necessary.\n", issueID)
 	}
@@ -3355,9 +3366,10 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 		IssueID:      issueID,
 		ParentIssue:  parentIssueID,
 		Coordination: coordination,
+		Context:      contextPacket,
 		Prompt:       b.String(),
 		Commands:     commands,
-	}
+	}, nil
 }
 
 func orchestrateStartWarnings(ctx context.Context, deps *Dependencies, ready daemonclient.TaskGraphReadiness, launchCount int) []string {

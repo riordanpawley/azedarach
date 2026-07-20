@@ -403,8 +403,53 @@ func (a daemonOrchestrationAuthority) reviewInspection(ctx context.Context, proj
 		inspection.Actionable = false
 		inspection.Reasons = append(inspection.Reasons, "accepted-close-pending")
 	}
+	contextPacket, contextErr := buildReviewWorkflowContext(task, inspection, domain.WorkflowRoleReviewer)
+	if contextErr != nil {
+		inspection.Reasons = append(inspection.Reasons, "inspect-bounded-context: "+contextErr.Error())
+	} else {
+		inspection.ReviewContext = &contextPacket
+		if integrationPacket, integrationErr := buildReviewWorkflowContext(task, inspection, domain.WorkflowRoleIntegrator); integrationErr == nil {
+			inspection.IntegrationContext = &integrationPacket
+		} else {
+			inspection.Reasons = append(inspection.Reasons, "inspect-bounded-integration-context: "+integrationErr.Error())
+		}
+	}
 	inspection.Reasons = uniqueNonEmpty(inspection.Reasons)
 	return inspection
+}
+
+func buildReviewWorkflowContext(task domain.Task, inspection protocol.OrchestrationReview, role domain.WorkflowRole) (domain.WorkflowContextPacket, error) {
+	revision := strings.TrimSpace(inspection.HeadRevision)
+	if revision == "" {
+		revision = strings.TrimSpace(inspection.SourceOID)
+	}
+	if revision == "" && inspection.ReviewEpochEventID > 0 {
+		revision = fmt.Sprintf("issue-event:%d", inspection.ReviewEpochEventID)
+	}
+	if revision == "" {
+		revision = domain.WorkflowIssueContextRevision(task)
+	}
+	findings := []string(nil)
+	invariants := []string(nil)
+	artifacts := []domain.WorkflowArtifactReference(nil)
+	if inspection.Evidence != nil {
+		findings = append(findings, inspection.Evidence.Review.Findings...)
+		for _, link := range inspection.Evidence.ArtifactLinks {
+			artifacts = append(artifacts, domain.WorkflowArtifactReference{Label: link.Label, Reference: link.URL})
+		}
+	}
+	if inspection.ContextRisk != nil {
+		for _, evidence := range inspection.ContextRisk.Evidence {
+			if invariant := strings.TrimSpace(evidence.Invariant); invariant != "" {
+				invariants = append(invariants, invariant)
+			}
+		}
+	}
+	return domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
+		Role: role, IssueID: task.ID.String(), SourceRevision: revision, Summary: task.Title,
+		Requirements: domain.WorkflowIssueRequirements(task), UnresolvedFindings: findings,
+		AffectedInvariants: invariants, ArtifactLinks: artifacts,
+	})
 }
 
 func reviewCoordinationInspection(task domain.Task, actorID string) protocol.OrchestrationReview {
@@ -765,6 +810,14 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 	if issueClient == nil {
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("issue store unavailable")
 	}
+	summaryTasks := make([]domain.Task, 0, len(requested))
+	for _, issueID := range requested {
+		task, summaryErr := issueClient.GetWithRuntime(ctx, projectID, issueID)
+		if summaryErr != nil {
+			return protocol.OrchestrationIntentResult{}, fmt.Errorf("load bounded review result input for %s: %w", issueID, summaryErr)
+		}
+		summaryTasks = append(summaryTasks, task)
+	}
 	for _, issueID := range requested {
 		if request.Scope.Kind == domain.OrchestrationScopeRooted {
 			task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
@@ -958,6 +1011,23 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 			result.Failed[issueID] = actionErr.Error()
 		}
 	}
+	revisions := make(map[string]string, len(requested))
+	for _, issueID := range requested {
+		if inspection, ok := queue[issueID]; ok {
+			revisions[issueID] = strings.TrimSpace(inspection.HeadRevision)
+			if revisions[issueID] == "" {
+				revisions[issueID] = strings.TrimSpace(inspection.SourceOID)
+			}
+		}
+	}
+	role := domain.WorkflowRoleReviewer
+	if request.Kind == protocol.OrchestrationIntentReviewAccept {
+		role = domain.WorkflowRoleIntegrator
+	}
+	result.Results, err = buildOrchestrationResultSummaries(result, summaryTasks, role, revisions)
+	if err != nil {
+		return protocol.OrchestrationIntentResult{}, err
+	}
 	return result, nil
 }
 
@@ -1033,6 +1103,15 @@ func (a daemonOrchestrationAuthority) activeValidationReviewReturn(ctx context.C
 	}
 	worktrees := a.daemon.projectReadWorktrees(projectID)
 	inspection := a.reviewInspection(ctx, projectID, request.RepoDir, request.ActorID, task, byID, worktrees)
+	if inspection.ReviewContext == nil {
+		inspection.HeadRevision = strings.TrimSpace(gate.SourceRevision)
+		if packet, packetErr := buildReviewWorkflowContext(task, inspection, domain.WorkflowRoleReviewer); packetErr == nil {
+			inspection.ReviewContext = &packet
+			if integrationPacket, integrationErr := buildReviewWorkflowContext(task, inspection, domain.WorkflowRoleIntegrator); integrationErr == nil {
+				inspection.IntegrationContext = &integrationPacket
+			}
+		}
+	}
 	inspection.Reasons = uniqueNonEmpty(append(inspection.Reasons, "active-validation-return:"+gate.RequestID))
 	return inspection, true, nil
 }
@@ -1073,7 +1152,10 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 			return fmt.Errorf("persist review findings: %s", responseErrorMessage(mailResp))
 		}
 	}
-	message := formatReviewFindingMessage(inspection.IssueID, parent, request.Findings)
+	message, err := formatReviewFindingMessage(inspection, parent, request.Findings)
+	if err != nil {
+		return fmt.Errorf("build bounded review finding handoff: %w", err)
+	}
 	if inspection.ReviewEpochEventID > 0 {
 		if err := a.validateReviewAdmissionInspection(ctx, projectID, inspection); err != nil {
 			return fmt.Errorf("return review admission changed before delivery: %w", err)
@@ -2070,24 +2152,56 @@ func (a daemonOrchestrationAuthority) deliverReviewMessage(ctx context.Context, 
 	return true, nil
 }
 
-func formatReviewFindingMessage(issueID, parent string, findings []protocol.OrchestrationReviewFinding) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Orchestrator review findings for issue %s under root %s:\n", issueID, parent)
-	for i, finding := range findings {
-		fmt.Fprintf(&b, "\n%d. [%s]", i+1, strings.TrimSpace(finding.Severity))
-		if finding.File != "" {
-			fmt.Fprintf(&b, " %s", finding.File)
-			if finding.Line > 0 {
-				fmt.Fprintf(&b, ":%d", finding.Line)
-			}
-		}
-		fmt.Fprintf(&b, " — %s", strings.TrimSpace(finding.Finding))
-		if finding.SuggestedFix != "" {
-			fmt.Fprintf(&b, "\n   Fix: %s", strings.TrimSpace(finding.SuggestedFix))
-		}
+func formatReviewFindingMessage(inspection protocol.OrchestrationReview, parent string, findings []protocol.OrchestrationReviewFinding) (string, error) {
+	revision := strings.TrimSpace(inspection.HeadRevision)
+	if revision == "" {
+		revision = strings.TrimSpace(inspection.SourceOID)
 	}
-	b.WriteString("\n\nAddress the findings, rerun validation and the required review loop, then report updated worker-integration-ready evidence without stopping this session.")
-	return b.String()
+	if revision == "" && inspection.ReviewEpochEventID > 0 {
+		revision = fmt.Sprintf("issue-event:%d", inspection.ReviewEpochEventID)
+	}
+	unresolved := make([]string, 0, len(findings))
+	invariants := make([]string, 0)
+	for _, finding := range findings {
+		parts := []string{strings.TrimSpace(finding.Severity)}
+		if file := strings.TrimSpace(finding.File); file != "" && !filepath.IsAbs(file) {
+			if finding.Line > 0 {
+				file = fmt.Sprintf("%s:%d", file, finding.Line)
+			}
+			parts = append(parts, file)
+		}
+		parts = append(parts, strings.TrimSpace(finding.Finding))
+		if finding.SuggestedFix != "" {
+			parts = append(parts, "fix: "+strings.TrimSpace(finding.SuggestedFix))
+		}
+		unresolved = append(unresolved, strings.Join(parts, " — "))
+		invariants = append(invariants, finding.Validation...)
+	}
+	if revision == "" {
+		material, err := json.Marshal(struct {
+			IssueID  string                                `json:"issue_id"`
+			ParentID string                                `json:"parent_id"`
+			Findings []protocol.OrchestrationReviewFinding `json:"findings"`
+		}{IssueID: inspection.IssueID, ParentID: parent, Findings: findings})
+		if err != nil {
+			return "", fmt.Errorf("marshal review finding provenance: %w", err)
+		}
+		sum := sha256.Sum256(material)
+		revision = fmt.Sprintf("review-findings-sha256:%x", sum)
+	}
+	packet, err := domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
+		Role: domain.WorkflowRoleWorker, IssueID: inspection.IssueID, SourceRevision: revision,
+		Summary:            "Address returned review findings under root " + parent,
+		UnresolvedFindings: unresolved, AffectedInvariants: invariants,
+	})
+	if err != nil {
+		return "", err
+	}
+	encoded, err := domain.MarshalWorkflowContextPacket(packet)
+	if err != nil {
+		return "", err
+	}
+	return "Orchestrator review return for issue " + inspection.IssueID + ". Consume only this bounded semantic packet for the repair phase; do not reconstruct context from workflow scrollback:\n" + string(encoded) + "\n\nAddress the findings, rerun validation and the required review loop, then report updated worker-integration-ready evidence without stopping this session.", nil
 }
 
 func responseErrorMessage(resp protocol.ResponseEnvelope) string {
