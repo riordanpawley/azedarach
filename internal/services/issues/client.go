@@ -3425,6 +3425,65 @@ func (c *Client) CloseWithRuntimeReviewPublicationAuthority(ctx context.Context,
 	return c.GetWithRuntime(ctx, projectID, id)
 }
 
+// CloseWithRuntimeExternalReviewPublicationAuthority atomically closes an issue,
+// consumes its exact typed review lease, and retires the accepted publication
+// operation after an externally completed integration has been verified.
+func (c *Client) CloseWithRuntimeExternalReviewPublicationAuthority(ctx context.Context, projectID, id string, status domain.Status, authority ReviewPublicationAuthority, pin *ReviewEvidencePin, operation domain.PublicationOperation, finishedAt time.Time) (domain.Task, error) {
+	nextState, err := issueStateFromStatus(status)
+	if err != nil {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
+	}
+	if nextState.Workflow() != domain.IssueWorkflowClosed {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
+	}
+	finishedAt = finishedAt.UTC()
+	if finishedAt.IsZero() {
+		finishedAt = time.Now().UTC()
+	}
+	if err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
+				if pin != nil {
+					if err := validateTerminalReviewEvidencePin(ctx, tx, id, *pin); err != nil {
+						return err
+					}
+				}
+				if err := validateReviewPublicationAuthority(ctx, tx, id, authority); err != nil {
+					return err
+				}
+				if strings.TrimSpace(operation.OperationID) != strings.TrimSpace(authority.PublicationOperationID) {
+					return fmt.Errorf("%w: external reconciliation requires the exact accepted publication operation", domain.ErrConflict)
+				}
+				result, err := tx.ExecContext(ctx, `UPDATE daemon_publication_operations
+					SET state=?,lease_owner='',claim_token='',claim_expires_at=NULL,
+						failure_kind='',failure_detail='',failure_artifact='',finished_at=?,updated_at=?
+					WHERE operation_id=? AND issue_id=? AND state=? AND claim_token=?`,
+					string(domain.PublicationOperationMerged), finishedAt.Format(time.RFC3339Nano), finishedAt.Format(time.RFC3339Nano),
+					operation.OperationID, strings.TrimSpace(id), string(operation.State), strings.TrimSpace(operation.ClaimToken))
+				if err != nil {
+					return fmt.Errorf("terminalize externally reconciled publication operation: %w", err)
+				}
+				if changed, _ := result.RowsAffected(); changed != 1 {
+					return fmt.Errorf("%w: publication operation changed concurrently", domain.ErrConflict)
+				}
+				result, err = tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases
+					WHERE issue_id=? AND purpose=? AND LOWER(owner_id)=? AND owner_kind=?`,
+					strings.TrimSpace(id), domain.CoordinationLeaseReview, strings.ToLower(strings.TrimSpace(authority.Reviewer.OwnerID)), authority.Reviewer.OwnerKind)
+				if err != nil {
+					return err
+				}
+				if removed, _ := result.RowsAffected(); removed != 1 {
+					return fmt.Errorf("%w: exact typed reviewer lease is missing or changed", domain.ErrConflict)
+				}
+				return nil
+			})
+		})
+	}); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
+}
+
 func consumeAcceptedReviewerLease(ctx context.Context, tx *sql.Tx, issueID, reviewerID string) error {
 	result, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases
 		WHERE issue_id=? AND purpose=? AND LOWER(owner_id)=LOWER(?)`, strings.TrimSpace(issueID), domain.CoordinationLeaseReview, strings.TrimSpace(reviewerID))

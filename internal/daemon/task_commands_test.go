@@ -8948,6 +8948,226 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	}
 }
 
+func TestVerifyExternalTaskIntegrationRequiresAncestryAndCandidateTreeIdentity(t *testing.T) {
+	operation := domain.PublicationOperation{
+		OperationID: "publication", TargetID: "base", TargetBranch: "main", BaseRevision: "base-oid",
+		SourceRevision: "source-oid", CandidateRevision: "candidate-oid",
+	}
+	tests := []struct {
+		name            string
+		integrationTree string
+		failAncestry    string
+		wantErr         string
+	}{
+		{name: "success", integrationTree: "tree-exact"},
+		{name: "candidate tree mismatch", integrationTree: "tree-other", wantErr: "does not match accepted candidate tree"},
+		{name: "reviewed source missing", integrationTree: "tree-exact", failAncestry: "source-oid", wantErr: "reviewed source source-oid is not reachable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+				joined := strings.Join(args, " ")
+				switch {
+				case strings.Contains(joined, "rev-parse --verify integrated^{commit}"):
+					return "integrated-oid", nil
+				case strings.Contains(joined, "rev-parse --verify main^{commit}"):
+					return "main-oid", nil
+				case strings.Contains(joined, "merge-base --is-ancestor"):
+					if tt.failAncestry != "" && strings.Contains(joined, tt.failAncestry) {
+						return "", fmt.Errorf("exit status 1")
+					}
+					return "", nil
+				case strings.Contains(joined, "rev-parse --verify candidate-oid^{tree}"):
+					return "tree-exact", nil
+				case strings.Contains(joined, "rev-parse --verify integrated-oid^{tree}"):
+					return tt.integrationTree, nil
+				default:
+					return "", fmt.Errorf("unexpected git args: %s", joined)
+				}
+			}}
+			d := &Daemon{git: git.NewClient(runner, slog.Default())}
+			got, err := d.verifyExternalTaskIntegration(context.Background(), t.TempDir(), "issue-1", "integrated", operation)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("verify error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("verify external integration: %v", err)
+			}
+			if !got.ExternalReconciled || got.TargetOID != "integrated-oid" || got.SourceOID != operation.SourceRevision || got.PublicationOperationID != operation.OperationID {
+				t.Fatalf("integration = %+v, want exact reconciled identity", got)
+			}
+		})
+	}
+}
+
+func TestTaskCloseCommandReplaysCompletedExternalIntegrationAndRepublishesDurableState(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.Default()
+	client := newMigratedIssueClient(t, repoDir, logger)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, logger: logger})
+	t.Cleanup(func() { _ = runtime.Close() })
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID = protocol.NormalizeProjectID(projectID)
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+	admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission, ReviewSourceOID: "source-oid"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	operation := domain.PublicationOperation{
+		OperationID: "publication-replayed", ProjectID: projectID, IssueID: issueID, IntentKey: "accepted-external", RequestFingerprint: "fingerprint",
+		ActorID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: admission.ReviewEpochEventID,
+		PatchEvidenceID: "publication-replayed", AcceptedPublicationOperationID: "publication-replayed", TargetID: "base", TargetBranch: "main",
+		SourceRevision: "source-oid", BaseRevision: "base-oid", CandidateRevision: "candidate-oid", PolicyVersion: "policy", EnvironmentFingerprint: "test", ValidationCommand: "just test", CreatedAt: now,
+	}
+	patchEvidence := domain.PublicationEvidence{EvidenceID: operation.PatchEvidenceID, ProjectID: projectID, IssueID: issueID, Layer: domain.PublicationEvidencePatchReview, PatchDigest: "patch", SourceRevision: operation.SourceRevision, BaseRevision: operation.BaseRevision, Producer: "reviewer:reviewer", PolicyVersion: operation.PolicyVersion, EnvironmentFingerprint: operation.EnvironmentFingerprint, CreatedAt: now}
+	receipt, err := client.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
+		"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint,
+	}}, operation, patchEvidence, "accepted-external", admission, "", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation.AcceptedReviewEventID = receipt.EventID
+	storedRoot, found, err := runtime.store.PublicationOperation(ctx, operation.OperationID)
+	if err != nil || !found {
+		t.Fatalf("accepted publication root found=%t err=%v", found, err)
+	}
+	if storedRoot.ProjectID != projectID || !naming.IssueIDsEqual(storedRoot.IssueID, issueID) || storedRoot.AcceptedReviewEventID != receipt.EventID {
+		t.Fatalf("accepted publication root identity = %+v receipt=%+v project=%s issue=%s", storedRoot, receipt, projectID, issueID)
+	}
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "rev-parse --verify integrated^{commit}"):
+			return "integrated-oid", nil
+		case strings.Contains(joined, "rev-parse --verify main^{commit}"):
+			return "main-oid", nil
+		case strings.Contains(joined, "merge-base --is-ancestor"):
+			return "", nil
+		case strings.Contains(joined, "rev-parse --verify candidate-oid^{tree}"), strings.Contains(joined, "rev-parse --verify integrated-oid^{tree}"):
+			return "tree-exact", nil
+		default:
+			return "", fmt.Errorf("unexpected git args: %s", joined)
+		}
+	}}
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	published := 0
+	d := &Daemon{cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger}, git: git.NewClient(runner, logger), operationRuntime: runtime, hub: publish.NewHub(16, 8, logger), revision: map[string]uint64{},
+		issueClientsByProject: map[string]*issues.Client{projectID: client}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore}, publicationStateChanged: func(got domain.PublicationOperation) {
+			published++
+			if got.OperationID != operation.OperationID || got.State != domain.PublicationOperationMerged {
+				t.Fatalf("published operation = %+v", got)
+			}
+		}}
+	body, err := json.Marshal(taskCloseRequest{TaskID: issueID, ExternalIntegratedRevision: "integrated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replayEvents <-chan protocol.EventEnvelope
+	var cancelReplayEvents func()
+	for attempt := 1; attempt <= 2; attempt++ {
+		resp, closeErr := d.handleTaskClose(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID(fmt.Sprintf("external-close-%d", attempt)), Kind: protocol.EnvelopeKindCommand, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Command: "task.close", Body: body})
+		if closeErr != nil || !resp.OK {
+			message := ""
+			if resp.Error != nil {
+				message = resp.Error.Message
+			}
+			t.Fatalf("close %d: response=%+v message=%q err=%v", attempt, resp, message, closeErr)
+		}
+		var result taskCloseResult
+		if err := json.Unmarshal(resp.Body, &result); err != nil {
+			t.Fatal(err)
+		}
+		if !result.Integrated || !result.IntegrationRequested || result.IntegratedTargetBranch != "main" || result.Revision == 0 {
+			t.Fatalf("close %d result = %+v", attempt, result)
+		}
+		if attempt == 1 {
+			replayEvents, cancelReplayEvents = d.hub.Subscribe(projectID, d.currentRevision(projectID))
+			defer cancelReplayEvents()
+		}
+	}
+	if published != 2 {
+		t.Fatalf("publication convergence notifications = %d, want 2", published)
+	}
+	gotEvents := map[string]bool{}
+	for len(gotEvents) < 2 {
+		event := <-replayEvents
+		gotEvents[event.Event] = true
+	}
+	for _, eventType := range []string{protocol.EventPublicationOperationUpdated, protocol.EventTaskUpdated} {
+		if !gotEvents[eventType] {
+			t.Fatalf("replay events = %+v, missing %s", gotEvents, eventType)
+		}
+	}
+	stored, found, err := runtime.store.PublicationOperation(ctx, operation.OperationID)
+	if err != nil || !found || stored.State != domain.PublicationOperationMerged {
+		t.Fatalf("terminal publication = %+v found=%t err=%v", stored, found, err)
+	}
+	closed, err := client.GetWithRuntime(ctx, projectID, issueID)
+	if err != nil || closed.Status != domain.StatusDone || len(closed.CoordinationLeases) != 0 {
+		t.Fatalf("terminal issue = %+v err=%v", closed, err)
+	}
+}
+
+func TestReconcileExternalTaskIntegrationRejectsStaleAcceptedRootIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*domain.PublicationOperation)
+	}{
+		{name: "project", mutate: func(op *domain.PublicationOperation) { op.ProjectID = "other-project" }},
+		{name: "issue", mutate: func(op *domain.PublicationOperation) { op.IssueID = "other-issue" }},
+		{name: "accepted event", mutate: func(op *domain.PublicationOperation) { op.AcceptedReviewEventID = 999999 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			repoDir := t.TempDir()
+			client := newMigratedIssueClient(t, repoDir, slog.Default())
+			t.Cleanup(func() { _ = client.CloseDB() })
+			projectID := protocol.NormalizeProjectID(filepath.Base(repoDir))
+			issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "authority mismatch", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInReview})
+			if err != nil {
+				t.Fatal(err)
+			}
+			accepted, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
+				"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "actor_kind": "orchestrator", "reviewer_kind": "orchestrator",
+				"intent_key": "stale-root", "request_fingerprint": "fingerprint", "review_epoch_event_id": int64(1), "publication_operation_id": "stale-root",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			op := domain.PublicationOperation{OperationID: "stale-root", ProjectID: projectID, IssueID: issueID, IntentKey: "stale-root", RequestFingerprint: "fingerprint", ActorID: "reviewer", ReviewerKind: "orchestrator", ReviewEpochEventID: 1, AcceptedReviewEventID: accepted.ID, PatchEvidenceID: "patch", AcceptedPublicationOperationID: "stale-root", TargetID: "base", TargetBranch: "main", SourceRevision: "source", BaseRevision: "base", CandidateRevision: "candidate", PolicyVersion: "policy", EnvironmentFingerprint: "test", ValidationCommand: "just test", CreatedAt: time.Now().UTC()}
+			tc.mutate(&op)
+			runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+			t.Cleanup(func() { _ = runtime.Close() })
+			if _, _, err := runtime.store.EnqueuePublication(ctx, op, "stale-root-"+tc.name); err != nil {
+				t.Fatal(err)
+			}
+			d := &Daemon{cfg: Config{RepoDir: repoDir}, git: git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) { return "", fmt.Errorf("git must not run") }}, slog.Default()), operationRuntime: runtime, issueClientsByProject: map[string]*issues.Client{projectID: client}}
+			if _, _, err := d.reconcileExternalTaskIntegration(ctx, projectID, issueID, "integrated"); err == nil || !strings.Contains(err.Error(), "stale project, issue, or review identity") {
+				t.Fatalf("reconcile error = %v", err)
+			}
+		})
+	}
+}
+
 func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

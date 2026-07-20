@@ -1347,7 +1347,7 @@ func main() {
 		case "integrate":
 			opts, err := cli.ParseOrchestrateIntegrateArgs(commandArgs[1:])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az orchestrate integrate --issue <issue-id> [--apply] [--project <project-id>] [--json]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az orchestrate integrate --issue <issue-id> [--external-integrated-revision <commit>] [--apply] [--project <project-id>] [--json]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

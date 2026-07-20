@@ -143,6 +143,70 @@ func acceptedPublicationTestEvidence(operation domain.PublicationOperation) doma
 	}
 }
 
+func TestExternalReviewPublicationCloseAtomicallyMergesOperationAndConsumesLease(t *testing.T) {
+	ctx, repo := context.Background(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".azedarach"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(repo, nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	queue := operationstore.New(repo, nil)
+	t.Cleanup(func() { _ = queue.Close() })
+	if _, err := queue.PublicationOperations(ctx, "project", "", false); err != nil {
+		t.Fatal(err)
+	}
+	issueID, err := client.Create(ctx, CreateTaskParams{Title: "external integration", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer", OwnerKind: domain.ReviewerOwnerKindOrchestrator, Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission, ReviewSourceOID: "source"}); err != nil {
+		t.Fatal(err)
+	}
+	operation := domain.PublicationOperation{
+		OperationID: "external-publication", ProjectID: "project", IssueID: issueID, IntentKey: "external", RequestFingerprint: "external-fingerprint",
+		ActorID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: admission.ReviewEpochEventID,
+		TargetID: "base", TargetBranch: "main", SourceRevision: "source", BaseRevision: "base", CandidateRevision: "candidate",
+		PolicyVersion: "policy", EnvironmentFingerprint: "toolchain", ValidationCommand: "go test ./...", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
+	}
+	operation.PatchEvidenceID = operation.OperationID
+	accepted, err := client.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint}}, operation, acceptedPublicationTestEvidence(operation), operation.CandidateRevision, admission, "", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation.AcceptedReviewEventID = accepted.EventID
+	authority := ReviewPublicationAuthority{Reviewer: domain.ReviewerIdentity{OwnerID: "reviewer", OwnerKind: domain.ReviewerOwnerKindOrchestrator}, ReviewEpochEventID: admission.ReviewEpochEventID, AcceptedReviewEventID: accepted.EventID, PublicationOperationID: operation.OperationID, AcceptedPublicationOperationID: operation.OperationID}
+	db, err := sql.Open("sqlite", filepath.Join(repo, ".azedarach", "azedarach.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`UPDATE daemon_publication_operations SET state='failed' WHERE operation_id=?`, operation.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CloseWithRuntimeExternalReviewPublicationAuthority(ctx, "project", issueID, domain.StatusDone, authority, nil, operation, time.Now()); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("stale operation close error=%v", err)
+	}
+	if task, err := client.GetWithRuntime(ctx, "project", issueID); err != nil || task.Status != domain.StatusInReview {
+		t.Fatalf("concurrent rejection changed issue: status=%s err=%v", task.Status, err)
+	}
+	operation.State = domain.PublicationOperationFailed
+	if _, err := client.CloseWithRuntimeExternalReviewPublicationAuthority(ctx, "project", issueID, domain.StatusDone, authority, nil, operation, time.Now()); err != nil {
+		t.Fatalf("external close from failed operation: %v", err)
+	}
+	var state, failureKind, failureDetail string
+	if err := db.QueryRow(`SELECT state,failure_kind,failure_detail FROM daemon_publication_operations WHERE operation_id=?`, operation.OperationID).Scan(&state, &failureKind, &failureDetail); err != nil || state != string(domain.PublicationOperationMerged) || failureKind != "" || failureDetail != "" {
+		t.Fatalf("operation state=%q failure=%q/%q err=%v", state, failureKind, failureDetail, err)
+	}
+	var leases int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM issue_coordination_leases WHERE issue_id=? AND purpose='review'`, issueID).Scan(&leases); err != nil || leases != 0 {
+		t.Fatalf("review leases=%d err=%v", leases, err)
+	}
+}
+
 func TestTerminalizeAcceptedReviewPublicationAtomicallySupersedesExactEpoch(t *testing.T) {
 	for _, state := range []domain.PublicationOperationState{domain.PublicationOperationFailed, domain.PublicationOperationConflicted, domain.PublicationOperationStale, domain.PublicationOperationCanceled} {
 		t.Run(string(state), func(t *testing.T) {

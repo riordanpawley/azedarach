@@ -100,10 +100,11 @@ type OrchestratePromptOptions struct {
 }
 
 type OrchestrateIntegrateOptions struct {
-	Project string
-	IssueID string
-	Apply   bool
-	JSON    bool
+	Project                    string
+	IssueID                    string
+	ExternalIntegratedRevision string
+	Apply                      bool
+	JSON                       bool
 }
 
 type OrchestrateCloseSessionOptions struct {
@@ -803,6 +804,7 @@ func ParseOrchestrateIntegrateArgs(args []string) (OrchestrateIntegrateOptions, 
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&opts.IssueID, "issue", "", "worker issue id to integrate")
+	fs.StringVar(&opts.ExternalIntegratedRevision, "external-integrated-revision", "", "reconcile an explicitly authorized integration already present on the configured target")
 	fs.BoolVar(&opts.Apply, "apply", false, "apply integration instead of printing advisory guidance")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
 	if err := fs.Parse(args); err != nil {
@@ -2488,7 +2490,7 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 	if err != nil {
 		return finishOrchestrateIntegratePreflightFailure(opts, &result, err)
 	}
-	mergeReady := readiness.Ready
+	mergeReady := readiness.Ready || strings.TrimSpace(opts.ExternalIntegratedRevision) != ""
 	contextRiskBlocked := readiness.ContextRisk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*readiness.ContextRisk)
 	closeoutReady := mergeReady && !contextRiskBlocked
 	commands := orchestrateIntegrationCommands(opts.IssueID, opts.Project, wt, found, closeoutReady)
@@ -2505,7 +2507,7 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 		result.Branch = wt.Branch
 	}
 	if opts.Apply {
-		applyErr := applyOrchestrateIntegration(deps, opts.IssueID, opts.Project, mergeReady, &result)
+		applyErr := applyOrchestrateIntegration(deps, opts.IssueID, opts.Project, opts.ExternalIntegratedRevision, mergeReady, &result)
 		if opts.JSON {
 			if err := printJSON(result); err != nil {
 				return err
@@ -2579,7 +2581,7 @@ func finishOrchestrateIntegratePreflightFailure(opts OrchestrateIntegrateOptions
 	return wrapped
 }
 
-func applyOrchestrateIntegration(deps *Dependencies, issueID, projectID string, mergeReady bool, result *orchestrateIntegrateResult) error {
+func applyOrchestrateIntegration(deps *Dependencies, issueID, projectID, externalIntegratedRevision string, mergeReady bool, result *orchestrateIntegrateResult) error {
 	if !mergeReady {
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{
 			Name:   "completion_evidence",
@@ -2604,7 +2606,7 @@ func applyOrchestrateIntegration(deps *Dependencies, issueID, projectID string, 
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), issueCloseCleanupTimeout)
 	defer cancel()
 	closeResult, err := deps.DaemonClient.CloseTask(cleanupCtx, issueID, daemonclient.TaskStatusOptions{
-		IntegrateBeforeClose: true,
+		IntegrateBeforeClose: true, ExternalIntegratedRevision: strings.TrimSpace(externalIntegratedRevision),
 	})
 	if err != nil {
 		wrapped := fmt.Errorf("phase integrate_and_close for issue %s: %w", issueID, err)
@@ -2626,6 +2628,9 @@ func applyOrchestrateIntegration(deps *Dependencies, issueID, projectID string, 
 	})
 
 	note := fmt.Sprintf("Integrated by `%s`: daemon task.close integrated the branch, stopped session/worktree runtime if present, and closed the issue.", orchestrateIntegrateApplyCommandForProject(issueID, projectID))
+	if strings.TrimSpace(externalIntegratedRevision) != "" {
+		note = fmt.Sprintf("Reconciled externally completed integration %s through daemon task.close: exact accepted authority, ancestry, and candidate tree were verified; runtime was cleaned up and the issue was closed.", strings.TrimSpace(externalIntegratedRevision))
+	}
 	if err := deps.DaemonClient.AppendTaskNotes(cleanupCtx, issueID, note); err != nil {
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "append_evidence", Status: "failed", Error: err.Error()})
 		result.Recovery = orchestrateIntegrationRecovery(issueID, projectID, "post_close_failed")
