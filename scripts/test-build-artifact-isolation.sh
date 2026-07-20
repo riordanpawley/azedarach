@@ -19,6 +19,20 @@ trap cleanup_fixture EXIT
 export FAKE_GIT_COMMON_ROOT="$fixture"
 export AZEDARACH_REAL_GO_BIN="$fixture/fake-bin/go"
 
+wait_for_file_while_alive() {
+  local marker="$1"
+  local process_id="$2"
+  local description="$3"
+  while [[ ! -e "$marker" ]]; do
+    if ! kill -0 "$process_id" 2>/dev/null; then
+      wait "$process_id" 2>/dev/null || true
+      echo "$description exited before publishing its readiness marker" >&2
+      return 1
+    fi
+    sleep 0.02
+  done
+}
+
 mkdir -p "$fixture/bin" "$fixture/fake-bin" "$fixture/real-bin"
 cp "$repo_root/justfile" "$fixture/justfile"
 mkdir -p "$fixture/scripts"
@@ -572,8 +586,12 @@ env "${fresh_validation_environment[@]}" \
   "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile parent-death -- \
   sh -c 'echo $$ >"$1"; exec sleep 30' sh "$fixture/orphan-command.pid" &
 wrapper_pid=$!
-for _ in {1..100}; do
-  [[ -s "$fixture/orphan-command.pid" && -e "$fixture/heartbeat-blocked" ]] && break
+while [[ ! -s "$fixture/orphan-command.pid" || ! -e "$fixture/heartbeat-blocked" ]]; do
+  if ! kill -0 "$wrapper_pid" 2>/dev/null; then
+    wait "$wrapper_pid" 2>/dev/null || true
+    echo "validation wrapper exited before its command and heartbeat were ready" >&2
+    exit 1
+  fi
   sleep 0.02
 done
 test -s "$fixture/orphan-command.pid"
@@ -654,11 +672,8 @@ env "${fresh_validation_environment[@]}" \
   sh -c 'touch "$1"; sleep 2' sh "$fixture/whole-gate.started" \
   >"$fixture/whole-gate.stdout" 2>"$fixture/whole-gate.stderr" &
 whole_gate_pid=$!
-for _ in {1..100}; do
-  [[ -e "$fixture/whole-gate.started" ]] && break
-  sleep 0.02
-done
-test -e "$fixture/whole-gate.started"
+wait_for_file_while_alive "$fixture/whole-gate.started" "$whole_gate_pid" \
+  "whole-gate validation wrapper"
 "$fixture/fake-bin/raw-overlap.test" &
 raw_during_gate_pid=$!
 kill -0 "$raw_during_gate_pid"
@@ -762,11 +777,8 @@ env "${fresh_validation_environment[@]}" \
   sh -c 'touch "$1"; sleep 30' sh "$aggregate_ready" \
   >"$fixture/aggregate-holder.stdout" 2>"$fixture/aggregate-holder.stderr" &
 aggregate_holder_pid=$!
-for _ in {1..300}; do
-  [[ -e "$aggregate_ready" ]] && break
-  sleep 0.02
-done
-test -e "$aggregate_ready"
+wait_for_file_while_alive "$aggregate_ready" "$aggregate_holder_pid" \
+  "aggregate validation holder"
 AZEDARACH_PRODUCTION_ADMISSION_WAIT_SECONDS=1 PATH="$fixture/fake-bin:$PATH" \
   "$fixture/scripts/with-production-install-admission" -- true \
   >"$fixture/production-admission.stdout" 2>"$fixture/production-admission.stderr"
@@ -786,11 +798,8 @@ env "${fresh_validation_environment[@]}" \
   "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose development --profile focused-development -- \
   sh -c 'touch "$1"; sleep 30' sh "$development_ready" &
 development_holder_pid=$!
-for _ in {1..300}; do
-  [[ -e "$development_ready" ]] && break
-  sleep 0.02
-done
-test -e "$development_ready"
+wait_for_file_while_alive "$development_ready" "$development_holder_pid" \
+  "development validation holder"
 grep -q "validation overlapped a production install and is noncanonical" \
   "$fixture/aggregate-holder.stderr"
 AZEDARACH_PRODUCTION_ADMISSION_WAIT_SECONDS=1 PATH="$fixture/fake-bin:$PATH" \
@@ -1007,12 +1016,7 @@ FAKE_GIT_MODE=primary FAKE_GO_MARKER=tui-admission-lifetime \
   "$fixture/scripts/build-install-run.sh" \
   >"$fixture/tui-admission-lifetime.stdout" 2>"$fixture/tui-admission-lifetime.stderr" &
 tui_pid=$!
-for _ in {1..300}; do
-  [[ -e "$tui_started" ]] && break
-  kill -0 "$tui_pid" 2>/dev/null || break
-  sleep 0.02
-done
-if [[ ! -e "$tui_started" ]]; then
+if ! wait_for_file_while_alive "$tui_started" "$tui_pid" "production TUI"; then
   echo "production TUI did not start" >&2
   cat "$fixture/tui-admission-lifetime.stdout" >&2 || true
   cat "$fixture/tui-admission-lifetime.stderr" >&2 || true
