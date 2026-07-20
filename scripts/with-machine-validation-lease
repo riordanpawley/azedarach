@@ -375,11 +375,24 @@ my $supervisor = fork();
 die "fork validation command supervisor: $!\n" unless defined $supervisor;
 if ($supervisor == 0) {
     close $broker_parent;
+    pipe(my $status_reader, my $status_writer) or die "create validation payload status pipe: $!\n";
     my $parent = $wrapper_pid;
     my $payload = fork();
     die "fork validation command: $!\n" unless defined $payload;
     if ($payload == 0) {
+        close $status_reader;
         setpgid(0, 0);
+        my $command = fork();
+        die "fork validation command worker: $!\n" unless defined $command;
+        if ($command != 0) {
+            my $waited = waitpid($command, 0);
+            my $command_status = $waited == $command ? wait_status_code($?) : 127;
+            print {$status_writer} "$command_status\n" or die "write validation payload status: $!\n";
+            close $status_writer or die "close validation payload status: $!\n";
+            # Remain as the unreaped process-group identity anchor until the
+            # supervisor has terminated the complete group.
+            sleep 3600 while 1;
+        }
         delete $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN};
         # Control and cleanup client routing belongs to the wrapper supervisors,
         # never to the payload. Route candidate runtime assets through the
@@ -399,54 +412,59 @@ if ($supervisor == 0) {
         $ENV{AZEDARACH_VALIDATION_NESTED_FD} = fileno($broker_child);
         exec @ARGV or die "exec validation command $ARGV[0]: $!\n";
     }
+    close $status_writer;
     close $broker_child;
     eval { setpgid($payload, $payload) };
-    my $forward = sub { my ($signal) = @_; kill $signal, -$payload if $payload; };
+    my $payload_interrupted = 0;
+    my %payload_signal_exit = (HUP => 129, INT => 130, TERM => 143);
+    my $forward = sub {
+        my ($signal) = @_;
+        $payload_interrupted = $payload_signal_exit{$signal};
+        kill $signal, -$payload if $payload;
+    };
     local $SIG{TERM} = sub { $forward->('TERM') };
     local $SIG{INT} = sub { $forward->('INT') };
     local $SIG{HUP} = sub { $forward->('HUP') };
-    my $payload_status;
+    my $payload_exit_code;
+    my $status_selector = IO::Select->new($status_reader);
+    my $status_buffer = '';
     while (1) {
-        my $waited = waitpid($payload, WNOHANG);
-        if ($waited == $payload) {
-            $payload_status = $?;
-            last;
-        }
-        if (getppid() != $parent) {
-            kill 'TERM', -$payload;
-            for (1..20) {
-                $waited = waitpid($payload, WNOHANG);
-                if ($waited == $payload) {
-                    $payload_status = $?;
+        for my $ready ($status_selector->can_read(0.1)) {
+            my $bytes = sysread($ready, my $chunk, 64);
+            if (defined($bytes) && $bytes > 0) {
+                $status_buffer .= $chunk;
+                if ($status_buffer =~ /^(\d+)\n/) {
+                    $payload_exit_code = 0 + $1;
                     last;
                 }
-                sleep 0.1;
+            } elsif ($payload_interrupted) {
+                $payload_exit_code = $payload_interrupted;
+                last;
             }
-            if (!defined $payload_status) {
-                kill 'KILL', -$payload;
-                waitpid($payload, 0);
-                $payload_status = $?;
-            }
+        }
+        last if defined $payload_exit_code;
+        if (getppid() != $parent) {
+            $payload_exit_code = 143;
             last;
         }
-        sleep 0.1;
     }
-    # The leader may exit while background descendants retain the payload
-    # process group. Quiesce that exact group before trusted publication reads.
-    # This never targets unrelated processes: the payload created the group and
-    # its stable PGID is the leader PID retained by this supervisor.
+    close $status_reader;
+    # The anchor remains an unreaped child throughout TERM/KILL delivery, so
+    # its PID and therefore the payload PGID cannot be reused by an unrelated
+    # process group before cleanup completes.
+    if (my $ready = delete($ENV{AZEDARACH_VALIDATION_TEST_GROUP_ANCHOR_READY_FILE})) {
+        sysopen(my $ready_fh, $ready, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+            or die "create payload group anchor test marker: $!\n";
+        print {$ready_fh} "$payload\n" or die "write payload group anchor test marker: $!\n";
+        close $ready_fh or die "close payload group anchor test marker: $!\n";
+        my $release = delete($ENV{AZEDARACH_VALIDATION_TEST_GROUP_ANCHOR_RELEASE_FILE}) || '';
+        sleep 0.01 until $release ne '' && -e $release;
+    }
     kill 'TERM', -$payload;
-    for (1..20) {
-        last unless kill 0, -$payload;
-        sleep 0.1;
-    }
-    kill 'KILL', -$payload if kill 0, -$payload;
-    for (1..20) {
-        last unless kill 0, -$payload;
-        sleep 0.1;
-    }
-    die "validation payload process group did not drain\n" if kill 0, -$payload;
-    exit wait_status_code($payload_status);
+    sleep 0.1;
+    kill 'KILL', -$payload;
+    waitpid($payload, 0);
+    exit $payload_exit_code;
 }
 close $broker_child;
 

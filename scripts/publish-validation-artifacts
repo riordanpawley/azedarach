@@ -34,7 +34,14 @@ exit 0 if $arg{'prune-only'};
 for my $required (qw(candidate-root control-root evidence gate-output request revision exit-code)) {
     die "--$required is required\n" unless defined($arg{$required}) && $arg{$required} ne '';
 }
-my $candidate_root = canonical_directory($arg{'candidate-root'});
+my ($candidate_root, $candidate_root_handle) = canonical_directory_handle($arg{'candidate-root'});
+if (my $ready = delete($ENV{AZEDARACH_VALIDATION_TEST_CANDIDATE_ROOTFD_READY_FILE})) {
+    sysopen(my $ready_fh, $ready, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+        or die "create candidate rootfd test marker: $!\n";
+    close $ready_fh or die "close candidate rootfd test marker: $!\n";
+    my $release = delete($ENV{AZEDARACH_VALIDATION_TEST_CANDIDATE_ROOTFD_RELEASE_FILE}) || '';
+    sleep 0.01 until $release ne '' && -e $release;
+}
 my $control_root = canonical_directory($arg{'control-root'});
 my $evidence_path = trusted_control_path($control_root, $arg{evidence}, 1);
 my $gate_output_path = trusted_control_path($control_root, $arg{'gate-output'}, 1);
@@ -73,7 +80,7 @@ push @candidate_report_paths, $evidence->{report_path}
 my @source_reports = unique_nonempty(@candidate_report_paths);
 my (@measurements, @report_dirs);
 for my $source_report (@source_reports) {
-    my $source_dir = open_candidate_report_directory($candidate_root, $source_report);
+    my $source_dir = open_candidate_report_directory($candidate_root, $candidate_root_handle, $source_report);
     next unless $source_dir;
     my $index = @report_dirs + 1;
     my $destination = safe_directory_chain($reports_root, sprintf('%03d', $index));
@@ -154,6 +161,21 @@ sub canonical_directory {
     my $canonical = abs_path($path) || '';
     die "directory is unavailable: $path\n" unless $canonical ne '' && safe_existing_directory($canonical);
     return $canonical;
+}
+
+sub canonical_directory_handle {
+    my ($path) = @_;
+    my $canonical = canonical_directory($path);
+    sysopen(my $directory, File::Spec->rootdir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        or die "open filesystem root without symlink following: $!\n";
+    for my $component (grep { $_ ne '' && $_ ne '.' } File::Spec->splitdir($canonical)) {
+        my $next = openat_handle($directory, $component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        die "open canonical directory component $component: $!\n" unless $next;
+        stat($next) or die "inspect canonical directory component $component: $!\n";
+        die "canonical directory component is not a directory\n" unless -d _;
+        $directory = $next;
+    }
+    return ($canonical, $directory);
 }
 
 sub safe_identity {
@@ -278,13 +300,11 @@ sub candidate_relative_components {
 }
 
 sub open_candidate_report_directory {
-    my ($root, $report_path) = @_;
+    my ($root, $root_handle, $report_path) = @_;
     my @parts = candidate_relative_components($root, $report_path);
     return unless @parts && pop(@parts) eq 'report.json';
-    sysopen(my $directory, $root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-        or die "open candidate root without symlink following: $!\n";
-    stat($directory) or die "inspect candidate root handle: $!\n";
-    die "candidate root handle is not a directory\n" unless -d _;
+    open(my $directory, '<&', fileno($root_handle))
+        or die "duplicate retained candidate root handle: $!\n";
     for my $component (@parts) {
         my $next = openat_handle($directory, $component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
         return undef unless $next;
@@ -301,8 +321,9 @@ sub openat_regular_nofollow {
     my ($directory, $name) = @_;
     my $file = openat_handle($directory, $name, O_RDONLY | O_NOFOLLOW);
     return undef unless $file;
-    stat($file) or die "inspect candidate artifact handle: $!\n";
-    return -f _ ? $file : undef;
+    my @stat = stat($file);
+    die "inspect candidate artifact handle: $!\n" unless @stat;
+    return -f _ && $stat[3] == 1 ? $file : undef;
 }
 
 sub unique_nonempty {

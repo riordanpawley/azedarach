@@ -140,6 +140,66 @@ grep -q 'trusted events' "$race_bundle/events.jsonl"
 grep -q 'trusted stderr' "$race_bundle/stderr.txt"
 ! grep -R -q 'must-not-copy' "$race_bundle"
 
+# Replacing the candidate root pathname after trusted traversal cannot redirect
+# traversal: the publisher retains the root handle acquired by that traversal.
+root_race_report="$scratch_root/.tmp/test-timing/root-race"
+root_race_original="$fixture/scratch-root-race-original"
+root_race_outside="$outside/root-race"
+mkdir -p "$root_race_report" "$root_race_outside/.tmp/test-timing/root-race"
+printf '{"exit_code":1,"failures":[]}\n' >"$root_race_report/report.json"
+printf 'trusted root report\n' >"$root_race_report/report.md"
+printf 'must-not-copy-root\n' >"$root_race_outside/.tmp/test-timing/root-race/report.md"
+printf '{"exit_code":1,"failures":[]}\n' >"$root_race_outside/.tmp/test-timing/root-race/report.json"
+root_race_request="dov-root-race"
+root_race_evidence="$control_root/root-race-evidence.json"
+root_race_ready="$fixture/root-race-ready"
+root_race_release="$fixture/root-race-release"
+cat >"$root_race_evidence" <<EOF
+{"request_id":"$root_race_request","source_revision":"$revision","publication_nonce":"root-race-nonce","issue_id":"dov","report_path":"$root_race_report/report.json"}
+EOF
+AZEDARACH_VALIDATION_TEST_CANDIDATE_ROOTFD_READY_FILE="$root_race_ready" \
+AZEDARACH_VALIDATION_TEST_CANDIDATE_ROOTFD_RELEASE_FILE="$root_race_release" \
+  "$publisher" --project-root "$project_root" --candidate-root "$scratch_root" \
+  --control-root "$control_root" --evidence "$root_race_evidence" \
+  --gate-output "$control_root/gate-output.log" --request "$root_race_request" \
+  --revision "$revision" --exit-code 1 >/dev/null &
+root_race_publisher_pid=$!
+while [[ ! -e "$root_race_ready" ]]; do kill -0 "$root_race_publisher_pid"; done
+mv "$scratch_root" "$root_race_original"
+ln -s "$root_race_outside" "$scratch_root"
+: >"$root_race_release"
+wait "$root_race_publisher_pid"
+root_race_bundle="$project_root/.azedarach/validation-artifacts/failures/$revision/$root_race_request/reports/001"
+grep -q 'trusted root report' "$root_race_bundle/report.md"
+! grep -R -q 'must-not-copy-root' "$root_race_bundle"
+unlink "$scratch_root"
+mv "$root_race_original" "$scratch_root"
+
+# Candidate artifacts must be isolated inodes. A hard link can expose bytes
+# owned outside the disposable candidate even though its pathname is inside.
+for hardlink_name in report.json report.md events.jsonl stderr.txt; do
+  hardlink_request="dov-hardlink-${hardlink_name//./-}"
+  hardlink_dir="$scratch_root/.tmp/test-timing/$hardlink_request"
+  mkdir -p "$hardlink_dir"
+  printf '{"exit_code":1,"failures":[]}\n' >"$hardlink_dir/report.json"
+  printf 'trusted markdown\n' >"$hardlink_dir/report.md"
+  printf 'trusted events\n' >"$hardlink_dir/events.jsonl"
+  printf 'trusted stderr\n' >"$hardlink_dir/stderr.txt"
+  printf 'must-not-copy-hardlink-%s\n' "$hardlink_name" >"$outside/hardlink-$hardlink_name"
+  unlink "$hardlink_dir/$hardlink_name"
+  ln "$outside/hardlink-$hardlink_name" "$hardlink_dir/$hardlink_name"
+  hardlink_evidence="$control_root/$hardlink_request-evidence.json"
+  cat >"$hardlink_evidence" <<EOF
+{"request_id":"$hardlink_request","source_revision":"$revision","publication_nonce":"$hardlink_request-nonce","issue_id":"dov","report_path":"$hardlink_dir/report.json"}
+EOF
+  "$publisher" --project-root "$project_root" --candidate-root "$scratch_root" \
+    --control-root "$control_root" --evidence "$hardlink_evidence" \
+    --gate-output "$control_root/gate-output.log" --request "$hardlink_request" \
+    --revision "$revision" --exit-code 1 >/dev/null
+  hardlink_bundle="$project_root/.azedarach/validation-artifacts/failures/$revision/$hardlink_request"
+  ! grep -R -q "must-not-copy-hardlink-$hardlink_name" "$hardlink_bundle"
+done
+
 # Trusted control inputs reject symlinks rather than following them.
 printf 'outside-evidence\n' >"$outside/evidence.json"
 ln -s "$outside/evidence.json" "$control_root/evidence-link.json"

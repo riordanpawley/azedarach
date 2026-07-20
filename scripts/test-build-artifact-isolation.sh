@@ -456,6 +456,31 @@ if env "${fresh_validation_environment[@]}" \
 fi
 ! kill -0 "$(cat "$payload_failure_pid")" 2>/dev/null
 
+# The group leader remains live and unreaped after the command result is known,
+# fencing its PID/PGID against reuse until group-wide cleanup has completed.
+payload_anchor_ready="$fixture/payload-anchor-ready"
+payload_anchor_release="$fixture/payload-anchor-release"
+unrelated_ready="$fixture/unrelated-ready"
+sh -c ': >"$1"; exec sleep 30' sh "$unrelated_ready" &
+unrelated_pid=$!
+env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
+  AZEDARACH_VALIDATION_TEST_GROUP_ANCHOR_READY_FILE="$payload_anchor_ready" \
+  AZEDARACH_VALIDATION_TEST_GROUP_ANCHOR_RELEASE_FILE="$payload_anchor_release" \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile pgid-anchor -- \
+  sh -c 'exit 0' &
+payload_anchor_wrapper=$!
+while [[ ! -s "$payload_anchor_ready" ]]; do kill -0 "$payload_anchor_wrapper"; done
+payload_anchor_pid="$(cat "$payload_anchor_ready")"
+kill -0 "$payload_anchor_pid"
+test "$(ps -o pgid= -p "$payload_anchor_pid" | tr -d ' ')" = "$payload_anchor_pid"
+kill -0 "$unrelated_pid"
+: >"$payload_anchor_release"
+wait "$payload_anchor_wrapper"
+kill -0 "$unrelated_pid"
+kill "$unrelated_pid"
+wait "$unrelated_pid" 2>/dev/null || true
+
 payload_cancel_pid="$fixture/payload-cancel-descendant.pid"
 payload_cancel_ready="$fixture/payload-cancel-ready"
 env "${fresh_validation_environment[@]}" \
