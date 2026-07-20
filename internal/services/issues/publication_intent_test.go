@@ -586,17 +586,18 @@ func TestCloseWithRuntimeReviewLeaseRequiresTrustedAcceptedActor(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.CloseWithRuntimeReviewLease(ctx, "project", issueID, domain.StatusDone, "reviewer"); !errors.Is(err, domain.ErrConflict) {
+	if _, err := client.CloseWithRuntimeReviewLease(ctx, "project", issueID, domain.StatusDone, domain.ReviewerIdentity{OwnerID: "reviewer", OwnerKind: domain.ReviewerOwnerKindOrchestrator}, admission.ReviewEpochEventID, 1, "source"); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("close without accepted outcome error = %v, want conflict", err)
 	}
 	for _, actor := range []string{"other-reviewer", "reviewer"} {
-		if _, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
+		acceptedEventID, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
 			Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept",
-			Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": actor, "actor_kind": domain.ReviewerOwnerKindOrchestrator},
-		}); err != nil {
+			Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": actor, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": admission.ReviewEpochEventID, "reviewed_source_oid": "source"},
+		})
+		if err != nil {
 			t.Fatal(err)
 		}
-		closed, closeErr := client.CloseWithRuntimeReviewLease(ctx, "project", issueID, domain.StatusDone, "reviewer")
+		closed, closeErr := client.CloseWithRuntimeReviewLease(ctx, "project", issueID, domain.StatusDone, domain.ReviewerIdentity{OwnerID: "reviewer", OwnerKind: domain.ReviewerOwnerKindOrchestrator}, admission.ReviewEpochEventID, acceptedEventID.ID, "source")
 		if actor == "other-reviewer" {
 			if !errors.Is(closeErr, domain.ErrConflict) {
 				t.Fatalf("mismatched accepted actor error = %v, want conflict", closeErr)
@@ -606,6 +607,92 @@ func TestCloseWithRuntimeReviewLeaseRequiresTrustedAcceptedActor(t *testing.T) {
 		if closeErr != nil || closed.Status != domain.StatusDone {
 			t.Fatalf("matching accepted reviewer close = (%+v,%v)", closed, closeErr)
 		}
+	}
+}
+
+func TestCloseWithRuntimeReviewLeaseSourceLessAuthorityFailsClosed(t *testing.T) {
+	tests := []struct {
+		name          string
+		closeEpochOff int64
+		closeEventOff int64
+		closeKind     string
+		acceptedKind  string
+		acceptedSrc   string
+		sourceForm    string
+		newerAccept   bool
+		wantConflict  bool
+	}{
+		{name: "exact source-less authority empty", closeKind: domain.ReviewerOwnerKindOrchestrator, acceptedKind: domain.ReviewerOwnerKindOrchestrator, sourceForm: "empty"},
+		{name: "exact source-less authority absent", closeKind: domain.ReviewerOwnerKindOrchestrator, acceptedKind: domain.ReviewerOwnerKindOrchestrator, sourceForm: "absent"},
+		{name: "exact source-less authority null", closeKind: domain.ReviewerOwnerKindOrchestrator, acceptedKind: domain.ReviewerOwnerKindOrchestrator, sourceForm: "null"},
+		{name: "wrong epoch", closeEpochOff: 1, closeKind: domain.ReviewerOwnerKindOrchestrator, acceptedKind: domain.ReviewerOwnerKindOrchestrator, wantConflict: true},
+		{name: "wrong accepted event", closeEventOff: 1, closeKind: domain.ReviewerOwnerKindOrchestrator, acceptedKind: domain.ReviewerOwnerKindOrchestrator, wantConflict: true},
+		{name: "wrong accepted actor kind", closeKind: domain.ReviewerOwnerKindOrchestrator, acceptedKind: "agent", wantConflict: true},
+		{name: "accepted source is not empty", closeKind: domain.ReviewerOwnerKindOrchestrator, acceptedKind: domain.ReviewerOwnerKindOrchestrator, acceptedSrc: "unexpected-source", wantConflict: true},
+		{name: "newer same-actor acceptance", closeKind: domain.ReviewerOwnerKindOrchestrator, acceptedKind: domain.ReviewerOwnerKindOrchestrator, newerAccept: true, wantConflict: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			repo := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(repo, ".azedarach"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			client := NewClient(repo, nil)
+			t.Cleanup(func() { _ = client.CloseDB() })
+			issueID, err := client.Create(ctx, CreateTaskParams{Title: "source-less internal review", Type: domain.TypeInvestigation, Priority: domain.P1, Status: domain.StatusInReview})
+			if err != nil {
+				t.Fatal(err)
+			}
+			admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer", OwnerKind: domain.ReviewerOwnerKindOrchestrator, Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission}); err != nil {
+				t.Fatal(err)
+			}
+			payload := map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "actor_kind": tt.acceptedKind, "review_epoch_event_id": admission.ReviewEpochEventID}
+			switch tt.sourceForm {
+			case "null":
+				payload["reviewed_source_oid"] = nil
+			case "absent":
+			default:
+				payload["reviewed_source_oid"] = tt.acceptedSrc
+			}
+			accepted, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
+				Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept",
+				Payload: payload,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.newerAccept {
+				if _, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": admission.ReviewEpochEventID, "reviewed_source_oid": ""}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, closeErr := client.CloseWithRuntimeReviewLease(ctx, "project", issueID, domain.StatusDone, domain.ReviewerIdentity{OwnerID: "reviewer", OwnerKind: tt.closeKind}, admission.ReviewEpochEventID+tt.closeEpochOff, accepted.ID+tt.closeEventOff, "")
+			if tt.wantConflict {
+				if !errors.Is(closeErr, domain.ErrConflict) {
+					t.Fatalf("close error = %v, want conflict", closeErr)
+				}
+				task, getErr := client.GetWithRuntime(ctx, "project", issueID)
+				if getErr != nil {
+					t.Fatal(getErr)
+				}
+				hasReviewLease := false
+				for _, lease := range task.CoordinationLeases {
+					hasReviewLease = hasReviewLease || lease.Purpose == domain.CoordinationLeaseReview
+				}
+				if task.Status == domain.StatusDone || !hasReviewLease {
+					t.Fatalf("failed close mutated state: %+v", task)
+				}
+				return
+			}
+			if closeErr != nil {
+				t.Fatal(closeErr)
+			}
+		})
 	}
 }
 

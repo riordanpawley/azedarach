@@ -15,41 +15,42 @@ import (
 )
 
 const (
-	CommandBoardFetch            = protocol.CommandBoardFetch
-	CommandBoardViewList         = protocol.CommandBoardViewList
-	CommandBoardViewGet          = protocol.CommandBoardViewGet
-	CommandBoardViewSave         = protocol.CommandBoardViewSave
-	CommandBoardViewDelete       = protocol.CommandBoardViewDelete
-	CommandBoardViewSelect       = protocol.CommandBoardViewSelect
-	CommandTaskList              = "task.list"
-	CommandTaskGet               = "task.get"
-	CommandTaskGetMany           = "task.get_many"
-	CommandTaskEvents            = "task.events"
-	CommandTaskEventAppend       = "task.event.append"
-	CommandTaskCreate            = "task.create"
-	CommandTaskClose             = "task.close"
-	CommandTaskBulkCleanup       = protocol.CommandTaskBulkCleanup
-	CommandTaskGraphReadiness    = "task.graph_readiness"
-	CommandOrchestrationSnapshot = protocol.CommandOrchestrationSnapshot
-	CommandOrchestrationIntent   = protocol.CommandOrchestrationIntent
-	CommandTaskCompleteCheck     = "task.complete_check"
-	CommandTaskIntegrationReady  = "task.integration_readiness"
-	CommandTaskContextRisk       = "task.context_risk"
-	CommandTaskMergeBaseTarget   = "task.merge_base_target"
-	CommandTaskFollowOnMerge     = "task.follow_on_merge_candidates"
-	CommandTaskClaimOwnership    = "task.ownership.claim"
-	CommandTaskReleaseOwnership  = "task.ownership.release"
-	CommandTaskUpdateStatus      = "task.update_status"
-	CommandTaskUpdate            = "task.update_details"
-	CommandTaskAppendNotes       = "task.append_notes"
-	CommandTaskDelete            = "task.delete"
-	CommandTaskArchive           = "task.archive"
-	CommandTaskUnarchive         = "task.unarchive"
-	CommandTaskDependencyAdd     = "task.dependency.add"
-	CommandTaskDependencyRemove  = "task.dependency.remove"
-	CommandTaskSQLiteWAL         = protocol.CommandTaskSQLiteWAL
-	CommandSyncRun               = "sync.run"
-	CommandSyncConflicts         = "sync.conflicts"
+	CommandBoardFetch             = protocol.CommandBoardFetch
+	CommandBoardViewList          = protocol.CommandBoardViewList
+	CommandBoardViewGet           = protocol.CommandBoardViewGet
+	CommandBoardViewSave          = protocol.CommandBoardViewSave
+	CommandBoardViewDelete        = protocol.CommandBoardViewDelete
+	CommandBoardViewSelect        = protocol.CommandBoardViewSelect
+	CommandTaskList               = "task.list"
+	CommandTaskGet                = "task.get"
+	CommandTaskGetMany            = "task.get_many"
+	CommandTaskEvents             = "task.events"
+	CommandTaskEventAppend        = "task.event.append"
+	CommandTaskCreate             = "task.create"
+	CommandTaskClose              = "task.close"
+	CommandTaskBulkCleanup        = protocol.CommandTaskBulkCleanup
+	CommandTaskGraphReadiness     = "task.graph_readiness"
+	CommandOrchestrationSnapshot  = protocol.CommandOrchestrationSnapshot
+	CommandOrchestrationIntent    = protocol.CommandOrchestrationIntent
+	CommandTaskCompleteCheck      = "task.complete_check"
+	CommandTaskIntegrationReady   = "task.integration_readiness"
+	CommandTaskContextRisk        = "task.context_risk"
+	CommandTaskMergeBaseTarget    = "task.merge_base_target"
+	CommandTaskFollowOnMerge      = "task.follow_on_merge_candidates"
+	CommandTaskClaimOwnership     = "task.ownership.claim"
+	CommandTaskReleaseOwnership   = "task.ownership.release"
+	CommandTaskRecoverReviewLease = "task.review_lease.recover"
+	CommandTaskUpdateStatus       = "task.update_status"
+	CommandTaskUpdate             = "task.update_details"
+	CommandTaskAppendNotes        = "task.append_notes"
+	CommandTaskDelete             = "task.delete"
+	CommandTaskArchive            = "task.archive"
+	CommandTaskUnarchive          = "task.unarchive"
+	CommandTaskDependencyAdd      = "task.dependency.add"
+	CommandTaskDependencyRemove   = "task.dependency.remove"
+	CommandTaskSQLiteWAL          = protocol.CommandTaskSQLiteWAL
+	CommandSyncRun                = "sync.run"
+	CommandSyncConflicts          = "sync.conflicts"
 )
 
 type OrchestrationSnapshot = protocol.OrchestrationSnapshot
@@ -116,6 +117,14 @@ type TaskOwnershipRequest struct {
 	TTL       string                          `json:"ttl,omitempty"`
 	Force     bool                            `json:"force,omitempty"`
 	Purpose   domain.CoordinationLeasePurpose `json:"purpose,omitempty"`
+}
+
+type TaskReviewLeaseRecoveryRequest struct {
+	TaskID                naming.IssueID `json:"task_id"`
+	ActorID               string         `json:"actor_id"`
+	ActorKind             string         `json:"actor_kind"`
+	ReviewEpochEventID    int64          `json:"review_epoch_event_id"`
+	AcceptedReviewEventID int64          `json:"accepted_review_event_id"`
 }
 
 // TaskStatusOptions controls client-side status transition behavior.
@@ -1142,6 +1151,19 @@ func (c *Client) ReleaseTaskOwnership(ctx context.Context, taskID string, params
 	params.TaskID = parsedTaskID
 	var out domain.Task
 	if err := c.commandJSON(ctx, CommandTaskReleaseOwnership, params, &out); err != nil {
+		return domain.Task{}, err
+	}
+	return out, nil
+}
+
+func (c *Client) RecoverTaskReviewLease(ctx context.Context, taskID string, params TaskReviewLeaseRecoveryRequest) (domain.Task, error) {
+	parsedTaskID, err := naming.ParseIssueID(taskID)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("invalid task id: %w", err)
+	}
+	params.TaskID = parsedTaskID
+	var out domain.Task
+	if err := c.commandJSON(ctx, CommandTaskRecoverReviewLease, params, &out); err != nil {
 		return domain.Task{}, err
 	}
 	return out, nil

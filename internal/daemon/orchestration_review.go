@@ -835,6 +835,17 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 			result.Failed[issueID] = "inspect prior review intent: " + err.Error()
 			continue
 		}
+		if terminal == "superseded" && request.Kind == protocol.OrchestrationIntentReviewAccept {
+			// Older binaries recorded integration_failed merely because cleanup
+			// had already removed the source branch. Preserve genuine supersession,
+			// but let the exact accepted intent converge when durable post-accept
+			// integration proof and its actor-fenced review lease still agree.
+			if recoveryPin, pinErr := a.acceptedReviewPinForIntent(ctx, projectID, issueID, request, true); pinErr == nil {
+				if proofErr := a.validateIntegratedAcceptedReviewRecovery(ctx, projectID, issueID, recoveryPin); proofErr == nil {
+					terminal = "accepted_pending"
+				}
+			}
+		}
 		switch terminal {
 		case "returned":
 			if err := a.convergeReturnedReview(ctx, projectID, issueID, request.ActorID); err != nil {
@@ -865,6 +876,20 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 			if integrateBeforeClose {
 				currentPin.SourceOID, err = a.resolveAcceptedReviewSourceOID(ctx, projectID, issueID)
 				currentPin.SourceOID = strings.TrimSpace(currentPin.SourceOID)
+				if err != nil {
+					// An accepted close can commit integration and remove the source
+					// worktree before a later cleanup/status phase fails. In that crash
+					// boundary the source ref is intentionally gone; the immutable
+					// accepted-review pin and exact daemon integration receipt are the
+					// recovery authority. closeTask revalidates the receipt against the
+					// live typed target before it mutates lifecycle state.
+					if proofErr := a.validateIntegratedAcceptedReviewRecovery(ctx, projectID, issueID, storedPin); proofErr == nil {
+						currentPin = storedPin
+						err = nil
+					} else {
+						err = fmt.Errorf("%w; orphaned review recovery proof: %v", err, proofErr)
+					}
+				}
 			}
 			if err != nil || currentPin != storedPin {
 				failure := "reviewed source or evidence changed; fresh review required"
@@ -1029,6 +1054,99 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 		return protocol.OrchestrationIntentResult{}, err
 	}
 	return result, nil
+}
+
+// validateIntegratedAcceptedReviewRecovery proves the only state in which a
+// missing accepted source branch is a replay condition instead of a fresh
+// review failure. It deliberately does not release the lease: the subsequent
+// task.close transaction remains actor-fenced by that exact review lease and
+// revalidates the durable receipt against the live integration target.
+func (a daemonOrchestrationAuthority) validateIntegratedAcceptedReviewRecovery(ctx context.Context, projectID, issueID string, pin acceptedReviewPin) error {
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return fmt.Errorf("issue store unavailable")
+	}
+	task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
+	if err != nil {
+		return fmt.Errorf("inspect review lease: %w", err)
+	}
+	lease := coordinationLease(task, domain.CoordinationLeaseReview)
+	if lease == nil || lease.IsExpired(time.Now().UTC()) || !pin.Reviewer.Matches(lease.OwnerID, lease.OwnerKind) {
+		return fmt.Errorf("exact typed accepted reviewer lease is unavailable")
+	}
+	reviewEvents, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}, NewestFirst: true,
+	})
+	if err != nil {
+		return fmt.Errorf("read accepted review proof: %w", err)
+	}
+	acceptedMatches := false
+	for _, event := range reviewEvents {
+		outcome, trusted := domain.TrustedReviewOutcome(event)
+		if !trusted || outcome == domain.ReviewOutcomeIntegrationFailed {
+			continue
+		}
+		// The first authoritative material decision is current. Never let an
+		// older acceptance in the same review-request epoch recover a lease
+		// belonging to a newer review decision.
+		if event.ID == pin.AcceptedReviewEventID && outcome == domain.ReviewOutcomeAccepted &&
+			reviewPayloadInt64(event.Payload["review_epoch_event_id"]) == pin.ReviewEpochEventID &&
+			strings.TrimSpace(observationPayloadString(event.Payload, "reviewed_source_oid")) == strings.TrimSpace(pin.SourceOID) &&
+			pin.Reviewer.Matches(observationPayloadString(event.Payload, "actor_id"), observationPayloadString(event.Payload, "actor_kind")) {
+			acceptedMatches = true
+		}
+		break
+	}
+	if !acceptedMatches {
+		return fmt.Errorf("exact accepted review actor, epoch, event, or source provenance is unavailable")
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}, NewestFirst: true,
+	})
+	if err != nil {
+		return fmt.Errorf("read integration proof: %w", err)
+	}
+	for _, event := range events {
+		if event.ID <= pin.AcceptedReviewEventID || event.Source != "daemon-task-close" || event.SourceCommand != "integrate-before-close" {
+			continue
+		}
+		if !observationPayloadBool(event.Payload, "integrated") ||
+			protocol.NormalizeProjectID(observationPayloadString(event.Payload, "project_id")) != protocol.NormalizeProjectID(projectID) ||
+			strings.TrimSpace(observationPayloadString(event.Payload, "source_oid")) != strings.TrimSpace(pin.SourceOID) {
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("no authoritative post-accept integration receipt matches reviewed source %s", pin.SourceOID)
+}
+
+func (a daemonOrchestrationAuthority) integratedAcceptedReviewRecoveryPin(ctx context.Context, projectID, issueID string, reviewer domain.ReviewerIdentity, reviewEpochEventID, acceptedReviewEventID int64) (acceptedReviewPin, error) {
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return acceptedReviewPin{}, fmt.Errorf("issue store unavailable")
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}, NewestFirst: true})
+	if err != nil {
+		return acceptedReviewPin{}, fmt.Errorf("read accepted review proof: %w", err)
+	}
+	for _, event := range events {
+		outcome, trusted := domain.TrustedReviewOutcome(event)
+		if event.ID != acceptedReviewEventID || !trusted || outcome != domain.ReviewOutcomeAccepted {
+			continue
+		}
+		pin := acceptedReviewPin{
+			Reviewer: reviewer, ReviewEpochEventID: reviewEpochEventID, AcceptedReviewEventID: acceptedReviewEventID,
+			SourceOID: strings.TrimSpace(observationPayloadString(event.Payload, "reviewed_source_oid")),
+		}
+		if pin.SourceOID == "" {
+			return acceptedReviewPin{}, fmt.Errorf("accepted review event %d has no reviewed source", acceptedReviewEventID)
+		}
+		if err := a.validateIntegratedAcceptedReviewRecovery(ctx, projectID, issueID, pin); err != nil {
+			return acceptedReviewPin{}, err
+		}
+		return pin, nil
+	}
+	return acceptedReviewPin{}, fmt.Errorf("exact accepted review event %d is unavailable", acceptedReviewEventID)
 }
 
 // activeValidationReviewReturn preserves the formal review outcome when the
@@ -1569,6 +1687,13 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 	}
 	if err := a.recordAcceptedReviewOutcome(ctx, projectID, inspection.IssueID, request, pin, inspection); err != nil {
 		return false, err
+	}
+	// Close authority is the immutable event that was just committed, not the
+	// pre-write inspection. Reload it so source-less internal reviews carry the
+	// same exact epoch/event/actor fence as source-backed review acceptance.
+	pin, err = a.acceptedReviewPinForIntent(ctx, projectID, inspection.IssueID, request, integrateBeforeClose)
+	if err != nil {
+		return true, fmt.Errorf("reload accepted review close authority: %w", err)
 	}
 	if inspection.Evidence != nil {
 		if err := a.daemon.recordAcceptedPatchReviewEvidence(ctx, projectID, request.ActorID, inspection); err != nil {

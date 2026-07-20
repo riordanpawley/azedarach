@@ -1165,6 +1165,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskOwnershipClaim(ctx, req)
 	case "task.ownership.release":
 		return d.handleTaskOwnershipRelease(ctx, req)
+	case "task.review_lease.recover":
+		return d.handleTaskReviewLeaseRecovery(ctx, req)
 	case "task.update_status":
 		return d.handleTaskUpdateStatus(ctx, req)
 	case "task.update_details":

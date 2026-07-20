@@ -2190,7 +2190,7 @@ func TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion(t *t
 	}
 	params := issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
-		Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request), "review_epoch_event_id": admission.ReviewEpochEventID},
+		Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request), "review_epoch_event_id": admission.ReviewEpochEventID, "reviewed_source_oid": ""},
 	}
 	if _, err := client.AppendIssueObservationEventWithReviewAdmission(ctx, ids[0], params, admission, rootID, request.ActorID); err != nil {
 		t.Fatal(err)
@@ -2362,6 +2362,112 @@ func TestReviewAcceptRetryRejectsBranchMutationAfterDurableAcceptance(t *testing
 	}
 	if !strings.Contains(fresh.Failed[issueID], "authoritative close") {
 		t.Fatalf("fresh review = %+v, want new acceptance to reach close", fresh)
+	}
+}
+
+func TestIntegratedAcceptedReviewRecoveryProofIsActorAndEpochFenced(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repoDir, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repoDir, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repoDir, "integrated.txt"), []byte("integrated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repoDir, "add", "integrated.txt")
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "integrated source")
+	sourceOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.cfg.BaseBranch = "main"
+	d.git = git.NewClient(git.NewExecRunner(repoDir), slog.Default())
+	runtimeStore := newGitAdapterStore(t, "project", issueID, "", cleanGitStatus())
+	manager := git.NewWorktreeManager(git.NewExecRunner(repoDir), repoDir, slog.Default())
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		manager: manager, runtimeStateStore: runtimeStore, logger: slog.Default(),
+		pollers: map[string]context.CancelFunc{"project": func() {}},
+		runtimeIssueTasks: func(context.Context, string, []string) map[string]domain.Task {
+			task, err := client.GetWithRuntime(ctx, "project", issueID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return map[string]domain.Task{issueID: task}
+		},
+	}
+	d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
+	d.reviewLeaseFencedBeforeClose = func(context.Context, string, string) error {
+		d.reviewLeaseFencedBeforeClose = nil
+		return errors.New("injected post-accept close crash")
+	}
+	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "recover-integrated", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	first, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(first.Failed[issueID], "injected post-accept close crash") {
+		t.Fatalf("first acceptance = %+v, want accepted-close retry state", first)
+	}
+	authority := daemonOrchestrationAuthority{daemon: d}
+	pin, err := authority.acceptedReviewPinForIntent(ctx, "project", issueID, request, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendTaskIntegrationReceiptIfAbsent(ctx, issueID, issues.TaskIntegrationReceipt{
+		ProjectID: "project", SourceBranch: "az/" + issueID, TargetBranch: "main", TargetID: "base",
+		BaseOID: sourceOID, SourceOID: pin.SourceOID, TargetOID: sourceOID, Integrated: true, ConfiguredBaseTarget: true,
+	}, repoDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := authority.validateIntegratedAcceptedReviewRecovery(ctx, "project", issueID, pin); err != nil {
+		t.Fatalf("exact recovery proof: %v", err)
+	}
+	wrongOwner := pin
+	wrongOwner.Reviewer.OwnerID = "other-reviewer"
+	if err := authority.validateIntegratedAcceptedReviewRecovery(ctx, "project", issueID, wrongOwner); err == nil || !strings.Contains(err.Error(), "reviewer lease") {
+		t.Fatalf("wrong-owner recovery error = %v, want reviewer lease fence", err)
+	}
+	wrongEpoch := pin
+	wrongEpoch.ReviewEpochEventID++
+	if err := authority.validateIntegratedAcceptedReviewRecovery(ctx, "project", issueID, wrongEpoch); err == nil || !strings.Contains(err.Error(), "accepted review actor, epoch") {
+		t.Fatalf("wrong-epoch recovery error = %v, want accepted-review provenance fence", err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
+		Payload: map[string]any{"actor_id": request.ActorID, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request), "outcome": string(domain.ReviewOutcomeIntegrationFailed), "failure": "source branch unavailable"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) {
+		return "", fmt.Errorf("source branch unavailable")
+	}
+	if worktrees, err := d.worktreeAdapter.List(ctx, "project"); err != nil || len(worktrees) != 1 {
+		t.Fatalf("source-missing worktree projection = %+v err=%v, want one durable source projection", worktrees, err)
+	}
+	retried, err := authority.Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retried.Failed) != 0 || len(retried.Closed) != 1 || retried.Closed[0] != issueID {
+		t.Fatalf("integrated retry = %+v, want durable proof to close authoritatively", retried)
+	}
+	closed, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != domain.StatusDone || coordinationLease(closed, domain.CoordinationLeaseReview) != nil {
+		t.Fatalf("recovered task = %+v, want terminal completed state without review lease", closed)
+	}
+	replayed, err := authority.Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replayed.Failed) != 0 || len(replayed.Closed) != 1 || replayed.Closed[0] != issueID {
+		t.Fatalf("replayed integrated recovery = %+v, want idempotent closed result", replayed)
 	}
 }
 
@@ -2734,7 +2840,7 @@ func TestReviewAcceptResumesDurablyAcceptedIntentWithoutReacquiringLease(t *test
 	for _, event := range []issues.IssueObservationEventParams{
 		{Type: domain.IssueEventInvestigationDisposition, Source: "test", Payload: map[string]any{"disposition": "internal_review"}},
 		{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "accepted", "summary": "parent consumed findings"}},
-		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept), Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": reviewEpochEventID, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request)}},
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept), Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": reviewEpochEventID, "reviewed_source_oid": "", "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request)}},
 	} {
 		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
 			t.Fatal(err)

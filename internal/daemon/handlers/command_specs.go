@@ -34,44 +34,45 @@ type CommandSpec struct {
 }
 
 const (
-	commandBoardFetch            = protocol.CommandBoardFetch
-	commandTaskList              = "task.list"
-	commandTaskGet               = "task.get"
-	commandTaskGetMany           = "task.get_many"
-	commandTaskCreate            = "task.create"
-	commandTaskClose             = "task.close"
-	commandTaskBulkCleanup       = protocol.CommandTaskBulkCleanup
-	commandTaskClosePreflight    = "task.close_preflight"
-	commandTaskDeletePreflight   = "task.delete_preflight"
-	commandTaskGraphReadiness    = "task.graph_readiness"
-	commandOrchestrationSnapshot = protocol.CommandOrchestrationSnapshot
-	commandOrchestrationIntent   = protocol.CommandOrchestrationIntent
-	commandTaskCompleteCheck     = "task.complete_check"
-	commandTaskIntegrationReady  = "task.integration_readiness"
-	commandTaskContextRisk       = "task.context_risk"
-	commandTaskMergeBaseTarget   = "task.merge_base_target"
-	commandTaskFollowOnMerge     = "task.follow_on_merge_candidates"
-	commandTaskClaimOwnership    = "task.ownership.claim"
-	commandTaskReleaseOwnership  = "task.ownership.release"
-	commandTaskUpdateStatus      = "task.update_status"
-	commandTaskUpdateDetails     = "task.update_details"
-	commandTaskAppendNotes       = "task.append_notes"
-	commandTaskDelete            = "task.delete"
-	commandTaskArchive           = "task.archive"
-	commandTaskUnarchive         = "task.unarchive"
-	commandTaskDependencyAdd     = "task.dependency.add"
-	commandTaskDependencyRemove  = "task.dependency.remove"
-	commandTaskSQLiteWAL         = protocol.CommandTaskSQLiteWAL
-	commandTaskSnapshotExport    = "task.snapshot.export"
-	commandSyncRun               = "sync.run"
-	commandSyncConflicts         = "sync.conflicts"
-	commandSessionStatus         = "session.status"
-	commandSessionRecover        = "session.recover"
-	commandRuntimeReconcile      = "runtime.reconcile"
-	commandRuntimeReconcileIssue = "runtime.reconcile_issue"
-	commandProjectionDeltaList   = protocol.CommandProjectionDeltaList
-	commandProjectionDeltaWatch  = protocol.CommandProjectionDeltaWatch
-	commandProjectionSnapshot    = protocol.CommandProjectionSnapshot
+	commandBoardFetch             = protocol.CommandBoardFetch
+	commandTaskList               = "task.list"
+	commandTaskGet                = "task.get"
+	commandTaskGetMany            = "task.get_many"
+	commandTaskCreate             = "task.create"
+	commandTaskClose              = "task.close"
+	commandTaskBulkCleanup        = protocol.CommandTaskBulkCleanup
+	commandTaskClosePreflight     = "task.close_preflight"
+	commandTaskDeletePreflight    = "task.delete_preflight"
+	commandTaskGraphReadiness     = "task.graph_readiness"
+	commandOrchestrationSnapshot  = protocol.CommandOrchestrationSnapshot
+	commandOrchestrationIntent    = protocol.CommandOrchestrationIntent
+	commandTaskCompleteCheck      = "task.complete_check"
+	commandTaskIntegrationReady   = "task.integration_readiness"
+	commandTaskContextRisk        = "task.context_risk"
+	commandTaskMergeBaseTarget    = "task.merge_base_target"
+	commandTaskFollowOnMerge      = "task.follow_on_merge_candidates"
+	commandTaskClaimOwnership     = "task.ownership.claim"
+	commandTaskReleaseOwnership   = "task.ownership.release"
+	commandTaskRecoverReviewLease = "task.review_lease.recover"
+	commandTaskUpdateStatus       = "task.update_status"
+	commandTaskUpdateDetails      = "task.update_details"
+	commandTaskAppendNotes        = "task.append_notes"
+	commandTaskDelete             = "task.delete"
+	commandTaskArchive            = "task.archive"
+	commandTaskUnarchive          = "task.unarchive"
+	commandTaskDependencyAdd      = "task.dependency.add"
+	commandTaskDependencyRemove   = "task.dependency.remove"
+	commandTaskSQLiteWAL          = protocol.CommandTaskSQLiteWAL
+	commandTaskSnapshotExport     = "task.snapshot.export"
+	commandSyncRun                = "sync.run"
+	commandSyncConflicts          = "sync.conflicts"
+	commandSessionStatus          = "session.status"
+	commandSessionRecover         = "session.recover"
+	commandRuntimeReconcile       = "runtime.reconcile"
+	commandRuntimeReconcileIssue  = "runtime.reconcile_issue"
+	commandProjectionDeltaList    = protocol.CommandProjectionDeltaList
+	commandProjectionDeltaWatch   = protocol.CommandProjectionDeltaWatch
+	commandProjectionSnapshot     = protocol.CommandProjectionSnapshot
 )
 
 var commandSpecRegistry = map[string]CommandSpec{
@@ -231,6 +232,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	commandTaskFollowOnMerge:                {Command: commandTaskFollowOnMerge, RequiresProjectID: true},
 	commandTaskClaimOwnership:               {Command: commandTaskClaimOwnership, RequiresProjectID: true},
 	commandTaskReleaseOwnership:             {Command: commandTaskReleaseOwnership, RequiresProjectID: true},
+	commandTaskRecoverReviewLease:           {Command: commandTaskRecoverReviewLease, RequiresProjectID: true},
 	commandTaskUpdateStatus:                 {Command: commandTaskUpdateStatus, RequiresProjectID: true},
 	commandTaskUpdateDetails:                {Command: commandTaskUpdateDetails, RequiresProjectID: true},
 	commandTaskAppendNotes:                  {Command: commandTaskAppendNotes, RequiresProjectID: true},

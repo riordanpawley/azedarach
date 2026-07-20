@@ -258,6 +258,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		commandTaskFollowOnMerge,
 		commandTaskClaimOwnership,
 		commandTaskReleaseOwnership,
+		commandTaskRecoverReviewLease,
 		commandTaskUpdateStatus,
 		commandTaskUpdateDetails,
 		commandTaskAppendNotes,
