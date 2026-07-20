@@ -54,9 +54,30 @@ func TestRetrieveValidationArtifactPreservesDestinationOnFailure(t *testing.T) {
 			}
 			return nil
 		}},
+		{name: "changed digest metadata", reference: reference, mutate: func(call int, response *protocol.ValidationArtifactReadResponse) error {
+			if call == 1 {
+				response.Digest = "sha256:" + string(bytes.Repeat([]byte{'0'}, sha256.Size*2))
+			}
+			return nil
+		}},
 		{name: "premature complete", reference: reference, mutate: func(call int, response *protocol.ValidationArtifactReadResponse) error {
 			if call == 0 {
 				response.Complete = true
+			}
+			return nil
+		}},
+		{name: "truncated stream with stable metadata", reference: reference, mutate: func(call int, response *protocol.ValidationArtifactReadResponse) error {
+			if call == 1 {
+				response.Content = response.Content[:len(response.Content)-1]
+				response.NextOffset--
+				response.Complete = true
+			}
+			return nil
+		}},
+		{name: "extended stream with stable metadata", reference: reference, mutate: func(call int, response *protocol.ValidationArtifactReadResponse) error {
+			if call == 4 {
+				response.Content = append(response.Content, 'x')
+				response.NextOffset++
 			}
 			return nil
 		}},
@@ -68,15 +89,50 @@ func TestRetrieveValidationArtifactPreservesDestinationOnFailure(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			destination := filepath.Join(t.TempDir(), "result.log")
+			dir := t.TempDir()
+			destination := filepath.Join(dir, "result.log")
 			require.NoError(t, os.WriteFile(destination, []byte("existing"), 0o600))
 			err := retrieveValidationArtifact(context.Background(), test.reference, destination, nil, testValidationArtifactReader(reference, digest, content, 5, test.mutate))
 			require.Error(t, err)
 			got, readErr := os.ReadFile(destination)
 			require.NoError(t, readErr)
 			assert.Equal(t, []byte("existing"), got)
+			assertNoValidationArtifactTemps(t, dir)
 		})
 	}
+}
+
+func TestRetrieveValidationArtifactPreservesDestinationOnStagedWriteFailure(t *testing.T) {
+	content := []byte("complete retained output")
+	reference, digest := testValidationArtifactIdentity(content)
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "result.log")
+	require.NoError(t, os.WriteFile(destination, []byte("existing"), 0o600))
+
+	err := retrieveValidationArtifactWithStager(context.Background(), reference, destination, nil, testValidationArtifactReader(reference, digest, content, 5, nil), func(dir, pattern string) (validationArtifactStage, error) {
+		file, createErr := os.CreateTemp(dir, pattern)
+		return &failingValidationArtifactStage{File: file}, createErr
+	})
+	require.ErrorContains(t, err, "write staged validation artifact")
+	got, readErr := os.ReadFile(destination)
+	require.NoError(t, readErr)
+	assert.Equal(t, []byte("existing"), got)
+	assertNoValidationArtifactTemps(t, dir)
+}
+
+type failingValidationArtifactStage struct {
+	*os.File
+}
+
+func (s *failingValidationArtifactStage) Write([]byte) (int, error) {
+	return 0, fmt.Errorf("staged write failed")
+}
+
+func assertNoValidationArtifactTemps(t *testing.T, dir string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, ".az-validation-artifact-*"))
+	require.NoError(t, err)
+	assert.Empty(t, matches)
 }
 
 func TestRetrieveValidationArtifactBuffersStdoutUntilVerified(t *testing.T) {

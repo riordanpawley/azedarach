@@ -212,6 +212,22 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 type validationArtifactReader func(context.Context, protocol.ValidationArtifactReadRequest) (protocol.ValidationArtifactReadResponse, error)
 
 func retrieveValidationArtifact(ctx context.Context, reference, output string, stdout io.Writer, read validationArtifactReader) (returnErr error) {
+	return retrieveValidationArtifactWithStager(ctx, reference, output, stdout, read, func(dir, pattern string) (validationArtifactStage, error) {
+		return os.CreateTemp(dir, pattern)
+	})
+}
+
+type validationArtifactStage interface {
+	io.Writer
+	Name() string
+	Chmod(os.FileMode) error
+	Sync() error
+	Close() error
+}
+
+type validationArtifactStager func(string, string) (validationArtifactStage, error)
+
+func retrieveValidationArtifactWithStager(ctx context.Context, reference, output string, stdout io.Writer, read validationArtifactReader, createStage validationArtifactStager) (returnErr error) {
 	expectedDigest, err := validationArtifactReferenceDigest(reference)
 	if err != nil {
 		return err
@@ -220,7 +236,7 @@ func retrieveValidationArtifact(ctx context.Context, reference, output string, s
 	if output != "" {
 		tempDir = filepath.Dir(output)
 	}
-	staged, err := os.CreateTemp(tempDir, ".az-validation-artifact-*")
+	staged, err := createStage(tempDir, ".az-validation-artifact-*")
 	if err != nil {
 		return fmt.Errorf("stage validation artifact: %w", err)
 	}

@@ -189,6 +189,17 @@ func TestOpenValidationArtifactRejectsSymlinkTraversal(t *testing.T) {
 		_, _, _, err := d.openValidationArtifact("project-a", reference)
 		require.ErrorContains(t, err, "unavailable")
 	})
+
+	t.Run("artifact root parent component", func(t *testing.T) {
+		outsideParent := filepath.Join(root, "outside-parent")
+		require.NoError(t, os.MkdirAll(filepath.Join(outsideParent, "artifacts", "validation"), 0o700))
+		linkedParent := filepath.Join(root, "linked-parent")
+		require.NoError(t, os.Symlink(outsideParent, linkedParent))
+		d := &Daemon{cfg: Config{WorkflowArtifactDir: filepath.Join(linkedParent, "artifacts")}}
+
+		_, _, _, err := d.openValidationArtifact("project-a", reference)
+		require.ErrorContains(t, err, "unavailable")
+	})
 }
 
 func TestValidationArtifactReadCommandIsProjectScopedAndDigestVerified(t *testing.T) {

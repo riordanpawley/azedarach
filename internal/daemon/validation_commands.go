@@ -320,11 +320,6 @@ func openValidationArtifactRoot(basePath string, descendants []string) (*os.File
 	if err != nil || strings.TrimSpace(basePath) == "" || abs == string(filepath.Separator) {
 		return nil, fmt.Errorf("invalid validation artifact root")
 	}
-	baseName := filepath.Base(abs)
-	canonicalParent, err := filepath.EvalSymlinks(filepath.Dir(abs))
-	if err != nil {
-		return nil, err
-	}
 	fd, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
@@ -334,7 +329,7 @@ func openValidationArtifactRoot(basePath string, descendants []string) (*os.File
 		_ = unix.Close(fd)
 		return nil, fmt.Errorf("open validation artifact root")
 	}
-	relative, err := filepath.Rel(string(filepath.Separator), canonicalParent)
+	relative, err := filepath.Rel(string(filepath.Separator), abs)
 	if err != nil {
 		_ = current.Close()
 		return nil, err
@@ -355,7 +350,7 @@ func openValidationArtifactRoot(basePath string, descendants []string) (*os.File
 			return nil, fmt.Errorf("open validation artifact root component")
 		}
 	}
-	for _, component := range append([]string{baseName}, descendants...) {
+	for _, component := range descendants {
 		if component == "" || component == "." || component == ".." || filepath.Base(component) != component {
 			_ = current.Close()
 			return nil, fmt.Errorf("invalid validation artifact root component")
