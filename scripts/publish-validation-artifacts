@@ -15,8 +15,10 @@ use Time::Piece;
 my %arg;
 my $stage;
 my $openat_syscall;
+my ($mkdirat_syscall, $renameat_syscall, $unlinkat_syscall);
+my ($stage_parent_handle, $stage_name);
 END {
-    remove_tree($stage) if defined($stage) && safe_existing_directory($stage);
+    remove_tree_at($stage_parent_handle, $stage_name) if $stage_parent_handle && defined($stage_name);
 }
 while (@ARGV) {
     my $flag = shift @ARGV;
@@ -34,21 +36,23 @@ if ($arg{'capability-check'}) {
 }
 
 my $project_root = canonical_directory($arg{'project-root'} // die "--project-root is required\n");
+$openat_syscall = require_openat_capability(native_platform());
+initialize_at_syscalls(native_platform());
+verify_openat_capability($openat_syscall, native_platform());
+my (undef, $project_root_handle) = canonical_directory_handle($project_root);
 if ($arg{'prune-only'}) {
-    my $artifact_root = safe_directory_chain($project_root, qw(.azedarach validation-artifacts));
-    my $failure_root = safe_directory_chain($artifact_root, 'failures');
-    prune_unreferenced($failure_root);
+    my ($artifact_root, $artifact_handle) = safe_directory_chain_at($project_root, $project_root_handle, qw(.azedarach validation-artifacts));
+    my ($failure_root, $failure_handle) = safe_directory_chain_at($artifact_root, $artifact_handle, 'failures');
+    prune_unreferenced($failure_root, $failure_handle);
     exit 0;
 }
 
 for my $required (qw(candidate-root control-root evidence gate-output request revision exit-code)) {
     die "--$required is required\n" unless defined($arg{$required}) && $arg{$required} ne '';
 }
-$openat_syscall = require_openat_capability(native_platform());
-verify_openat_capability($openat_syscall, native_platform());
-my $artifact_root = safe_directory_chain($project_root, qw(.azedarach validation-artifacts));
-my $failure_root = safe_directory_chain($artifact_root, 'failures');
-prune_unreferenced($failure_root);
+my ($artifact_root, $artifact_root_handle) = safe_directory_chain_at($project_root, $project_root_handle, qw(.azedarach validation-artifacts));
+my ($failure_root, $failure_root_handle) = safe_directory_chain_at($artifact_root, $artifact_root_handle, 'failures');
+prune_unreferenced($failure_root, $failure_root_handle);
 my ($candidate_root, $candidate_root_handle) = canonical_directory_handle($arg{'candidate-root'});
 if (my $ready = delete($ENV{AZEDARACH_VALIDATION_TEST_CANDIDATE_ROOTFD_READY_FILE})) {
     sysopen(my $ready_fh, $ready, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
@@ -75,17 +79,20 @@ my $publication_nonce = safe_identity($evidence->{publication_nonce} // '', 'pub
 $evidence->{fatal_phase} = $arg{'fatal-phase'} if ($arg{'fatal-phase'} // '') ne '';
 $evidence->{fatal_detail} = $arg{'fatal-detail'} if ($arg{'fatal-detail'} // '') ne '';
 
-my $revision_dir = safe_directory_chain($failure_root, $revision);
+my ($revision_dir, $revision_handle) = safe_directory_chain_at($failure_root, $failure_root_handle, $revision);
 my $final_dir = File::Spec->catdir($revision_dir, $request);
-if (-e $final_dir || -l $final_dir) {
-    recover_existing($final_dir, $evidence, $evidence_path, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
+if (my $final_handle = openat_directory_nofollow($revision_handle, $request)) {
+    recover_existing($final_dir, $final_handle, $evidence, $evidence_path, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
     exit 0;
 }
+die "existing artifact destination is unsafe\n" if directory_entry_exists($revision_handle, $request);
 
-$stage = File::Spec->catdir($revision_dir, ".${request}.tmp.$$" );
-die "artifact staging path already exists\n" if -e $stage || -l $stage;
-mkdir($stage, 0700) or die "create artifact staging directory: $!\n";
-my $reports_root = safe_directory_chain($stage, 'reports');
+$stage_name = ".${request}.tmp.$$";
+$stage_parent_handle = $revision_handle;
+$stage = File::Spec->catdir($revision_dir, $stage_name);
+mkdirat_component($revision_handle, $stage_name, 0700) or die "create artifact staging directory: $!\n";
+my $stage_handle = openat_directory_nofollow($revision_handle, $stage_name) or die "open artifact staging directory: $!\n";
+my ($reports_root, $reports_handle) = safe_directory_chain_at($stage, $stage_handle, 'reports');
 
 my @candidate_report_paths = ref($evidence->{report_paths}) eq 'ARRAY'
     ? grep { !ref($_) } @{$evidence->{report_paths}}
@@ -98,7 +105,8 @@ for my $source_report (@source_reports) {
     my $source_dir = open_candidate_report_directory($candidate_root, $candidate_root_handle, $source_report);
     next unless $source_dir;
     my $index = @report_dirs + 1;
-    my $destination = safe_directory_chain($reports_root, sprintf('%03d', $index));
+    my $destination_name = sprintf('%03d', $index);
+    my ($destination, $destination_handle) = safe_directory_chain_at($reports_root, $reports_handle, $destination_name);
     if (my $ready = delete($ENV{AZEDARACH_VALIDATION_TEST_CANDIDATE_DIRFD_READY_FILE})) {
         sysopen(my $ready_fh, $ready, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
             or die "create candidate dirfd test marker: $!\n";
@@ -108,29 +116,32 @@ for my $source_report (@source_reports) {
     }
     for my $name (qw(report.json report.md events.jsonl stderr.txt)) {
         my $source = openat_regular_nofollow($source_dir, $name);
-        copy_handle($source, File::Spec->catfile($destination, $name)) if $source;
+        copy_handle_at($source, $destination_handle, $name) if $source;
     }
-    my $measurement = eval { read_json_nofollow(File::Spec->catfile($destination, 'report.json'), 'timing report') };
+    my $measurement = eval { read_json_at($destination_handle, 'report.json', 'timing report') };
     push @measurements, $measurement if $measurement;
-    push @report_dirs, $destination;
+    push @report_dirs, {path => $destination, handle => $destination_handle};
 }
-push @report_dirs, safe_directory_chain($reports_root, '001') unless @report_dirs;
+unless (@report_dirs) {
+    my ($path, $handle) = safe_directory_chain_at($reports_root, $reports_handle, '001');
+    push @report_dirs, {path => $path, handle => $handle};
+}
 
 my $summary = failure_summary(\@measurements, $evidence, $gate_output_path);
 for my $index (0 .. $#report_dirs) {
-    complete_standard_bundle($report_dirs[$index], $summary, $request, $revision, $index + 1);
+    complete_standard_bundle_at($report_dirs[$index]{handle}, $summary, $request, $revision, $index + 1);
     my $published_dir = File::Spec->catdir($final_dir, 'reports', sprintf('%03d', $index + 1));
-    rewrite_report_paths($report_dirs[$index], $published_dir);
+    rewrite_report_paths_at($report_dirs[$index]{handle}, $published_dir);
 }
-copy_nofollow($gate_output_path, File::Spec->catfile($stage, 'gate-output.log'));
+copy_nofollow_at($gate_output_path, $stage_handle, 'gate-output.log');
 
 my @artifacts;
 for my $directory (@report_dirs) {
     for my $name (qw(report.json report.md events.jsonl stderr.txt)) {
-        push @artifacts, artifact_metadata($stage, File::Spec->catfile($directory, $name));
+        push @artifacts, artifact_metadata_at($directory->{handle}, $name, File::Spec->catfile('reports', basename($directory->{path}), $name));
     }
 }
-push @artifacts, artifact_metadata($stage, File::Spec->catfile($stage, 'gate-output.log'));
+push @artifacts, artifact_metadata_at($stage_handle, 'gate-output.log', 'gate-output.log');
 
 my @references;
 unless ($evidence->{synthetic_request}) {
@@ -154,20 +165,24 @@ my $manifest = {
     references => \@references,
     artifacts => \@artifacts,
 };
-write_json_exclusive(File::Spec->catfile($stage, 'manifest.json'), $manifest, 0600);
+write_json_exclusive_at($stage_handle, 'manifest.json', $manifest, 0600);
 
-if (!rename($stage, $final_dir)) {
+if (!renameat_component($revision_handle, $stage_name, $revision_handle, $request)) {
     my $rename_error = $!;
-    remove_tree($stage) if safe_existing_directory($stage);
+    remove_tree_at($revision_handle, $stage_name);
     undef $stage;
-    die "publish validation artifact directory: $rename_error\n" unless -e $final_dir;
-    recover_existing($final_dir, $evidence, $evidence_path, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
+    undef $stage_name;
+    my $final_handle = openat_directory_nofollow($revision_handle, $request);
+    die "publish validation artifact directory: $rename_error\n" unless $final_handle;
+    recover_existing($final_dir, $final_handle, $evidence, $evidence_path, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
     exit 0;
 }
 undef $stage;
+undef $stage_name;
+my $final_handle = openat_directory_nofollow($revision_handle, $request) or die "open committed artifact directory: $!\n";
 print STDERR "[gate] committed validation artifacts=$final_dir\n";
-validate_existing_manifest($final_dir, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
-finish_publication($final_dir, $evidence, $evidence_path, $request, $revision, $summary, 0 + $arg{'exit-code'});
+validate_existing_manifest($final_dir, $final_handle, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
+finish_publication($final_dir, $final_handle, $evidence, $evidence_path, $request, $revision, $summary, 0 + $arg{'exit-code'});
 
 sub canonical_directory {
     my ($path) = @_;
@@ -321,6 +336,105 @@ sub require_openat_capability {
     return $capability->{syscall_number};
 }
 
+sub initialize_at_syscalls {
+    my ($platform) = @_;
+    my %numbers = (
+        'darwin/amd64' => [475, 465, 472, 0x0080],
+        'darwin/arm64' => [475, 465, 472, 0x0080],
+        'linux/amd64' => [258, 264, 263, 0x0200],
+    );
+    my $entry = $numbers{$platform} or die "destination *at capability unavailable on $platform\n";
+    ($mkdirat_syscall, $renameat_syscall, $unlinkat_syscall, $arg{'at-removedir'}) = @$entry;
+}
+
+sub mkdirat_component {
+    my ($parent, $name, $mode) = @_;
+    safe_at_name($name);
+    return syscall($mkdirat_syscall, fileno($parent), $name, $mode) == 0;
+}
+
+sub renameat_component {
+    my ($from_parent, $from, $to_parent, $to) = @_;
+    safe_at_name($from); safe_at_name($to);
+    return syscall($renameat_syscall, fileno($from_parent), $from, fileno($to_parent), $to) == 0;
+}
+
+sub unlinkat_component {
+    my ($parent, $name, $flags) = @_;
+    safe_at_name($name);
+    return syscall($unlinkat_syscall, fileno($parent), $name, $flags || 0) == 0;
+}
+
+sub safe_at_name {
+    my ($name) = @_;
+    die "unsafe descriptor-relative component\n" unless defined($name) && $name ne '' && $name ne '.' && $name ne '..' && $name !~ m{[\\/]};
+}
+
+sub openat_directory_nofollow {
+    my ($parent, $name) = @_;
+    my $handle = openat_handle($parent, $name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    return undef unless $handle;
+    my @stat = stat($handle);
+    return @stat && -d _ ? $handle : undef;
+}
+
+sub safe_directory_chain_at {
+    my ($path, $handle, @components) = @_;
+    for my $component (@components) {
+        safe_at_name($component);
+        my $next = openat_directory_nofollow($handle, $component);
+        unless ($next) {
+            unless (mkdirat_component($handle, $component, 0700)) {
+                die "artifact path component is not a real directory: $path/$component\n" if $!{EEXIST};
+                die "create artifact directory $path/$component: $!\n";
+            }
+            $next = openat_directory_nofollow($handle, $component) or die "open artifact directory $path/$component: $!\n";
+        }
+        $path = File::Spec->catdir($path, $component);
+        $handle = $next;
+    }
+    return ($path, $handle);
+}
+
+sub remove_tree_at {
+    my ($parent, $name) = @_;
+    return unless $parent && defined($name);
+    my $directory = openat_directory_nofollow($parent, $name);
+    unless ($directory) {
+        unlinkat_component($parent, $name, 0);
+        return;
+    }
+    opendir(my $entries, fd_directory_path($directory)) or die "enumerate artifact directory: $!\n";
+    for my $entry (grep { $_ ne '.' && $_ ne '..' } readdir($entries)) {
+        if (openat_directory_nofollow($directory, $entry)) {
+            remove_tree_at($directory, $entry);
+        } else {
+            unlinkat_component($directory, $entry, 0) or die "remove artifact file $entry: $!\n";
+        }
+    }
+    closedir($entries);
+    unlinkat_component($parent, $name, $arg{'at-removedir'}) or die "remove artifact directory $name: $!\n";
+}
+
+sub fd_directory_path {
+    my ($handle) = @_;
+    if ($^O eq 'darwin') {
+        my $buffer = "\0" x 1024;
+        fcntl($handle, 50, $buffer) or die "resolve retained directory descriptor: $!\n";
+        $buffer =~ s/\0.*//s;
+        return $buffer;
+    }
+    my $path = readlink('/proc/self/fd/' . fileno($handle));
+    die "resolve retained directory descriptor: $!\n" unless defined($path);
+    return $path;
+}
+
+sub directory_entry_exists {
+    my ($directory, $name) = @_;
+    safe_at_name($name);
+    return scalar lstat(File::Spec->catfile(fd_directory_path($directory), $name));
+}
+
 sub verify_openat_capability {
     my ($number, $platform) = @_;
     sysopen(my $root, File::Spec->rootdir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
@@ -423,6 +537,40 @@ sub read_json_nofollow {
     return $decoded;
 }
 
+sub read_json_at {
+    my ($directory, $name, $label) = @_;
+    my $in = openat_regular_nofollow($directory, $name) or die "open $label without symlink following: $!\n";
+    local $/;
+    my $decoded = eval { decode_json(<$in> // '') };
+    close $in;
+    die "decode $label\n" unless ref($decoded) eq 'HASH';
+    return $decoded;
+}
+
+sub create_at {
+    my ($directory, $name, $mode) = @_;
+    safe_at_name($name);
+    my $fd = syscall($openat_syscall, fileno($directory), $name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, $mode);
+    die "create artifact $name exclusively: $!\n" if $fd < 0;
+    open(my $handle, '>&=', $fd) or die "adopt artifact output descriptor for $name: $!\n";
+    chmod($mode, $handle) or die "set artifact mode for $name: $!\n";
+    return $handle;
+}
+
+sub write_json_exclusive_at {
+    my ($directory, $name, $value, $mode) = @_;
+    my $out = create_at($directory, $name, $mode);
+    print {$out} encode_json($value) . "\n";
+    close $out or die "close $name: $!\n";
+}
+
+sub write_text_exclusive_at {
+    my ($directory, $name, $value) = @_;
+    my $out = create_at($directory, $name, 0600);
+    print {$out} $value;
+    close $out or die "close $name: $!\n";
+}
+
 sub write_json_exclusive {
     my ($path, $value, $mode) = @_;
     sysopen(my $out, $path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, $mode)
@@ -483,6 +631,30 @@ sub copy_handle {
     close $out or die "close artifact $target: $!\n";
 }
 
+sub copy_handle_at {
+    my ($in, $directory, $name) = @_;
+    my $out = create_at($directory, $name, 0600);
+    my $buffer;
+    while (1) {
+        my $read = sysread($in, $buffer, 64 * 1024);
+        die "read candidate artifact handle: $!\n" unless defined $read;
+        last if $read == 0;
+        my $offset = 0;
+        while ($offset < $read) {
+            my $written = syswrite($out, $buffer, $read - $offset, $offset);
+            die "write artifact $name: $!\n" unless defined $written;
+            $offset += $written;
+        }
+    }
+    close $in or die "close candidate artifact handle: $!\n";
+    close $out or die "close artifact $name: $!\n";
+}
+
+sub copy_nofollow_at {
+    my ($source, $directory, $name) = @_;
+    copy_handle_at(open_read_nofollow($source), $directory, $name);
+}
+
 sub write_text_exclusive {
     my ($path, $text) = @_;
     sysopen(my $out, $path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
@@ -510,6 +682,74 @@ sub complete_standard_bundle {
     write_text_exclusive($events, encode_json({Action => 'fail', Package => 'validation', Output => $summary}) . "\n") unless safe_regular_file($events);
     my $stderr = File::Spec->catfile($directory, 'stderr.txt');
     write_text_exclusive($stderr, "$summary\n") unless safe_regular_file($stderr);
+}
+
+sub complete_standard_bundle_at {
+    my ($directory, $summary, $request_id, $candidate_revision, $index) = @_;
+    unless (openat_regular_nofollow($directory, 'report.json')) {
+        write_json_exclusive_at($directory, 'report.json', {
+            schema => 'azedarach.validation_failure_report.v1', exit_code => 1,
+            failures => [{package => 'validation', output => $summary}],
+            request_id => $request_id, source_revision => $candidate_revision, bundle_index => $index,
+        }, 0600);
+    }
+    write_text_exclusive_at($directory, 'report.md', "# Candidate validation failure\n\n$summary\n") unless openat_regular_nofollow($directory, 'report.md');
+    write_text_exclusive_at($directory, 'events.jsonl', encode_json({Action => 'fail', Package => 'validation', Output => $summary}) . "\n") unless openat_regular_nofollow($directory, 'events.jsonl');
+    write_text_exclusive_at($directory, 'stderr.txt', "$summary\n") unless openat_regular_nofollow($directory, 'stderr.txt');
+}
+
+sub read_file_at {
+    my ($directory, $name, $limit) = @_;
+    my $in = openat_regular_nofollow($directory, $name) or die "open artifact $name: $!\n";
+    my @stat = stat($in);
+    my $size = @stat ? $stat[7] : 0;
+    seek($in, $size - $limit, 0) if $size > $limit;
+    my $value = '';
+    read($in, $value, $limit);
+    close $in;
+    return $value;
+}
+
+sub rewrite_report_paths_at {
+    my ($directory, $published_dir) = @_;
+    my $measurement = read_json_at($directory, 'report.json', 'timing report');
+    my $old_raw = $measurement->{raw_json_path} || '';
+    my $old_stderr = $measurement->{stderr_path} || '';
+    $measurement->{raw_json_path} = File::Spec->catfile($published_dir, 'events.jsonl');
+    $measurement->{stderr_path} = File::Spec->catfile($published_dir, 'stderr.txt');
+    write_json_exclusive_at($directory, '.report.json.rewrite', $measurement, 0600);
+    renameat_component($directory, '.report.json.rewrite', $directory, 'report.json') or die "replace report json: $!\n";
+    my $markdown = read_file_at($directory, 'report.md', 1024 * 1024);
+    my $published_events = File::Spec->catfile($published_dir, 'events.jsonl');
+    my $published_stderr = File::Spec->catfile($published_dir, 'stderr.txt');
+    $markdown =~ s/\Q$old_raw\E/$published_events/g if $old_raw ne '';
+    $markdown =~ s/\Q$old_stderr\E/$published_stderr/g if $old_stderr ne '';
+    $markdown .= "\nRaw events: `$published_events`\nStderr: `$published_stderr`\n";
+    write_text_exclusive_at($directory, '.report.md.rewrite', $markdown);
+    renameat_component($directory, '.report.md.rewrite', $directory, 'report.md') or die "replace report markdown: $!\n";
+}
+
+sub artifact_metadata_at {
+    my ($directory, $name, $relative) = @_;
+    my $in = openat_regular_nofollow($directory, $name) or die "open artifact $name: $!\n";
+    my @stat = stat($in);
+    my $digest = Digest::SHA->new(256);
+    $digest->addfile($in);
+    close $in;
+    return {path => $relative, bytes => (@stat ? $stat[7] : 0), sha256 => $digest->hexdigest};
+}
+
+sub open_relative_parent {
+    my ($root, $relative) = @_;
+    return unless defined($relative) && $relative ne '' && !File::Spec->file_name_is_absolute($relative);
+    my @parts = grep { $_ ne '' && $_ ne '.' } File::Spec->splitdir($relative);
+    return if !@parts || grep { $_ eq '..' || $_ =~ m{[\\/]} } @parts;
+    my $name = pop @parts;
+    open(my $parent, '<&', fileno($root)) or die "duplicate artifact root handle: $!\n";
+    for my $part (@parts) {
+        $parent = openat_directory_nofollow($parent, $part) or return;
+    }
+    return ($parent, $name);
 }
 
 sub rewrite_report_paths {
@@ -605,10 +845,8 @@ sub one_line {
 }
 
 sub validate_existing_manifest {
-    my ($directory, $request_id, $candidate_revision, $exit_code, $nonce) = @_;
-    die "existing artifact destination is unsafe\n" unless safe_existing_directory($directory);
-    my $manifest_path = File::Spec->catfile($directory, 'manifest.json');
-    my $manifest = read_json_nofollow($manifest_path, 'artifact manifest');
+    my ($directory, $directory_handle, $request_id, $candidate_revision, $exit_code, $nonce) = @_;
+    my $manifest = read_json_at($directory_handle, 'manifest.json', 'artifact manifest');
     die "existing artifact manifest schema mismatch\n" unless ($manifest->{schema} || '') eq 'azedarach.validation_artifact_manifest.v1';
     die "existing artifact manifest request mismatch\n" unless ($manifest->{request_id} || '') eq $request_id;
     die "existing artifact manifest revision mismatch\n" unless ($manifest->{candidate_revision} || '') eq $candidate_revision;
@@ -625,26 +863,33 @@ sub validate_existing_manifest {
         unless $manifest->{synthetic_request} || $has_request_reference;
     for my $artifact (@{$manifest->{artifacts} || []}) {
         die "invalid existing artifact metadata\n" unless ref($artifact) eq 'HASH';
-        my $path = safe_existing_file($directory, File::Spec->catfile($directory, $artifact->{path} || ''));
-        die "existing artifact is missing or unsafe\n" unless $path;
-        my $metadata = artifact_metadata($directory, $path);
+        my ($parent, $name) = open_relative_parent($directory_handle, $artifact->{path} || '');
+        die "existing artifact is missing or unsafe\n" unless $parent && openat_regular_nofollow($parent, $name);
+        my $metadata = artifact_metadata_at($parent, $name, $artifact->{path});
         die "existing artifact checksum mismatch\n" unless ($artifact->{sha256} || '') eq $metadata->{sha256};
     }
     return $manifest;
 }
 
 sub recover_existing {
-    my ($directory, $evidence_value, $evidence_output, $request_id, $candidate_revision, $exit_code, $nonce) = @_;
-    my $manifest = validate_existing_manifest($directory, $request_id, $candidate_revision, $exit_code, $nonce);
+    my ($directory, $directory_handle, $evidence_value, $evidence_output, $request_id, $candidate_revision, $exit_code, $nonce) = @_;
+    my $manifest = validate_existing_manifest($directory, $directory_handle, $request_id, $candidate_revision, $exit_code, $nonce);
     print STDERR "[gate] recovered committed validation artifacts=$directory\n";
-    finish_publication($directory, $evidence_value, $evidence_output, $request_id, $candidate_revision,
+    finish_publication($directory, $directory_handle, $evidence_value, $evidence_output, $request_id, $candidate_revision,
         $manifest->{failure_summary} || 'validation failed', $manifest->{exit_code});
 }
 
 sub finish_publication {
-    my ($directory, $evidence_value, $evidence_output, $request_id, $candidate_revision, $summary, $exit_code) = @_;
-    my @reports = grep { safe_existing_file($directory, $_) }
-        sort glob(File::Spec->catfile($directory, 'reports', '*', 'report.json'));
+    my ($directory, $directory_handle, $evidence_value, $evidence_output, $request_id, $candidate_revision, $summary, $exit_code) = @_;
+    my @reports;
+    if (my $reports_handle = openat_directory_nofollow($directory_handle, 'reports')) {
+        opendir(my $entries, fd_directory_path($reports_handle)) or die "enumerate reports: $!\n";
+        for my $entry (sort grep { $_ ne '.' && $_ ne '..' } readdir($entries)) {
+            my $bundle = openat_directory_nofollow($reports_handle, $entry) or next;
+            push @reports, File::Spec->catfile($directory, 'reports', $entry, 'report.json') if openat_regular_nofollow($bundle, 'report.json');
+        }
+        closedir($entries);
+    }
     @reports = (File::Spec->catfile($directory, 'manifest.json')) unless @reports;
     $evidence_value->{report_path} = $reports[0];
     $evidence_value->{report_paths} = \@reports;
@@ -657,24 +902,28 @@ sub finish_publication {
 }
 
 sub prune_unreferenced {
-    my ($root) = @_;
-    my @manifests = glob(File::Spec->catfile($root, '*', '*', 'manifest.json'));
+    my ($root, $root_handle) = @_;
     my @orphans;
-    for my $path (@manifests) {
-        my $directory = dirname($path);
-        next unless safe_existing_directory(dirname($directory)) && safe_existing_directory($directory) && safe_regular_file($path);
-        my $manifest = eval { read_json_nofollow($path, 'artifact manifest') };
-        next unless $manifest;
-        my $references = $manifest->{references};
-        next if ref($references) eq 'ARRAY' && @$references;
-        my $created = eval { Time::Piece->strptime($manifest->{created_at} || '', '%Y-%m-%dT%H:%M:%SZ')->epoch };
-        $created ||= (stat($path))[9] || 0;
-        push @orphans, {dir => $directory, created => $created};
+    opendir(my $revisions, fd_directory_path($root_handle)) or die "enumerate artifact revisions: $!\n";
+    for my $revision (grep { $_ ne '.' && $_ ne '..' } readdir($revisions)) {
+        my $revision_handle = openat_directory_nofollow($root_handle, $revision) or next;
+        opendir(my $requests, fd_directory_path($revision_handle)) or next;
+        for my $request (grep { $_ ne '.' && $_ ne '..' } readdir($requests)) {
+            my $directory = openat_directory_nofollow($revision_handle, $request) or next;
+            my $manifest = eval { read_json_at($directory, 'manifest.json', 'artifact manifest') };
+            next unless $manifest;
+            my $references = $manifest->{references};
+            next if ref($references) eq 'ARRAY' && @$references;
+            my $created = eval { Time::Piece->strptime($manifest->{created_at} || '', '%Y-%m-%dT%H:%M:%SZ')->epoch } || 0;
+            push @orphans, {parent => $revision_handle, name => $request, created => $created};
+        }
+        closedir($requests);
     }
+    closedir($revisions);
     @orphans = sort { $b->{created} <=> $a->{created} } @orphans;
     my $cutoff = time() - 30 * 24 * 60 * 60;
     for my $index (0 .. $#orphans) {
         next if $index < 20 && $orphans[$index]{created} >= $cutoff;
-        remove_tree($orphans[$index]{dir}) if safe_existing_directory($orphans[$index]{dir});
+        remove_tree_at($orphans[$index]{parent}, $orphans[$index]{name});
     }
 }

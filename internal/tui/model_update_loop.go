@@ -976,7 +976,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		if details, failed := mergeNonConflictFailureDetails(msg.result); failed {
+		if details, failed := mergeValidationFailureDetails(msg.result); failed {
 			m.enqueueAsyncRecoveryNotification(asyncRecoveryNotification{
 				IssueID:  msg.sourceID,
 				Title:    fmt.Sprintf("Merge validation failed: %s -> %s", msg.sourceID, msg.targetID),
@@ -992,6 +992,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Message: fmt.Sprintf("Merge validation failed: %s (press n for recovery)", details),
 				Expires: time.Now().Add(6 * time.Second),
 			})
+			return m, nil
+		}
+		if msg.result != nil && !msg.result.Success && !msg.result.HasConflicts {
+			details := mergeOperationFailureDetails(msg.result, "merge did not complete successfully")
+			m.enqueueAsyncRecoveryNotification(asyncRecoveryNotification{
+				IssueID: msg.sourceID, Title: fmt.Sprintf("Merge failed: %s -> %s", msg.sourceID, msg.targetID),
+				Message: details, Action: asyncRecoveryActionRetryMerge, Project: msg.project,
+				SourceID: msg.sourceID, TargetID: msg.targetID,
+			})
+			m.clearLocalMergeOperationPending(msg.sourceID, msg.targetID)
+			m.addToast(Toast{Level: ToastError, Message: fmt.Sprintf("Merge failed: %s (press n for recovery)", details), Expires: time.Now().Add(6 * time.Second)})
 			return m, nil
 		}
 
@@ -1237,12 +1248,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncTaskWorkspaceOverlay()
 			m.addToast(Toast{
 				Level:   ToastError,
-				Message: fmt.Sprintf("Merge failed: %v (press n for recovery)", msg.err),
+				Message: fmt.Sprintf("Update failed: %v (press n for recovery)", msg.err),
 				Expires: time.Now().Add(6 * time.Second),
 			})
 			return m, nil
 		}
-		if details, failed := mergeNonConflictFailureDetails(msg.result); failed {
+		if details, failed := mergeValidationFailureDetails(msg.result); failed {
 			m.enqueueAsyncRecoveryNotification(asyncRecoveryNotification{
 				IssueID:  msg.issueID,
 				Worktree: msg.worktree,
@@ -1255,9 +1266,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncTaskWorkspaceOverlay()
 			m.addToast(Toast{
 				Level:   ToastError,
-				Message: fmt.Sprintf("Merge validation failed: %s (press n for recovery)", details),
+				Message: fmt.Sprintf("Update validation failed: %s (press n for recovery)", details),
 				Expires: time.Now().Add(6 * time.Second),
 			})
+			return m, nil
+		}
+		if msg.result != nil && !msg.result.Success && !msg.result.HasConflicts {
+			details := mergeOperationFailureDetails(msg.result, "update did not complete successfully")
+			m.enqueueAsyncRecoveryNotification(asyncRecoveryNotification{
+				IssueID: msg.issueID, Worktree: msg.worktree, Title: fmt.Sprintf("Update failed: %s", msg.issueID),
+				Message: details, Action: asyncRecoveryActionRetryUpdate, Project: msg.project,
+			})
+			m.clearLocalTaskGitOperationPending(msg.issueID)
+			m.syncTaskWorkspaceOverlay()
+			m.addToast(Toast{Level: ToastError, Message: fmt.Sprintf("Update failed: %s (press n for recovery)", details), Expires: time.Now().Add(6 * time.Second)})
 			return m, nil
 		}
 
@@ -2349,7 +2371,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func mergeNonConflictFailureDetails(result *daemonclient.MergeResult) (string, bool) {
+func mergeValidationFailureDetails(result *daemonclient.MergeResult) (string, bool) {
 	if result == nil || result.Success || result.HasConflicts {
 		return "", false
 	}
@@ -2390,11 +2412,18 @@ func mergeNonConflictFailureDetails(result *daemonclient.MergeResult) (string, b
 		}
 		return fmt.Sprintf("candidate validation for revision %s failed: %s\nRecovery: %s", revision, diagnostic, recovery), true
 	}
-	diagnostic := strings.TrimSpace(result.Message)
-	if diagnostic == "" {
-		diagnostic = "merge did not complete successfully"
+	return "", false
+}
+
+func mergeOperationFailureDetails(result *daemonclient.MergeResult, fallback string) string {
+	diagnostic := ""
+	if result != nil {
+		diagnostic = strings.TrimSpace(result.Message)
 	}
-	return fmt.Sprintf("%s\nRecovery: inspect the merge diagnostics, fix the failure, then retry", diagnostic), true
+	if diagnostic == "" {
+		diagnostic = fallback
+	}
+	return diagnostic
 }
 
 func mergeTaskWorkspaceContext(detailTasks, boardTasks []domain.Task) []domain.Task {

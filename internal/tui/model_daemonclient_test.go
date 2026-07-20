@@ -10230,6 +10230,42 @@ func TestFetchAndMergeResultValidationFailureRendersRecoveryWithoutAttach(t *tes
 	}
 }
 
+func TestMergeResultGenericFailureIsNotClassifiedAsValidation(t *testing.T) {
+	m := newDaemonTestModel(&recordingDaemonTransport{})
+	updated, cmd := m.Update(mergeResultMsg{
+		sourceID: "child", targetID: "parent",
+		result: &daemonclient.MergeResult{Success: false, Message: "publication unavailable"},
+	})
+	if cmd != nil {
+		t.Fatalf("generic merge failure command = %v, want nil", cmd)
+	}
+	next := updated.(Model)
+	if len(next.toasts) != 1 || !strings.Contains(next.toasts[0].Message, "Merge failed: publication unavailable") {
+		t.Fatalf("toasts = %+v, want operation-specific generic failure", next.toasts)
+	}
+	if strings.Contains(next.toasts[0].Message, "validation failed") {
+		t.Fatalf("toast = %q, must not classify generic failure as validation", next.toasts[0].Message)
+	}
+}
+
+func TestFetchAndMergeResultGenericFailureIsNotClassifiedAsValidation(t *testing.T) {
+	m := newDaemonTestModel(&recordingDaemonTransport{})
+	updated, cmd := m.Update(fetchAndMergeResultMsg{
+		issueID: "child", worktree: "/repo/child", attachAfter: true,
+		result: &daemonclient.MergeResult{Success: false, Message: "remote update unavailable"},
+	})
+	if cmd != nil {
+		t.Fatalf("generic update failure command = %v, want nil", cmd)
+	}
+	next := updated.(Model)
+	if len(next.toasts) != 1 || !strings.Contains(next.toasts[0].Message, "Update failed: remote update unavailable") {
+		t.Fatalf("toasts = %+v, want operation-specific generic failure", next.toasts)
+	}
+	if strings.Contains(next.toasts[0].Message, "validation failed") || strings.Contains(next.toasts[0].Message, "Merge failed") {
+		t.Fatalf("toast = %q, must not classify generic update failure as merge validation", next.toasts[0].Message)
+	}
+}
+
 func TestHandleSelectionUpdateFromMainUsesTaskWorkspaceTaskWhenCursorUnavailable(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
