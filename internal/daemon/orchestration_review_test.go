@@ -1055,7 +1055,7 @@ func TestReviewReturnAcceptsFailedAggregateGateFromCurrentReviewEpochAfterWorker
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 	t.Cleanup(func() { _ = runtime.Close() })
 	now := time.Now().UTC()
-	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: "orchestrator", ReviewEpochEventID: reviewEpochEventID, TTL: time.Minute}, now)
+	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: "orchestrator", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: reviewEpochEventID, PublicationOperationID: "publication-review-gate", AcceptedReviewEventID: 2, AcceptedPublicationOperationID: "publication-review-gate", TTL: time.Minute}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1100,7 +1100,7 @@ func TestReviewReturnRejectsCompletedExitZeroAggregateGateDuringActiveValidation
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 	t.Cleanup(func() { _ = runtime.Close() })
 	now := time.Now().UTC()
-	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "successful-review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: "orchestrator", ReviewEpochEventID: reviewEpochEventID, TTL: time.Minute}, now)
+	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "successful-review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeCapacity, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: "orchestrator", ReviewEpochEventID: reviewEpochEventID, TTL: time.Minute}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1144,7 +1144,7 @@ func TestReviewReturnRejectsActiveValidationAssignmentForWrongActorOrRevision(t 
 			runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 			t.Cleanup(func() { _ = runtime.Close() })
 			now := time.Now().UTC()
-			_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: tc.gateRevision, ReviewerID: tc.gateReviewer, ReviewEpochEventID: epochID, TTL: time.Minute}, now)
+			_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeCapacity, Profile: "cold", Command: "just test", SourceRevision: tc.gateRevision, ReviewerID: tc.gateReviewer, ReviewEpochEventID: epochID, TTL: time.Minute}, now)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2517,14 +2517,21 @@ func TestReviewAcceptResumesDurablyAcceptedIntentWithoutReacquiringLease(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := client.Update(ctx, issueID, domain.StatusOpen); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
 	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "resume-accepted-internal-review", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	reviewEpochEventID := latestReviewEpochEventID(t, ctx, client, issueID)
 	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview}); err != nil {
 		t.Fatal(err)
 	}
 	for _, event := range []issues.IssueObservationEventParams{
 		{Type: domain.IssueEventInvestigationDisposition, Source: "test", Payload: map[string]any{"disposition": "internal_review"}},
 		{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "accepted", "summary": "parent consumed findings"}},
-		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept), Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request)}},
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept), Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": reviewEpochEventID, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request)}},
 	} {
 		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
 			t.Fatal(err)
@@ -2590,7 +2597,7 @@ func TestReviewAcceptResumesDurableEvidenceFenceAfterCloseCrash(t *testing.T) {
 	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
 		Payload: map[string]any{
-			"outcome": "accepted", "actor_id": request.ActorID, "intent_key": request.IntentKey,
+			"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": admission.ReviewEpochEventID, "intent_key": request.IntentKey,
 			"request_fingerprint": reviewRequestFingerprint(request), "reviewed_source_oid": "reviewed-source-oid",
 			"reviewed_evidence_source": evidencePin.Source, "reviewed_evidence_event_id": evidencePin.EventID,
 			"reviewed_evidence_seq": evidencePin.Seq, "reviewed_evidence_digest": evidencePin.Digest,

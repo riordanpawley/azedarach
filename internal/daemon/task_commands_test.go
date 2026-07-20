@@ -3073,19 +3073,19 @@ func TestTaskClosePreflightEnforcesInvestigationDispositionAcceptance(t *testing
 		{name: "human facing remains gated", wantReason: "human-facing investigation lacks explicit issue-specific findings acceptance"},
 		{name: "internal accepted", events: []issues.IssueObservationEventParams{
 			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
-			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator}},
 		}},
 		{name: "internal returned findings remain blocked", events: []issues.IssueObservationEventParams{
 			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
-			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
-			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"outcome": "returned", "actor_id": "reviewer"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"outcome": "returned", "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator}},
 		}, wantReason: "unresolved returned findings"},
 		{name: "new review epoch rejects stale human acceptance", events: []issues.IssueObservationEventParams{
 			{Type: domain.IssueEventHumanInputProvided, Source: "human", Payload: map[string]any{"investigation_findings_accepted": true}},
 		}, newEpoch: true, wantReason: "human-facing investigation lacks explicit issue-specific findings acceptance"},
 		{name: "new review epoch rejects stale internal acceptance", events: []issues.IssueObservationEventParams{
 			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
-			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator}},
 		}, newEpoch: true, wantReason: "internal review lacks durable accepted reviewer outcome"},
 	}
 	for _, tt := range tests {
@@ -8694,7 +8694,7 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	}
 	if _, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
-			"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer",
+			"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator,
 			"reviewed_evidence_source": evidencePin.Source, "reviewed_evidence_event_id": evidencePin.EventID,
 			"reviewed_evidence_seq": evidencePin.Seq, "reviewed_evidence_digest": evidencePin.Digest,
 		},
@@ -12228,7 +12228,7 @@ func TestTaskCompleteCheckClassifiesInvestigationChildrenByAcceptance(t *testing
 	}
 	for _, event := range []issues.IssueObservationEventParams{
 		{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
-		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator}},
 	} {
 		if _, err := issuesClient.AppendIssueObservationEvent(ctx, internalID, event); err != nil {
 			t.Fatalf("append internal review event: %v", err)

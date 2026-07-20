@@ -2414,7 +2414,7 @@ func TestProjectOrchestrationSnapshotExcludesPostCursorDecisionAndReviewOutcomes
 		}
 		_, appendErr := writer.AppendIssueObservationEvent(ctx, reviewIssue, issues.IssueObservationEventParams{
 			Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
-			Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer"},
+			Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator},
 		})
 		return appendErr
 	}
