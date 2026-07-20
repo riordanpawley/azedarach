@@ -266,38 +266,43 @@ func (d *Daemon) retainValidationArtifact(projectID, source string) (domain.Work
 	return domain.WorkflowArtifactReference{Label: "validation report", Reference: "artifact:sha256/" + digest, Digest: "sha256:" + digest}, nil
 }
 
-func (d *Daemon) resolveValidationArtifact(projectID, reference string) (string, error) {
+func (d *Daemon) openValidationArtifact(projectID, reference string) (*os.File, string, int64, error) {
 	const prefix = "artifact:sha256/"
 	digest := strings.TrimPrefix(strings.TrimSpace(reference), prefix)
 	if len(digest) != sha256.Size*2 || prefix+digest != strings.TrimSpace(reference) {
-		return "", fmt.Errorf("invalid validation artifact reference")
+		return nil, "", 0, fmt.Errorf("invalid validation artifact reference")
 	}
 	for _, char := range digest {
 		if !strings.ContainsRune("0123456789abcdef", char) {
-			return "", fmt.Errorf("invalid validation artifact digest")
+			return nil, "", 0, fmt.Errorf("invalid validation artifact digest")
 		}
 	}
 	root := d.validationArtifactRoot(projectID)
 	path := filepath.Join(root, digest)
 	rel, relErr := filepath.Rel(root, path)
 	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("invalid validation artifact path")
-	}
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return "", fmt.Errorf("validation artifact unavailable")
+		return nil, "", 0, fmt.Errorf("invalid validation artifact path")
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return "", fmt.Errorf("validation artifact unavailable")
+		return nil, "", 0, fmt.Errorf("validation artifact unavailable")
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, "", 0, fmt.Errorf("validation artifact unavailable")
 	}
 	hash := sha256.New()
 	_, copyErr := io.Copy(hash, file)
-	closeErr := file.Close()
-	if copyErr != nil || closeErr != nil || fmt.Sprintf("%x", hash.Sum(nil)) != digest {
-		return "", fmt.Errorf("validation artifact digest mismatch")
+	if copyErr != nil || fmt.Sprintf("%x", hash.Sum(nil)) != digest {
+		_ = file.Close()
+		return nil, "", 0, fmt.Errorf("validation artifact digest mismatch")
 	}
-	return path, nil
+	if _, err = file.Seek(0, io.SeekStart); err != nil {
+		_ = file.Close()
+		return nil, "", 0, fmt.Errorf("validation artifact unavailable")
+	}
+	return file, digest, info.Size(), nil
 }
 
 func (d *Daemon) readValidationArtifact(projectID, reference string, offset int64, limit int) ([]byte, string, int64, int64, error) {
@@ -310,17 +315,12 @@ func (d *Daemon) readValidationArtifact(projectID, reference string, offset int6
 	if limit > protocol.ValidationArtifactReadMaxBytes {
 		return nil, "", 0, 0, fmt.Errorf("validation artifact read limit exceeds %d bytes", protocol.ValidationArtifactReadMaxBytes)
 	}
-	path, err := d.resolveValidationArtifact(projectID, reference)
+	file, digest, totalSize, err := d.openValidationArtifact(projectID, reference)
 	if err != nil {
 		return nil, "", 0, 0, err
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, "", 0, 0, fmt.Errorf("validation artifact unavailable")
-	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || offset > info.Size() {
+	if offset > totalSize {
 		return nil, "", 0, 0, fmt.Errorf("validation artifact offset exceeds content size")
 	}
 	if _, err = file.Seek(offset, io.SeekStart); err != nil {
@@ -331,8 +331,7 @@ func (d *Daemon) readValidationArtifact(projectID, reference string, offset int6
 		return nil, "", 0, 0, fmt.Errorf("validation artifact unavailable")
 	}
 	nextOffset := offset + int64(len(content))
-	digest := strings.TrimPrefix(strings.TrimSpace(reference), "artifact:sha256/")
-	return content, digest, info.Size(), nextOffset, nil
+	return content, digest, totalSize, nextOffset, nil
 }
 
 func (d *Daemon) validatePublicationEvidenceIssue(ctx context.Context, projectID, issueID string) error {

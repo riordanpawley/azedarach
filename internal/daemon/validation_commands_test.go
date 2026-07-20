@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -119,8 +120,10 @@ func TestValidationFinishReturnsBoundedPortableFailureSummary(t *testing.T) {
 	reference := result.Summary.ArtifactLinks[0]
 	assert.Contains(t, reference.Reference, "artifact:sha256/")
 	assert.Contains(t, reference.Digest, "sha256:")
-	retainedPath, err := d.resolveValidationArtifact("consumer-project", reference.Reference)
+	retainedFile, _, _, err := d.openValidationArtifact("consumer-project", reference.Reference)
 	require.NoError(t, err)
+	require.NoError(t, retainedFile.Close())
+	retainedPath := filepath.Join(d.validationArtifactRoot("consumer-project"), strings.TrimPrefix(reference.Reference, "artifact:sha256/"))
 	require.NoError(t, os.WriteFile(retainedOutput, []byte("mutated caller output\n"), 0o600))
 	retained, err := os.ReadFile(retainedPath)
 	require.NoError(t, err)
@@ -131,8 +134,28 @@ func TestValidationFinishReturnsBoundedPortableFailureSummary(t *testing.T) {
 	assert.Equal(t, "complete npm output\n", string(retained), "retained artifact must survive source deletion")
 	require.NoError(t, os.Chmod(retainedPath, 0o600))
 	require.NoError(t, os.WriteFile(retainedPath, []byte("corrupt"), 0o600))
-	_, err = d.resolveValidationArtifact("consumer-project", reference.Reference)
+	_, _, _, err = d.openValidationArtifact("consumer-project", reference.Reference)
 	assert.ErrorContains(t, err, "digest mismatch")
+}
+
+func TestOpenValidationArtifactPinsVerifiedFileAcrossPathReplacement(t *testing.T) {
+	root := t.TempDir()
+	d := &Daemon{cfg: Config{WorkflowArtifactDir: filepath.Join(root, "artifacts")}}
+	source := filepath.Join(root, "output.log")
+	require.NoError(t, os.WriteFile(source, []byte("verified output\n"), 0o600))
+	reference, err := d.retainValidationArtifact("project-a", source)
+	require.NoError(t, err)
+
+	file, _, _, err := d.openValidationArtifact("project-a", reference.Reference)
+	require.NoError(t, err)
+	defer file.Close()
+	retainedPath := filepath.Join(d.validationArtifactRoot("project-a"), strings.TrimPrefix(reference.Reference, "artifact:sha256/"))
+	require.NoError(t, os.Remove(retainedPath))
+	require.NoError(t, os.WriteFile(retainedPath, []byte("replacement output\n"), 0o600))
+
+	content, err := io.ReadAll(file)
+	require.NoError(t, err)
+	assert.Equal(t, "verified output\n", string(content), "serving must use the descriptor whose content was verified")
 }
 
 func TestValidationArtifactReadCommandIsProjectScopedAndDigestVerified(t *testing.T) {
