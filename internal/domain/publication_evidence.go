@@ -47,6 +47,26 @@ func SamePatchReviewIdentity(left, right PublicationEvidence) bool {
 		reflect.DeepEqual(leftCoverage, rightCoverage)
 }
 
+// SameAcceptedPatchReviewAuthority reports whether two base-relative evidence
+// candidates belong to the same accepted immutable review authority. Digest
+// and coverage may differ only when the base differs: they are recomputed from
+// that base before the first durable proof is discovered. The first proof then
+// remains authoritative for the accepted source/reviewer/epoch-derived ID.
+func SameAcceptedPatchReviewAuthority(left, right PublicationEvidence) bool {
+	return left.Layer == PublicationEvidencePatchReview &&
+		right.Layer == PublicationEvidencePatchReview &&
+		left.BaseRevision != right.BaseRevision &&
+		left.EvidenceID == right.EvidenceID &&
+		left.ProjectID == right.ProjectID &&
+		left.IssueID == right.IssueID &&
+		left.SourceRevision == right.SourceRevision &&
+		left.Producer == right.Producer &&
+		left.PolicyVersion == right.PolicyVersion &&
+		left.EnvironmentFingerprint == right.EnvironmentFingerprint &&
+		left.ReusedFromEvidenceID == right.ReusedFromEvidenceID &&
+		left.Cost == right.Cost
+}
+
 type PublicationEvidenceCost struct {
 	WallMilliseconds int64 `json:"wall_milliseconds,omitempty"`
 	CPUMilliseconds  int64 `json:"cpu_milliseconds,omitempty"`

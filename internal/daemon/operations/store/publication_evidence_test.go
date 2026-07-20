@@ -138,6 +138,14 @@ func TestAcceptedPatchReviewEvidenceConcurrentCrossBaseInsertRetainsOneProof(t *
 	defer storeA.Close()
 	storeB := NewAtPath(dbPath, slog.Default())
 	defer storeB.Close()
+	// Complete lazy open/migration sequentially so this test isolates evidence
+	// insertion concurrency instead of racing database initialization.
+	if _, err := storeA.dbHandle(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storeB.dbHandle(); err != nil {
+		t.Fatal(err)
+	}
 
 	first := storedPublicationEvidence()
 	second := first

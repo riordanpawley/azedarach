@@ -73,28 +73,13 @@ func (s *SQLiteStore) recordPublicationEvidence(ctx context.Context, evidence do
 	}
 	_ = tx.Rollback()
 	existing, getErr := s.publicationEvidenceByID(ctx, evidence.EvidenceID)
-	if getErr == nil && (publicationEvidenceSemanticallyEqual(existing, evidence) || domain.SamePatchReviewIdentity(existing, evidence) || (reconcileAcceptedReviewRace && acceptedPatchReviewRaceIdentityEqual(existing, evidence))) {
+	if getErr == nil && (publicationEvidenceSemanticallyEqual(existing, evidence) || domain.SamePatchReviewIdentity(existing, evidence) || (reconcileAcceptedReviewRace && domain.SameAcceptedPatchReviewAuthority(existing, evidence))) {
 		return existing, nil
 	}
 	if getErr == nil {
 		return domain.PublicationEvidence{}, fmt.Errorf("publication evidence %s conflicts with immutable record", evidence.EvidenceID)
 	}
 	return domain.PublicationEvidence{}, fmt.Errorf("record publication evidence: %w", err)
-}
-
-func acceptedPatchReviewRaceIdentityEqual(existing, candidate domain.PublicationEvidence) bool {
-	return existing.Layer == domain.PublicationEvidencePatchReview &&
-		candidate.Layer == domain.PublicationEvidencePatchReview &&
-		existing.BaseRevision != candidate.BaseRevision &&
-		existing.EvidenceID == candidate.EvidenceID &&
-		existing.ProjectID == candidate.ProjectID &&
-		existing.IssueID == candidate.IssueID &&
-		existing.SourceRevision == candidate.SourceRevision &&
-		existing.Producer == candidate.Producer &&
-		existing.PolicyVersion == candidate.PolicyVersion &&
-		existing.EnvironmentFingerprint == candidate.EnvironmentFingerprint &&
-		existing.ReusedFromEvidenceID == candidate.ReusedFromEvidenceID &&
-		existing.Cost == candidate.Cost
 }
 
 func (s *SQLiteStore) RecordPublicationEvidenceInvalidation(ctx context.Context, invalidation domain.PublicationEvidenceInvalidation) (domain.PublicationEvidenceInvalidation, error) {

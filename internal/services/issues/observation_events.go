@@ -1179,6 +1179,14 @@ func (c *Client) TerminalizeAcceptedReviewPublication(ctx context.Context, dispo
 }
 
 type acceptedReviewPublicationCommitHookKey struct{}
+type acceptedReviewPublicationBeginHookKey struct{}
+
+// WithAcceptedReviewPublicationBeginHookForTest installs a deterministic
+// barrier after the caller has prepared evidence and immediately before the
+// atomic acceptance transaction begins. Production callers should not use it.
+func WithAcceptedReviewPublicationBeginHookForTest(ctx context.Context, hook func()) context.Context {
+	return context.WithValue(ctx, acceptedReviewPublicationBeginHookKey{}, hook)
+}
 
 // WithAcceptedReviewPublicationCommitHookForTest installs a deterministic
 // barrier immediately after the acceptance transaction commits. Production
@@ -1221,6 +1229,9 @@ func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID
 	}
 	var eventID int64
 	var publicationOperationID string
+	if hook, _ := ctx.Value(acceptedReviewPublicationBeginHookKey{}).(func()); hook != nil {
+		hook()
+	}
 	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
 			db, err := c.dbHandle()
@@ -1272,11 +1283,8 @@ func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID
 				if err != nil {
 					return c.wrapError("append-accepted-review-publication", issueID, err)
 				}
-				var matchingEvidence int
-				if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_publication_evidence WHERE evidence_id=? AND project_id=? AND issue_id=? AND layer=? AND patch_digest=? AND source_revision=? AND base_revision=? AND result_revision=? AND producer=? AND policy_version=? AND environment_fingerprint=? AND COALESCE(reused_from_evidence_id,'')=? AND coverage_json=? AND cost_json=?`,
-					patchEvidence.EvidenceID, patchEvidence.ProjectID, patchEvidence.IssueID, patchEvidence.Layer, patchEvidence.PatchDigest,
-					patchEvidence.SourceRevision, patchEvidence.BaseRevision, patchEvidence.ResultRevision, patchEvidence.Producer, patchEvidence.PolicyVersion,
-					patchEvidence.EnvironmentFingerprint, strings.TrimSpace(patchEvidence.ReusedFromEvidenceID), string(coverageJSON), string(costJSON)).Scan(&matchingEvidence); err != nil || matchingEvidence != 1 {
+				storedEvidence, evidenceErr := publicationEvidenceByIDTx(ctx, tx, patchEvidence.EvidenceID)
+				if evidenceErr != nil || !(domain.SamePatchReviewIdentity(storedEvidence, *patchEvidence) || domain.SameAcceptedPatchReviewAuthority(storedEvidence, *patchEvidence)) {
 					return c.wrapError("append-accepted-review-publication", issueID, errors.New("patch-review evidence conflicts with immutable authority"))
 				}
 			}
@@ -1373,6 +1381,32 @@ func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID
 	// cancellation or a transient projection read must not turn durable queue
 	// ownership into an apparent acceptance failure.
 	return AcceptedReviewPublicationCommit{EventID: eventID, PublicationOperationID: publicationOperationID}, nil
+}
+
+func publicationEvidenceByIDTx(ctx context.Context, tx *sql.Tx, evidenceID string) (domain.PublicationEvidence, error) {
+	var evidence domain.PublicationEvidence
+	var layer string
+	var reused sql.NullString
+	var coverageJSON, costJSON, createdAt string
+	err := tx.QueryRowContext(ctx, `SELECT evidence_id,project_id,issue_id,layer,patch_digest,source_revision,base_revision,result_revision,producer,policy_version,environment_fingerprint,reused_from_evidence_id,coverage_json,cost_json,created_at
+		FROM daemon_publication_evidence WHERE evidence_id=?`, evidenceID).Scan(
+		&evidence.EvidenceID, &evidence.ProjectID, &evidence.IssueID, &layer, &evidence.PatchDigest,
+		&evidence.SourceRevision, &evidence.BaseRevision, &evidence.ResultRevision, &evidence.Producer,
+		&evidence.PolicyVersion, &evidence.EnvironmentFingerprint, &reused, &coverageJSON, &costJSON, &createdAt,
+	)
+	if err != nil {
+		return domain.PublicationEvidence{}, err
+	}
+	evidence.Layer = domain.PublicationEvidenceLayer(layer)
+	evidence.ReusedFromEvidenceID = reused.String
+	if err := json.Unmarshal([]byte(coverageJSON), &evidence.Coverage); err != nil {
+		return domain.PublicationEvidence{}, err
+	}
+	if err := json.Unmarshal([]byte(costJSON), &evidence.Cost); err != nil {
+		return domain.PublicationEvidence{}, err
+	}
+	evidence.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
+	return evidence, err
 }
 
 func nullableReviewEvidenceID(value string) any {
