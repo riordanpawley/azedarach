@@ -196,7 +196,7 @@ func ingestAgentHookRuntimeSignalBestEffort(ctx context.Context, deps *Dependenc
 		Worktree:         strings.TrimSpace(hookCtx.ProjectDir),
 		TmuxPane:         strings.TrimSpace(os.Getenv("TMUX_PANE")),
 		AgentIncarnation: agentHookIncarnation(hookCtx.Payload),
-		AgentThreadID:    agentHookThreadID(hookCtx.Payload),
+		AgentThreadID:    agentHookThreadID(hookCtx.Agent, hookCtx.Payload),
 		Agent:            string(hookCtx.Agent),
 		Hook:             event,
 		Event:            event,
@@ -238,9 +238,17 @@ func agentHookIncarnation(payload map[string]any) string {
 	return ""
 }
 
-func agentHookThreadID(payload map[string]any) string {
+func agentHookThreadID(agent AgentSource, payload map[string]any) string {
 	for _, key := range []string{"thread_id", "thread-id"} {
 		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	// Codex lifecycle hooks expose the technical thread identity as session_id.
+	// Treat it as a native thread identifier only for Codex; other agent adapters
+	// may use session_id for a different, non-resumable identity.
+	if agent == AgentCodex {
+		if value, ok := payload["session_id"].(string); ok && strings.TrimSpace(value) != "" {
 			return strings.TrimSpace(value)
 		}
 	}
