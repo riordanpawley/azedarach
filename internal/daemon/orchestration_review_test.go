@@ -1162,6 +1162,18 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	if len(reviewEvents) != 1 || reviewEvents[0].Payload["outcome"] != "returned" {
 		t.Fatalf("review events = %+v", reviewEvents)
 	}
+	for key, want := range map[string]string{
+		"review_prompt_source":           "builtin:portable-v1",
+		"review_prompt_composition_mode": "builtin",
+		"review_coverage_contract":       appconfig.ReviewCoverageContract,
+	} {
+		if got := strings.TrimSpace(fmt.Sprint(reviewEvents[0].Payload[key])); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if got := strings.TrimSpace(fmt.Sprint(reviewEvents[0].Payload["review_prompt_digest"])); len(got) != 64 {
+		t.Errorf("review_prompt_digest = %q", got)
+	}
 	replayed, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{
 		Scope:         domain.ProjectOrchestrationScope(),
 		Kind:          protocol.OrchestrationIntentReviewReturn,
@@ -1198,6 +1210,64 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	}
 	if !strings.Contains(conflict.Failed[issueID], "different review request") {
 		t.Fatalf("conflicting replay = %+v, want explicit idempotency conflict", conflict)
+	}
+}
+
+func TestDeliveredReviewPromptBindingSurvivesFileMutationAndRejectsStaleDigest(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
+	admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	first := appconfig.ResolvedReviewPrompt{Source: "project:review/acme.txt", Digest: strings.Repeat("a", 64), CompositionMode: "project-before-mandatory", CoverageContract: appconfig.ReviewCoverageContract}
+	reviews := []protocol.OrchestrationReview{{IssueID: issueID, Actionable: true, ReviewEpochEventID: admission.ReviewEpochEventID}}
+	if err := d.recordReviewPromptBindings(ctx, "project", "delivery-a", first, reviews, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.recordReviewPromptBindings(ctx, "project", "delivery-a", first, reviews, true); err != nil {
+		t.Fatal(err)
+	}
+	events, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewPromptBound}})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("idempotent binding events = %d err=%v", len(events), err)
+	}
+	second := first
+	second.Digest = strings.Repeat("b", 64)
+	if err := d.recordReviewPromptBindings(ctx, "project", "delivery-b", second, reviews, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.boundReviewPromptForOutcome(ctx, "project", issueID, admission.ReviewEpochEventID, first.Digest); err == nil || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("stale A outcome error = %v", err)
+	}
+	bound, err := d.boundReviewPromptForOutcome(ctx, "project", issueID, admission.ReviewEpochEventID, second.Digest)
+	if err != nil || bound.Source != second.Source || bound.CompositionMode != second.CompositionMode || bound.CoverageContract != second.CoverageContract {
+		t.Fatalf("bound B = %+v err=%v", bound, err)
+	}
+}
+
+func TestUndeliveredReviewPromptBindingCannotAuthorizeOutcome(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
+	admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	prompt := appconfig.ResolvedReviewPrompt{Source: "builtin:portable-v1", Digest: strings.Repeat("c", 64), CompositionMode: "builtin", CoverageContract: appconfig.ReviewCoverageContract}
+	reviews := []protocol.OrchestrationReview{{IssueID: issueID, Actionable: true, ReviewEpochEventID: admission.ReviewEpochEventID}}
+	if err := d.recordReviewPromptBindings(ctx, "project", "delivery-unavailable", prompt, reviews, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.boundReviewPromptForOutcome(ctx, "project", issueID, admission.ReviewEpochEventID, prompt.Digest); err == nil || !strings.Contains(err.Error(), "not delivered") {
+		t.Fatalf("undelivered outcome error = %v", err)
 	}
 }
 
