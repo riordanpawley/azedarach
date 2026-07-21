@@ -30,6 +30,9 @@ type projectionFirstRequestServer struct {
 	projectID string
 }
 
+func (*projectionFirstRequestServer) Bind() error  { return nil }
+func (*projectionFirstRequestServer) Close() error { return nil }
+
 type projectionStartupIsolationResult struct {
 	corrupt protocol.ResponseEnvelope
 	healthy protocol.ResponseEnvelope
@@ -43,6 +46,9 @@ type projectionStartupIsolationServer struct {
 	corruptProjectID string
 	healthyProjectID string
 }
+
+func (*projectionStartupIsolationServer) Bind() error  { return nil }
+func (*projectionStartupIsolationServer) Close() error { return nil }
 
 func (s *projectionStartupIsolationServer) Serve(ctx context.Context) error {
 	close(s.started)

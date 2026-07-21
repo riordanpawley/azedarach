@@ -398,6 +398,9 @@ type runtimeReconcileTestServer struct {
 	release       <-chan struct{}
 }
 
+func (*runtimeReconcileTestServer) Bind() error  { return nil }
+func (*runtimeReconcileTestServer) Close() error { return nil }
+
 func (s *runtimeReconcileTestServer) Serve(ctx context.Context) error {
 	if s.served != nil {
 		select {

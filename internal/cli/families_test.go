@@ -893,20 +893,22 @@ func TestAIHookRunCommandRoutesCodexAgentThroughRuntimeSignalPort(t *testing.T) 
 	}
 }
 
-func TestAgentHookThreadIDUsesOnlyNativeThreadKeys(t *testing.T) {
+func TestAgentHookThreadIDUsesCodexNativeThreadKeys(t *testing.T) {
 	tests := []struct {
 		name    string
+		agent   AgentSource
 		payload map[string]any
 		want    string
 	}{
-		{name: "exact thread", payload: map[string]any{"thread_id": " thread-native ", "session_id": "session-other"}, want: "thread-native"},
-		{name: "alternate exact thread", payload: map[string]any{"thread-id": "thread-alt", "conversation_id": "conversation-other"}, want: "thread-alt"},
-		{name: "missing thread", payload: map[string]any{"session_id": "session-only", "conversation_id": "conversation-only"}},
-		{name: "wrong type", payload: map[string]any{"thread_id": 42, "session_id": "session-only"}},
+		{name: "exact thread", agent: AgentCodex, payload: map[string]any{"thread_id": " thread-native ", "session_id": "session-other"}, want: "thread-native"},
+		{name: "alternate exact thread", agent: AgentCodex, payload: map[string]any{"thread-id": "thread-alt", "conversation_id": "conversation-other"}, want: "thread-alt"},
+		{name: "Codex session is native thread", agent: AgentCodex, payload: map[string]any{"session_id": "session-native", "conversation_id": "conversation-other"}, want: "session-native"},
+		{name: "other agent session is not a thread", agent: AgentClaude, payload: map[string]any{"session_id": "session-only", "conversation_id": "conversation-only"}},
+		{name: "wrong type", agent: AgentCodex, payload: map[string]any{"thread_id": 42, "session_id": 7}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := agentHookThreadID(tt.payload); got != tt.want {
+			if got := agentHookThreadID(tt.agent, tt.payload); got != tt.want {
 				t.Fatalf("agentHookThreadID() = %q, want %q", got, tt.want)
 			}
 		})

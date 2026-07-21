@@ -30,14 +30,19 @@ type Server struct {
 	socketPath string
 	codec      *codec.Codec
 	handlers   Handlers
+	mu         sync.Mutex
 	listener   net.Listener
+	closed     bool
 	ready      chan struct{}
 	readyOnce  sync.Once
 }
 
 const serverFrameTimeout = 5 * time.Second
 
-var errSocketInUse = errors.New("socket path is already in use")
+var (
+	errSocketInUse  = errors.New("socket path is already in use")
+	errServerClosed = errors.New("server is closed")
+)
 
 // NewServer returns an unstarted IPC server.
 func NewServer(socketPath string, handlers Handlers) *Server {
@@ -54,39 +59,57 @@ func (s *Server) Ready() <-chan struct{} {
 	return s.ready
 }
 
-// Serve starts listening and blocks until context cancellation or fatal error.
-func (s *Server) Serve(ctx context.Context) error {
-	serveTraceCtx, endSpan := latencytrace.StartSpan(latencytrace.DetachedSpanContext(ctx), "daemon", "ipc.serve_start", "transport", "unix")
-	var spanErr error
-	defer func() { endSpan(spanErr) }()
+// Bind creates the listener without dispatching requests. This lets a daemon
+// publish socket readiness while it completes initialization that must finish
+// before any request is handled.
+func (s *Server) Bind() error {
 	if s.handlers.Handshake == nil || s.handlers.Command == nil || s.handlers.Subscribe == nil {
-		spanErr = fmt.Errorf("missing required handlers")
-		return spanErr
+		return fmt.Errorf("missing required handlers")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errServerClosed
+	}
+	if s.listener != nil {
+		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(s.socketPath), 0o755); err != nil {
-		spanErr = err
 		return fmt.Errorf("create socket dir: %w", err)
 	}
-	if err := clearStaleSocketPath(serveTraceCtx, s.socketPath); err != nil {
-		spanErr = err
+	if err := clearStaleSocketPath(context.Background(), s.socketPath); err != nil {
 		return err
 	}
-
 	l, err := net.Listen("unix", s.socketPath)
 	if err != nil {
-		spanErr = err
 		return fmt.Errorf("listen unix socket: %w", err)
 	}
 	s.listener = l
 	s.readyOnce.Do(func() { close(s.ready) })
-	defer func() {
-		_ = l.Close()
-		_ = os.Remove(s.socketPath)
-	}()
+	return nil
+}
+
+// Serve starts listening and blocks until context cancellation or fatal error.
+func (s *Server) Serve(ctx context.Context) error {
+	_, endSpan := latencytrace.StartSpan(latencytrace.DetachedSpanContext(ctx), "daemon", "ipc.serve_start", "transport", "unix")
+	var spanErr error
+	defer func() { endSpan(spanErr) }()
+	if err := s.Bind(); err != nil {
+		spanErr = err
+		return err
+	}
+	s.mu.Lock()
+	l := s.listener
+	s.mu.Unlock()
+	if l == nil {
+		spanErr = errors.New("listener closed before serve")
+		return spanErr
+	}
+	defer func() { _ = s.Close() }()
 
 	go func() {
 		<-ctx.Done()
-		_ = l.Close()
+		_ = s.Close()
 	}()
 
 	for {
@@ -155,10 +178,19 @@ func isSocketDialDefinitelyStale(err error) bool {
 }
 
 func (s *Server) Close() error {
-	if s.listener == nil {
+	s.mu.Lock()
+	l := s.listener
+	if l == nil {
+		s.mu.Unlock()
 		return nil
 	}
-	return s.listener.Close()
+	s.closed = true
+	s.mu.Unlock()
+	err := l.Close()
+	if removeErr := os.Remove(s.socketPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		err = errors.Join(err, removeErr)
+	}
+	return err
 }
 
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
