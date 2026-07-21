@@ -1649,6 +1649,11 @@ func sessionCommandUsage(command string, namespaced bool) (string, bool) {
 			return "usage: az session attach <issue-id>", true
 		}
 		return "usage: az attach <issue-id>", true
+	case "resume":
+		if namespaced {
+			return "usage: az session resume <issue-id>", true
+		}
+		return "", false
 	case "stop":
 		if namespaced {
 			return "usage: az session stop <issue-id> [--wait]", true
@@ -1798,6 +1803,16 @@ func runSessionCommand(cfg *config.Config, command string, args []string, namesp
 		}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.AttachCommand(deps, args[0])
+		})
+	case "resume":
+		if !namespaced {
+			return fmt.Errorf("unknown session command: %s", command)
+		}
+		if sessionHelpRequested(args...) || len(args) != 1 {
+			return fmt.Errorf("usage: az session resume <issue-id>")
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			return cli.ResumeCommand(deps, args[0])
 		})
 	case "stop", "kill":
 		canonicalUsage := "usage: az session stop <issue-id> [--wait]"

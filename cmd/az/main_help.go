@@ -58,6 +58,8 @@ func printHelpForPath(path []string) bool {
 		printSessionCommandUsage("start", key == "session start")
 	case "session attach", "attach":
 		printSessionCommandUsage("attach", key == "session attach")
+	case "session resume":
+		printSessionCommandUsage("resume", true)
 	case "session stop", "stop":
 		printSessionCommandUsage("stop", key == "session stop")
 	case "session kill", "kill":

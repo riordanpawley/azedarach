@@ -3,7 +3,7 @@ Usage: az [command] [arguments]
 Commands:
   (no command)         Start the Azedarach TUI
   global               Start the cross-project TUI using the configured global view
-  session <subcommand>  Session commands (start|attach|stop|status|diagnose)
+  session <subcommand>  Session commands (start|attach|resume|stop|status|diagnose)
   branch <subcommand>   Branch commands (merge)
   view <subcommand>      View commands (list|get|select|create|update|delete|explain)
   pr <subcommand>       Pull request commands (list|status|checks|open|create|merge)
@@ -84,6 +84,7 @@ Examples:
   az                   # Start TUI
   az session start az-123   # Start session for ticket az-123
   az session attach az-123  # Attach to ticket az-123's session
+  az session resume az-123  # Resume lifecycle intent for a preserved session
   az session stop az-123    # Stop ticket az-123's session
   az session status         # Show all active sessions
   az session status az-123  # Show status for az-123

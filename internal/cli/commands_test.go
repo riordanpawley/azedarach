@@ -1640,7 +1640,7 @@ func TestStartCommandUsesNearestAncestorWorktreeBranchForNestedChildIssue(t *tes
 	assertSessionStartOperationSubmitRequest(t, gotReq, "proj", "/repo", "az-child", "user/az-root/root-branch")
 }
 
-func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
+func TestAttachResumeKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 	tests := []struct {
 		name        string
 		command     func(*Dependencies, string) error
@@ -1654,6 +1654,13 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 			sessionID:   "issue-2",
 			wantCommand: commandSessionAttach,
 			response:    "Attaching to session: issue-2\n(Press Ctrl+B then D to detach)\n",
+		},
+		{
+			name:        "resume",
+			command:     ResumeCommand,
+			sessionID:   "issue-2",
+			wantCommand: commandSessionResume,
+			response:    "Resumed session: issue-2\n",
 		},
 		{
 			name:        "kill",
@@ -1717,7 +1724,7 @@ func TestAttachKillAndStatusCommandsUseDaemonEnvelope(t *testing.T) {
 				t.Fatalf("command = %q, want %q", gotReq.Command, tt.wantCommand)
 			}
 			switch tt.wantCommand {
-			case commandSessionAttach, commandSessionStop:
+			case commandSessionAttach, commandSessionResume, commandSessionStop:
 				if len(commands) != 2 || commands[0] != daemonclient.CommandTaskGetMany || commands[1] != tt.wantCommand {
 					t.Fatalf("commands = %v", commands)
 				}

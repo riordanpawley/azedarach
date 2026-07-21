@@ -9117,14 +9117,14 @@ func TestSessionStatusReportsHookBackedActivity(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &payload); err != nil {
 		t.Fatalf("unmarshal status response: %v", err)
 	}
-	if !strings.Contains(payload.Output, "ISSUE ID\tSTATUS\tACTIVITY\tTITLE") {
-		t.Fatalf("status output = %q, want activity header", payload.Output)
+	if !strings.Contains(payload.Output, "ISSUE ID\tSTATUS\tLIFECYCLE\tACTIVITY\tTITLE") {
+		t.Fatalf("status output = %q, want lifecycle and activity header", payload.Output)
 	}
-	if !strings.Contains(payload.Output, busyIssueID+"\tin_progress\tbusy\tBusy worker") {
+	if !strings.Contains(payload.Output, busyIssueID+"\tin_progress\trunning\tbusy\tBusy worker") {
 		t.Fatalf("status output = %q, want busy hook-backed activity", payload.Output)
 	}
-	if !strings.Contains(payload.Output, idleIssueID+"\tin_progress\tidle\tIdle worker") {
-		t.Fatalf("status output = %q, want idle hook-backed activity", payload.Output)
+	if !strings.Contains(payload.Output, idleIssueID+"\tin_progress\tpaused\tidle\tIdle worker") {
+		t.Fatalf("status output = %q, want lifecycle pause distinct from idle hook activity", payload.Output)
 	}
 }
 
@@ -12911,6 +12911,18 @@ func TestPersistTmuxSessionRuntimeStateKeepsAgentHookActivityWhenPaneLives(t *te
 	activity := sessionHookActivityByIssueKeyFromSessions(sessions, d.sessionNamingScope(projectID))[sessionKey(issueID)]
 	if got, _ := sessionActivityLabel(activity); got != "busy" {
 		t.Fatalf("activity = %s from %+v, want busy", got, activity)
+	}
+}
+
+func TestSessionProjectionCountsSeparateLifecyclePauseFromIdleAndWaitingActivity(t *testing.T) {
+	issueID := "dyc"
+	counts := sessionProjectionCountsByIssueKey([]daemonstate.Session{
+		{ID: "az-dyc.pane-idle", IssueID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "idle"},
+		{ID: "az-dyc.pane-waiting", IssueID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "waiting"},
+		{ID: "az-dyc.pane-paused", IssueID: issueID, State: daemonstate.SessionStatePaused, ObservedState: daemonstate.SessionStateRunning, Activity: "idle"},
+	}, "az")[sessionKey(issueID)]
+	if counts.Total != 3 || counts.Active != 2 || counts.Paused != 1 {
+		t.Fatalf("counts = %+v, want total=3 active=2 paused=1", counts)
 	}
 }
 
