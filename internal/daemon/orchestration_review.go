@@ -1302,40 +1302,56 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 		a.daemon.cfg.Logger.Info("orchestration review return stage completed", "project_id", projectID, "issue_id", inspection.IssueID, "intent_key", request.IntentKey, "stage", "live_delivery", "target", inspection.IssueID)
 	}
 	if deliveryErr != nil && request.RestartWorker {
-		if inspection.ReviewEpochEventID > 0 {
-			if err := a.validateReviewAdmissionInspection(ctx, projectID, inspection); err != nil {
-				return fmt.Errorf("return review admission changed before restart: %w", err)
+		// A review handoff deliberately keeps its worker session alive. A failed
+		// managed-agent delivery is therefore not proof that session.start is safe:
+		// the exact session may be paused, recovering its hook identity, or simply
+		// not yet ready to accept a turn. Re-check tmux immediately before the
+		// fallback so an existing session is retried through its exact incarnation
+		// instead of colliding with a duplicate start operation.
+		preserved, sessionErr := a.reviewReturnWorkerSessionExists(ctx, projectID, inspection.IssueID)
+		if sessionErr != nil {
+			return fmt.Errorf("review findings recorded but delivery failed: %v; inspect preserved worker session: %w", deliveryErr, sessionErr)
+		}
+		if preserved {
+			if a.daemon.cfg.Logger != nil {
+				a.daemon.cfg.Logger.Info("orchestration review return retains preserved worker session after delivery failure", "project_id", projectID, "issue_id", inspection.IssueID, "intent_key", request.IntentKey)
 			}
-		}
-		allowed, ownershipErr := a.reviewWorkerRestartAllowed(ctx, projectID, inspection.IssueID, request.ActorID)
-		if ownershipErr != nil {
-			return fmt.Errorf("review findings recorded but delivery failed: %v; inspect restart ownership: %w", deliveryErr, ownershipErr)
-		}
-		if !allowed {
-			return fmt.Errorf("review findings recorded but delivery failed: %v; worker restart refused because the acting orchestrator does not own execution or orchestration scope", deliveryErr)
-		}
-		launch, restartErr := a.claimAndSubmitStartWithPrompt(ctx, projectID, request, inspection.IssueID, message)
-		if restartErr != nil {
-			return fmt.Errorf("review findings recorded but delivery failed: %v; restart failed: %w", deliveryErr, restartErr)
-		}
-		result.Launched = append(result.Launched, launch)
-		switch protocol.OperationState(launch.OperationState) {
-		case protocol.OperationStateQueued, protocol.OperationStateRunning:
-			result.Pending = append(result.Pending, protocol.OrchestrationPending{IssueID: inspection.IssueID, OperationID: launch.OperationID, OperationState: launch.OperationState})
-			if err := a.recordReviewRestartSubmitted(ctx, projectID, inspection.IssueID, request, launch, inspection); err != nil {
-				return err
+		} else {
+			if inspection.ReviewEpochEventID > 0 {
+				if err := a.validateReviewAdmissionInspection(ctx, projectID, inspection); err != nil {
+					return fmt.Errorf("return review admission changed before restart: %w", err)
+				}
 			}
-			return nil
-		case protocol.OperationStateDone:
-			delivered = true
-		case protocol.OperationStateFailed, protocol.OperationStateCancelled:
-			failure := fmt.Sprintf("restart operation %s reached terminal %s", launch.OperationID, launch.OperationState)
-			if err := a.recordReviewOutcomePinned(ctx, projectID, inspection.IssueID, request, "delivery_failed", failure, inspection); err != nil {
-				return fmt.Errorf("review findings recorded but delivery failed: %v; %s; record failure: %w", deliveryErr, failure, err)
+			allowed, ownershipErr := a.reviewWorkerRestartAllowed(ctx, projectID, inspection.IssueID, request.ActorID)
+			if ownershipErr != nil {
+				return fmt.Errorf("review findings recorded but delivery failed: %v; inspect restart ownership: %w", deliveryErr, ownershipErr)
 			}
-			return fmt.Errorf("review findings recorded but delivery failed: %v; %s", deliveryErr, failure)
-		default:
-			return fmt.Errorf("review findings recorded but delivery failed: %v; restart operation %s returned unknown state %q", deliveryErr, launch.OperationID, launch.OperationState)
+			if !allowed {
+				return fmt.Errorf("review findings recorded but delivery failed: %v; worker restart refused because the acting orchestrator does not own execution or orchestration scope", deliveryErr)
+			}
+			launch, restartErr := a.claimAndSubmitStartWithPrompt(ctx, projectID, request, inspection.IssueID, message)
+			if restartErr != nil {
+				return fmt.Errorf("review findings recorded but delivery failed: %v; restart failed: %w", deliveryErr, restartErr)
+			}
+			result.Launched = append(result.Launched, launch)
+			switch protocol.OperationState(launch.OperationState) {
+			case protocol.OperationStateQueued, protocol.OperationStateRunning:
+				result.Pending = append(result.Pending, protocol.OrchestrationPending{IssueID: inspection.IssueID, OperationID: launch.OperationID, OperationState: launch.OperationState})
+				if err := a.recordReviewRestartSubmitted(ctx, projectID, inspection.IssueID, request, launch, inspection); err != nil {
+					return err
+				}
+				return nil
+			case protocol.OperationStateDone:
+				delivered = true
+			case protocol.OperationStateFailed, protocol.OperationStateCancelled:
+				failure := fmt.Sprintf("restart operation %s reached terminal %s", launch.OperationID, launch.OperationState)
+				if err := a.recordReviewOutcomePinned(ctx, projectID, inspection.IssueID, request, "delivery_failed", failure, inspection); err != nil {
+					return fmt.Errorf("review findings recorded but delivery failed: %v; %s; record failure: %w", deliveryErr, failure, err)
+				}
+				return fmt.Errorf("review findings recorded but delivery failed: %v; %s", deliveryErr, failure)
+			default:
+				return fmt.Errorf("review findings recorded but delivery failed: %v; restart operation %s returned unknown state %q", deliveryErr, launch.OperationID, launch.OperationState)
+			}
 		}
 	}
 	if !delivered {
@@ -1359,6 +1375,23 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 		return err
 	}
 	return nil
+}
+
+// reviewReturnWorkerSessionExists checks the authoritative tmux-backed worker
+// session identity used by session lifecycle operations. It intentionally does
+// not treat a missing or stale managed-agent hook as absence: that condition
+// must remain a retryable delivery failure, never authorization to start a
+// duplicate tmux session.
+func (a daemonOrchestrationAuthority) reviewReturnWorkerSessionExists(ctx context.Context, projectID, issueID string) (bool, error) {
+	if a.daemon == nil {
+		return false, fmt.Errorf("daemon unavailable")
+	}
+	parsed, err := naming.ParseIssueID(issueID)
+	if err != nil {
+		return false, err
+	}
+	sessionID := naming.CanonicalSessionIDForIssue(a.daemon.sessionNamingScope(projectID), parsed).String()
+	return a.daemon.sessionLifecycleTargetExists(ctx, projectID, parsed.String(), sessionID)
 }
 
 func deliveryFailureMessage(err error, target string) string {

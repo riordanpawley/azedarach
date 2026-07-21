@@ -1213,6 +1213,70 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	}
 }
 
+func TestReviewReturnDoesNotStartDuplicateForPreservedSessionWithUnavailableIdentity(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
+	tmuxRunner := newSessionStartTmuxRunner()
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.tmux = tmux.NewClient(tmuxRunner, slog.Default())
+	canonicalSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()
+	tmuxRunner.sessions[canonicalSessionID] = true
+	authority := daemonOrchestrationAuthority{daemon: d}
+	submitCalls := 0
+	authority.submitStart = func(_ context.Context, _ protocol.RequestEnvelope) protocol.ResponseEnvelope {
+		submitCalls++
+		return protocol.ResponseEnvelope{OK: false}
+	}
+	request := protocol.OrchestrationIntentRequest{
+		Scope:         domain.ProjectOrchestrationScope(),
+		Kind:          protocol.OrchestrationIntentReviewReturn,
+		IntentKey:     "preserved-session-retry",
+		ActorID:       "orchestrator",
+		IssueIDs:      []string{issueID},
+		RepoDir:       repoDir,
+		ReviewPass:    validReturnedReviewPass(),
+		RestartWorker: true,
+		Findings:      []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "wait for exact managed identity"}},
+	}
+
+	first, err := authority.Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submitCalls != 0 || len(first.Pending) != 0 || !strings.Contains(first.Failed[issueID], "active delivery failed") {
+		t.Fatalf("first result = %+v submits=%d, want retryable delivery failure without a duplicate start", first, submitCalls)
+	}
+
+	seedReadyAgentInput(t, d, tmuxRunner, "project", canonicalSessionID)
+	pausedObservationVersion := int64(1 << 62)
+	if _, _, err := d.sessionRuntimeStateStore("project").ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+		ProjectID: "project", SessionID: canonicalSessionID, ObservedState: daemonstate.SessionStatePaused,
+		Activity: "idle", ActivitySource: "hooks", UpdatedAt: time.Unix(0, pausedObservationVersion), ObservedVersion: pausedObservationVersion,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := authority.Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submitCalls != 0 || len(replayed.Returned) != 1 || replayed.Returned[0] != issueID || len(replayed.Failed) != 0 {
+		t.Fatalf("replayed result = %+v submits=%d, want exact paused-session delivery convergence", replayed, submitCalls)
+	}
+	if len(tmuxRunner.inputPayloads) != 1 || !strings.Contains(tmuxRunner.inputPayloads[0], "wait for exact managed identity") {
+		t.Fatalf("delivered prompts = %+v, want one exact-session handback", tmuxRunner.inputPayloads)
+	}
+	reviewEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewEvents) != 2 || reviewEvents[0].Payload["outcome"] != "delivery_failed" || reviewEvents[1].Payload["outcome"] != "returned" {
+		t.Fatalf("review events = %+v, want delivery failure followed by returned", reviewEvents)
+	}
+}
+
 func TestDeliveredReviewPromptBindingSurvivesFileMutationAndRejectsStaleDigest(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
