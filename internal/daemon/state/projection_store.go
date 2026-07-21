@@ -3201,7 +3201,10 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessPr
 			return fmt.Errorf("ensure runtime-state schema: %w", err)
 		}
 	}
-	if err := ensureColumn(ctx, db, managedAgentIdentityTable, "agent_thread_id", "TEXT"); err != nil {
+	// Runtime stores may open before issues.Client applies migration 0060. Install
+	// only the migration's exact pinned definitions here; migration 0060 still
+	// validates the shape and records its immutable ledger artifact.
+	if err := ensureColumn(ctx, db, managedAgentIdentityTable, "agent_thread_id", "TEXT CHECK (agent_thread_id IS NULL OR trim(agent_thread_id) <> '')"); err != nil {
 		return err
 	}
 	for _, column := range []struct{ name, definition string }{

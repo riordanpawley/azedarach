@@ -876,6 +876,13 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
 		revision:                  map[string]uint64{},
 	}
+	d.agentInput = newAgentInputDeliveryService(
+		func(string) *daemonstate.RuntimeStateStore { return runtimeStore },
+		func(string) *issues.Client { return issuesClient },
+		&recordingAuthoritativeReceiver{accepted: map[string]string{}, sink: func(payload string) { tmuxRunner.inputPayloads = append(tmuxRunner.inputPayloads, payload) }},
+		"rooted-bootstrap-test",
+	)
+	d.agentInput.delivered = d.acknowledgeDeliveredRootedBootstrap
 	scope, err := domain.RootedOrchestrationScope(rootID)
 	if err != nil {
 		t.Fatal(err)
@@ -903,6 +910,13 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	}
 	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
 	delegated, err := d.handleSessionStartDirect(ctx, genericStart)
+	if err == nil && delegated.Error != nil && delegated.Error.Code == protocol.ErrorCodeUnavailable {
+		now := time.Now().UTC()
+		if _, _, observeErr := runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: rootedSessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now, ObservedVersion: now.UnixNano()}); observeErr != nil {
+			t.Fatal(observeErr)
+		}
+		delegated, err = d.handleSessionStartDirect(ctx, genericStart)
+	}
 	if err != nil || delegated.Error != nil || !strings.Contains(string(delegated.Body), "Starting rooted orchestrator session for epic") {
 		t.Fatalf("generic epic start did not delegate: response=%+v body=%q err=%v", delegated.Error, delegated.Body, err)
 	}
@@ -919,7 +933,10 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if !started.Live {
 		t.Fatalf("started = %+v", started)
 	}
-	prompt := tmuxRunner.launchPromptContents[started.SessionID]
+	prompt, err := d.rootedOrchestratorBootstrapPrompt(ctx, projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{
 		"Role: orchestrator",
 		"Rooted startup contract (root " + rootID + ")",
@@ -1016,7 +1033,7 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if restartResult.Restarted != 1 || restartResult.Failed != 0 {
 		t.Fatalf("restart rooted agent result = %+v", restartResult)
 	}
-	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || len(tmuxRunner.handoffPromptContents) != handoffsBefore+1 {
+	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || len(tmuxRunner.handoffPromptContents) != handoffsBefore {
 		t.Fatalf("restart rooted acknowledgement delivery inputs=%d handoffs=%d", len(tmuxRunner.inputPayloads)-inputsBefore, len(tmuxRunner.handoffPromptContents)-handoffsBefore)
 	}
 	restartedNonce := tmuxRunner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]
@@ -1083,7 +1100,7 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if repaired.Disposition != string(daemonstate.OrchestratorLeaseAttached) {
 		t.Fatalf("repaired = %+v", repaired)
 	}
-	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || !strings.Contains(tmuxRunner.inputPayloads[len(tmuxRunner.inputPayloads)-1], sessionLaunchArtifactPrefix) {
+	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || !strings.Contains(tmuxRunner.inputPayloads[len(tmuxRunner.inputPayloads)-1], "Rooted startup contract") {
 		t.Fatalf("bootstrap repair delivery = %+v", tmuxRunner.inputPayloads[inputsBefore:])
 	}
 	repairedAck, found, err := ackAuthority.Get(ctx, identity)
@@ -1107,10 +1124,10 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if err != nil || response.Error != nil {
 		t.Fatalf("repair reused ordinary runtime: response=%+v err=%v", response.Error, err)
 	}
-	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || len(tmuxRunner.handoffPromptContents) != handoffsBefore+1 {
+	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || len(tmuxRunner.handoffPromptContents) != handoffsBefore {
 		t.Fatalf("ordinary runtime repair delivery inputs=%d handoffs=%d", len(tmuxRunner.inputPayloads)-inputsBefore, len(tmuxRunner.handoffPromptContents)-handoffsBefore)
 	}
-	repairPrompt := tmuxRunner.handoffPromptContents[len(tmuxRunner.handoffPromptContents)-1]
+	repairPrompt := tmuxRunner.inputPayloads[len(tmuxRunner.inputPayloads)-1]
 	if !strings.Contains(repairPrompt, "Role: orchestrator") || strings.Contains(repairPrompt, "Role: contributor") || strings.Contains(repairPrompt, "Role: worker") {
 		t.Fatalf("ordinary runtime repair prompt = %q", repairPrompt)
 	}
@@ -1586,6 +1603,11 @@ func TestRootedRestartAfterCallerCancellationSerializesAndAcknowledgesReplacemen
 		}
 	}
 	first, second := newDaemon(firstStore), newDaemon(secondStore)
+	receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}, sink: func(payload string) { runner.inputPayloads = append(runner.inputPayloads, payload) }}
+	for _, daemon := range []*Daemon{first, second} {
+		daemon.agentInput = newAgentInputDeliveryService(daemon.sessionRuntimeStateStoreIfConfigured, daemon.issueClientForProject, receiver, "rooted-restart-test")
+		daemon.agentInput.delivered = daemon.acknowledgeDeliveredRootedBootstrap
+	}
 	scope, err := domain.RootedOrchestrationScope(rootID)
 	if err != nil {
 		t.Fatal(err)

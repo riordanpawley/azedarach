@@ -76,6 +76,7 @@ type agentInputDeliveryService struct {
 	sessionLeaseDuration  time.Duration
 	sessionLeaseHeartbeat time.Duration
 	deliveryEligible      func(context.Context, domain.AgentInputDeliveryRequest, time.Time) (bool, error)
+	delivered             func(context.Context, domain.AgentInputDeliveryRequest) error
 }
 
 func newAgentInputDeliveryService(stores func(string) *state.RuntimeStateStore, issueClients func(string) *issues.Client, receiver authoritativeAgentInputReceiver, owner string) *agentInputDeliveryService {
@@ -101,6 +102,11 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "persist delivery intent"}, err
 	}
 	if intent.State == "delivered" {
+		if s.delivered != nil {
+			if err := s.delivered(ctx, request); err != nil {
+				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "persist delivered-input side effect"}, err
+			}
+		}
 		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputDelivered, Reason: "durably acknowledged"}, nil
 	}
 	if intent.State == "expired" {
@@ -339,6 +345,11 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 	}
 	if !acknowledged {
 		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "delivery lease changed before acknowledgement"}, nil
+	}
+	if s.delivered != nil {
+		if err := s.delivered(ctx, request); err != nil {
+			return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "persist delivered-input side effect"}, err
+		}
 	}
 	return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputDelivered, Reason: "receiver acknowledged exact intent and incarnation"}, nil
 }

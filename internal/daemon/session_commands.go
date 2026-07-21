@@ -6178,7 +6178,7 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 		}
 		command := promptAssignment + "; " + strings.Join(parts, " ")
 		if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
-			return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, command)
+			return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, "false # initial Codex recovery is daemon-owned after exact hook thread binding")
 		}
 		if strings.EqualFold(tool, "codex") {
 			return codexFloopFailOpenProbe(tool) + "; " + command
@@ -6188,7 +6188,7 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 
 	command := strings.Join(parts, " ")
 	if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
-		return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, command)
+		return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, "false # initial Codex recovery is daemon-owned after exact hook thread binding")
 	}
 	if strings.EqualFold(tool, "codex") {
 		return codexFloopFailOpenProbe(tool) + "; " + command

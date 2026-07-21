@@ -406,6 +406,9 @@ func TestCodexAppServerLaunchUsesStockRemoteTUIAndSupervisedResume(t *testing.T)
 		SessionShell:               "sh",
 	}}
 	command := d.buildSessionLaunchCommand(protocol.DefaultProjectID, "dbc", "az-dbc", true, nil, "start here")
+	if !strings.Contains(command, "initial Codex recovery is daemon-owned after exact hook thread binding") {
+		t.Fatalf("initial Codex supervisor may recover through a fresh thread: %s", command)
+	}
 	for _, want := range []string{
 		"codex " + codexFloopFailOpenConfigExpansion + " app-server daemon start",
 		"codex " + codexFloopFailOpenConfigExpansion + " --remote unix:// --dangerously-bypass-approvals-and-sandbox",
@@ -2066,10 +2069,15 @@ func seedManagedRestartIdentity(t *testing.T, d *Daemon, runner *sessionStartTmu
 				continue
 			}
 			runner.panePIDs[sessionID] = 124
-			return store.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{
+			if err := store.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{
 				ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "1",
 				PanePID: 124, AgentIncarnation: incarnation[1], AgentThreadID: "019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02", ObservedAt: time.Now().UTC().Add(time.Second),
-			})
+			}); err != nil {
+				return err
+			}
+			now := time.Now().UTC().Add(2 * time.Second)
+			_, _, err = store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now, ObservedVersion: now.UnixNano()})
+			return err
 		}
 		return errors.New("restart artifact did not contain an agent incarnation")
 	}
@@ -2077,6 +2085,21 @@ func seedManagedRestartIdentity(t *testing.T, d *Daemon, runner *sessionStartTmu
 
 func acknowledgeManagedAgentOnInitialLaunch(t *testing.T, d *Daemon, runner *sessionStartTmuxRunner, projectID string) {
 	t.Helper()
+	previousListPanes := runner.onListPanes
+	runner.onListPanes = func(calls int) {
+		if previousListPanes != nil {
+			previousListPanes(calls)
+		}
+		for sessionID := range runner.sessions {
+			store := d.sessionRuntimeStateStore(projectID)
+			identity, found, err := store.GetManagedAgentIdentity(context.Background(), d.canonicalProjectID(projectID), sessionID, "agent")
+			if err != nil || !found || identity.AgentIncarnation == "" {
+				continue
+			}
+			now := time.Now().UTC()
+			_, _, _ = store.ApplyPhysicalSessionObservation(context.Background(), daemonstate.PhysicalSessionObservation{ProjectID: d.canonicalProjectID(projectID), SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now, ObservedVersion: now.UnixNano()})
+		}
+	}
 	previous := runner.onNewSession
 	runner.onNewSession = func(sessionID string) {
 		if previous != nil {
@@ -2126,6 +2149,13 @@ func acknowledgeManagedAgentOnInitialLaunch(t *testing.T, d *Daemon, runner *ses
 			TmuxPaneID: "1", PanePID: panePID, AgentIncarnation: incarnation[1], AgentThreadID: agentThreadID, ObservedAt: observedAt,
 		}); err != nil {
 			t.Errorf("acknowledge initial managed agent launch: %v", err)
+			return
+		}
+		if _, _, err := store.ApplyPhysicalSessionObservation(context.Background(), daemonstate.PhysicalSessionObservation{
+			ProjectID: d.canonicalProjectID(projectID), SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning,
+			Activity: "idle", ActivitySource: "hooks", UpdatedAt: observedAt, ObservedVersion: observedAt.UnixNano(),
+		}); err != nil {
+			t.Errorf("record initial managed agent hook readiness: %v", err)
 		}
 	}
 }
