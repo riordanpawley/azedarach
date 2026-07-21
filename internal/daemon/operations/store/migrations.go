@@ -201,7 +201,35 @@ func validatePublicationEvidenceSchema(ctx context.Context, db *sql.DB) error {
 }
 
 func normalizeSQLiteDefinition(value string) string {
-	return strings.ToLower(strings.Join(strings.Fields(value), " "))
+	// sqlite_master preserves the spelling history of a table. In particular,
+	// a table assembled by ALTER TABLE statements can retain whitespace around
+	// commas differently from a canonical database built from the same
+	// migrations. Compare SQL tokens, not that incidental formatting, while
+	// retaining quoted literal contents and all structural tokens.
+	var normalized strings.Builder
+	normalized.Grow(len(value))
+	inSingleQuote := false
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if character == '\'' {
+			normalized.WriteByte(character)
+			if inSingleQuote && index+1 < len(value) && value[index+1] == '\'' {
+				normalized.WriteByte(value[index+1])
+				index++
+				continue
+			}
+			inSingleQuote = !inSingleQuote
+			continue
+		}
+		if !inSingleQuote && (character == ' ' || character == '\n' || character == '\r' || character == '\t') {
+			continue
+		}
+		if !inSingleQuote && character >= 'A' && character <= 'Z' {
+			character += 'a' - 'A'
+		}
+		normalized.WriteByte(character)
+	}
+	return strings.TrimSuffix(normalized.String(), ";")
 }
 
 func validateValidationLeaseSchema(ctx context.Context, db *sql.DB) error {
