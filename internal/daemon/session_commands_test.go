@@ -474,8 +474,11 @@ func TestCodexManagedResumeUsesExactDurableThreadWithoutPickerFallback(t *testin
 func TestCodexManagedResumeWithoutDurableThreadFailsClosed(t *testing.T) {
 	d := &Daemon{cfg: Config{CLITool: "codex", CodexAppServer: true}}
 	command := d.buildCodexResumeCommand(protocol.DefaultProjectID, "root", "", false, nil)
-	if !strings.Contains(command, "false # managed Codex resume refused") || strings.Contains(command, "--last") {
+	if !strings.Contains(command, "managed Codex resume refused: missing exact durable thread id") || strings.Contains(command, "--last") {
 		t.Fatalf("missing-thread resume command = %q", command)
+	}
+	if !strings.Contains(command, "exit 1") {
+		t.Fatalf("missing-thread resume does not stop the generated shell: %q", command)
 	}
 }
 
@@ -10456,6 +10459,38 @@ func TestSessionLaunchScriptKeepsVeryLargePayloadOutOfChildArgv(t *testing.T) {
 	}
 }
 
+func TestPrepareSessionLaunchScriptKeepsPayloadReadableUntilExit(t *testing.T) {
+	dir := t.TempDir()
+	path, command, err := prepareSessionLaunchScript(dir, "/bin/sh", `printf launched > "$1"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, "launched")
+	script, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(script), "#!/bin/sh\ntrap 'rm -f -- \"$0\"' EXIT\n") {
+		t.Fatalf("launch artifact does not install deferred self-cleanup: %q", script)
+	}
+	if strings.Contains(string(script), "\nrm -f -- \"$0\"\n") {
+		t.Fatalf("launch artifact eagerly deletes itself: %q", script)
+	}
+	if out, err := exec.Command("/bin/sh", "-n", path).CombinedOutput(); err != nil {
+		t.Fatalf("launch artifact syntax: %v\n%s", err, out)
+	}
+	command += " " + singleQuoteForShell(marker)
+	if out, err := exec.Command("/bin/sh", "-c", command).CombinedOutput(); err != nil {
+		t.Fatalf("execute launch artifact: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("launch payload did not execute: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("launch artifact was not removed on exit: %v", err)
+	}
+}
+
 func TestSessionLaunchAtomicallyBootstrapsSlowAgentsAcrossToolsAndStartModes(t *testing.T) {
 	for _, tool := range []string{"codex", "claude", "opencode", "codex-app-server"} {
 		for _, mode := range []string{"direct", "orchestrated"} {
@@ -11284,7 +11319,7 @@ func TestSessionLaunchResumeAdaptersExecuteContinuationSemantics(t *testing.T) {
 				t.Fatal(err)
 			}
 			d := &Daemon{cfg: Config{RepoDir: t.TempDir(), CLITool: tt.tool, SessionShell: "/bin/sh", DangerouslySkipPermissions: true}}
-			artifact, err := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchResume, ProjectID: protocol.DefaultProjectID, IssueID: "dky", SessionID: "az-dky", Prompt: "continue"})
+			artifact, err := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchResume, ProjectID: protocol.DefaultProjectID, IssueID: "dky", SessionID: "az-dky", AgentThreadID: "thread-dky", Prompt: "continue"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -11301,6 +11336,9 @@ func TestSessionLaunchResumeAdaptersExecuteContinuationSemantics(t *testing.T) {
 			}
 			if !strings.Contains(string(got), tt.want) {
 				t.Fatalf("executed args = %q, want continuation %q", got, tt.want)
+			}
+			if tt.tool == "codex" && (!strings.Contains(string(got), "thread-dky") || strings.Contains(string(got), "--last")) {
+				t.Fatalf("Codex resume must target the exact durable thread without picker fallback: %q", got)
 			}
 			if tt.tool == "configured-agent" && strings.Contains(string(got), "dangerously") {
 				t.Fatalf("configured adapter inherited provider permission flag: %q", got)
