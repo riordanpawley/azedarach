@@ -114,6 +114,7 @@ type Daemon struct {
 	apply    *daemonhandlers.ApplyHandler
 
 	issues                               *issues.Client
+	projectNeutralRouting                bool
 	userStore                            *userstore.Store
 	selectorSnapshots                    selectorSnapshotCache
 	userStoreRefreshMu                   sync.Mutex
@@ -324,22 +325,24 @@ func New(cfg Config) *Daemon {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	if cfg.RepoDir == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			cfg.RepoDir = cwd
-		} else {
-			cfg.RepoDir = "."
-		}
+	// A normal daemon is user-global: it must not acquire authority from the
+	// directory that happened to launch it. RepoDir remains only for explicit
+	// scoped-runtime/test construction until those callers move to the project
+	// resolver boundary.
+	runtimeRepoDir := appconfig.GlobalDaemonRuntimeDir()
+	if strings.TrimSpace(cfg.RepoDir) != "" {
+		runtimeRepoDir = cfg.RepoDir
 	}
-	runtimeRepoDir := cfg.RepoDir
 	cfg.ScopedRuntime = cfg.ScopedRuntime || appconfig.UseScopedDaemonRuntimeFor(cfg.RepoDir)
 	if cfg.ScopedRuntime {
 		if worktreeRoot, err := appconfig.ResolveWorktreeRoot(cfg.RepoDir); err == nil && strings.TrimSpace(worktreeRoot) != "" {
 			runtimeRepoDir = worktreeRoot
 		}
 	}
-	if normalizedRepoDir, err := appconfig.ResolveProjectRoot(cfg.RepoDir); err == nil {
-		cfg.RepoDir = normalizedRepoDir
+	if strings.TrimSpace(cfg.RepoDir) != "" {
+		if normalizedRepoDir, err := appconfig.ResolveProjectRoot(cfg.RepoDir); err == nil {
+			cfg.RepoDir = normalizedRepoDir
+		}
 	}
 	if cfg.BaseBranch == "" {
 		cfg.BaseBranch = "main"
@@ -385,13 +388,17 @@ func New(cfg Config) *Daemon {
 	}
 	devServerManager := devserver.NewManager(devserver.NewPortAllocator(3000), cfg.Logger)
 	sessionStore := daemonstate.NewStore()
-	issuesClient := issues.NewClient(cfg.RepoDir, cfg.Logger)
+	var issuesClient *issues.Client
+	if strings.TrimSpace(cfg.RepoDir) != "" {
+		issuesClient = issues.NewClient(cfg.RepoDir, cfg.Logger)
+	}
 	sessionHandler := daemonhandlers.NewSessionHandler(sessionStore)
 	devServerHandler := daemonhandlers.NewDevServerHandler(devServerManager)
 	specService := issueSpecService{daemon: nil}
 
 	d := &Daemon{
 		cfg:                                cfg,
+		projectNeutralRouting:              strings.TrimSpace(cfg.RepoDir) == "",
 		lock:                               lifecycle.NewLockManager(cfg.LockPath),
 		hub:                                publish.NewHub(512, 64, cfg.Logger),
 		issues:                             issuesClient,
@@ -476,19 +483,21 @@ func New(cfg Config) *Daemon {
 			d.userStore = store
 		}
 	}
-	canonicalProjectID := protocol.DefaultProjectID
-	if hashProjectID, err := appconfig.ProjectIDForRoot(strings.TrimSpace(cfg.RepoDir)); err == nil {
-		canonicalProjectID = protocol.NormalizeProjectID(hashProjectID)
-	} else if repoName := protocol.NormalizeProjectID(filepath.Base(strings.TrimSpace(cfg.RepoDir))); repoName != "" {
-		canonicalProjectID = repoName
+	if strings.TrimSpace(cfg.RepoDir) != "" {
+		canonicalProjectID := protocol.DefaultProjectID
+		if hashProjectID, err := appconfig.ProjectIDForRoot(strings.TrimSpace(cfg.RepoDir)); err == nil {
+			canonicalProjectID = protocol.NormalizeProjectID(hashProjectID)
+		} else if repoName := protocol.NormalizeProjectID(filepath.Base(strings.TrimSpace(cfg.RepoDir))); repoName != "" {
+			canonicalProjectID = repoName
+		}
+		d.issueClientsByRoot[daemonStoreRootKey(cfg.RepoDir)] = issuesClient
+		d.issueClientsByProject[canonicalProjectID] = issuesClient
+		baseWorktreeManager := git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger)
+		d.worktreeManagersByRoot[strings.TrimSpace(cfg.RepoDir)] = baseWorktreeManager
+		d.worktreeManagersByProject[canonicalProjectID] = baseWorktreeManager
+		d.runtimeStoresByRoot[daemonStoreRootKey(runtimeRepoDir)] = runtimeStateStore
+		d.runtimeStoresByProject[canonicalProjectID] = runtimeStateStore
 	}
-	d.issueClientsByRoot[daemonStoreRootKey(cfg.RepoDir)] = issuesClient
-	d.issueClientsByProject[canonicalProjectID] = issuesClient
-	baseWorktreeManager := git.NewWorktreeManager(gitRunner, cfg.RepoDir, cfg.Logger)
-	d.worktreeManagersByRoot[strings.TrimSpace(cfg.RepoDir)] = baseWorktreeManager
-	d.worktreeManagersByProject[canonicalProjectID] = baseWorktreeManager
-	d.runtimeStoresByRoot[daemonStoreRootKey(runtimeRepoDir)] = runtimeStateStore
-	d.runtimeStoresByProject[canonicalProjectID] = runtimeStateStore
 	specService.daemon = d
 	specHandler := daemonhandlers.NewSpecHandler(specService)
 	decisionHandler := daemonhandlers.NewDecisionHandler(issueDecisionService{daemon: d})

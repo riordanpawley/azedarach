@@ -36,6 +36,7 @@ func (d *Daemon) issueClientForProject(projectID string) *issues.Client {
 	d.issueClientsMu.Lock()
 	defer d.issueClientsMu.Unlock()
 
+	injectedFallback := d.issues != nil && !d.projectNeutralRouting
 	if d.issueClientsByProject == nil {
 		d.issueClientsByProject = make(map[string]*issues.Client)
 	}
@@ -48,10 +49,16 @@ func (d *Daemon) issueClientForProject(projectID string) *issues.Client {
 
 	repoDir := d.resolveRepoDirForProjectLocked(projectID)
 	if repoDir == "" {
-		if d.issues != nil {
+		// Explicitly injected clients are a test/composition boundary, not a
+		// production project-routing fallback. A normal global daemon starts
+		// with d.issues unset and therefore still fails closed.
+		if injectedFallback {
 			d.issueClientsByProject[projectID] = d.issues
 			return d.issues
 		}
+		return nil
+	}
+	if strings.TrimSpace(d.cfg.RepoDir) == "" && !existingProjectStore(repoDir) {
 		return nil
 	}
 	repoKey := daemonStoreRootKey(repoDir)
@@ -75,6 +82,15 @@ func (d *Daemon) issueClientForProject(projectID string) *issues.Client {
 		d.issues = client
 	}
 	return client
+}
+
+func existingProjectStore(repoDir string) bool {
+	rootInfo, err := os.Stat(filepath.Clean(repoDir))
+	if err != nil || !rootInfo.IsDir() {
+		return false
+	}
+	dbInfo, err := os.Stat(filepath.Join(filepath.Clean(repoDir), ".azedarach", "azedarach.db"))
+	return err == nil && dbInfo.Mode().IsRegular()
 }
 
 // existingIssueClientForProject returns only an already-resolved client. It is
@@ -160,36 +176,31 @@ func (d *Daemon) issueClientForExistingProjectStore(projectID string) (*issues.C
 
 func (d *Daemon) resolveRepoDirForProjectLocked(projectID string) string {
 	projectID = protocol.NormalizeProjectID(projectID)
-	baseRepoDir := strings.TrimSpace(d.cfg.RepoDir)
-	if baseRepoDir == "" {
-		return ""
-	}
-
 	if matchedRepoDir, ok := d.resolveRepoDirForProjectExactLocked(projectID); ok {
 		return matchedRepoDir
 	}
-	return baseRepoDir
+	// Explicit RepoDir is retained only for scoped/test daemon construction.
+	// The user-global production constructor leaves it empty and therefore has
+	// no implicit project fallback.
+	if repoDir := strings.TrimSpace(d.cfg.RepoDir); repoDir != "" {
+		return repoDir
+	}
+	return ""
 }
 
 func (d *Daemon) resolveRepoDirForProjectExactLocked(projectID string) (string, bool) {
 	projectID = protocol.NormalizeProjectID(projectID)
-	baseRepoDir := strings.TrimSpace(d.cfg.RepoDir)
-	if baseRepoDir == "" {
-		return "", false
-	}
-
-	// Always accept canonical routes for this daemon's root repo.
-	baseCandidates := make([]string, 0, 3)
-	baseCandidates = append(baseCandidates, protocol.DefaultProjectID, protocol.NormalizeProjectID(filepath.Base(baseRepoDir)))
-	if hashProjectID, err := appconfig.ProjectIDForRoot(baseRepoDir); err == nil {
-		baseCandidates = append(baseCandidates, protocol.NormalizeProjectID(hashProjectID))
-	}
-	for _, candidate := range baseCandidates {
-		if projectID == candidate {
-			return baseRepoDir, true
+	if baseRepoDir := strings.TrimSpace(d.cfg.RepoDir); baseRepoDir != "" {
+		baseCandidates := []string{protocol.DefaultProjectID, protocol.NormalizeProjectID(filepath.Base(baseRepoDir))}
+		if hashProjectID, err := appconfig.ProjectIDForRoot(baseRepoDir); err == nil {
+			baseCandidates = append(baseCandidates, protocol.NormalizeProjectID(hashProjectID))
+		}
+		for _, candidate := range baseCandidates {
+			if projectID == candidate {
+				return baseRepoDir, true
+			}
 		}
 	}
-
 	registry, err := appconfig.LoadProjectsRegistry()
 	if err != nil || registry == nil {
 		return "", false

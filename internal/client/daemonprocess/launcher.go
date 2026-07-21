@@ -634,7 +634,7 @@ func (l *Launcher) startWithLifecycleLockModeRetained(ctx context.Context, daemo
 	if filepath.Clean(l.SocketPath) == filepath.Clean(config.GlobalDaemonSocketPath()) {
 		args = append(args, "--socket", l.SocketPath, "--lock", l.LockPath)
 	} else {
-		args = append(args, "--repo", l.RepoDir, "--socket", l.SocketPath, "--lock", l.LockPath)
+		args = append(args, "--scope-root", l.RepoDir, "--socket", l.SocketPath, "--lock", l.LockPath)
 	}
 	launchCtx, endSpan := latencytrace.StartSpan(ctx, "dependency", "daemon_process",
 		"dependency.name", filepath.Base(daemonCmd.executable),
@@ -1626,7 +1626,7 @@ func (l *Launcher) verifyCanonicalDaemonArguments(identity processIdentity, labe
 	want := map[string]string{"socket": l.SocketPath, "lock": l.LockPath}
 	globalRuntime := filepath.Clean(l.SocketPath) == filepath.Clean(config.GlobalDaemonSocketPath())
 	if !globalRuntime {
-		want["repo"] = l.RepoDir
+		want["scope-root"] = l.RepoDir
 	}
 	// A predecessor from the immediately previous launcher contract may carry
 	// --repo even though it owns the user-global socket. Its repository value

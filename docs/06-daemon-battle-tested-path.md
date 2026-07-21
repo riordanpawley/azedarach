@@ -4,7 +4,7 @@
 
 Move Azedarach to a production-safe split architecture:
 
-- single daemon backend per project namespace
+- one user-global, project-neutral daemon backend routing registered project namespaces
 - thin TUI/CLI clients
 - typed MessagePack IPC boundary
 - robust reconnect/autostart/idle-shutdown lifecycle
@@ -46,6 +46,18 @@ Move Azedarach to a production-safe split architecture:
   - bounded request queue and backpressure errors
 
 ## Daemon Lifecycle Pattern (Battle-Tested)
+
+### Project-neutral boot and routing
+
+- `azd` starts without a repository argument and never treats its launch CWD as
+  project authority.
+- A typed request project identity is resolved against the registered-project
+  registry before the daemon opens project configuration, SQLite state, logs,
+  capabilities, or worktree/session adapters.
+- Unknown, stale, mismatched, or unavailable project identities fail closed;
+  they never fall back to another project's resources.
+- `AZEDARACH_DAEMON_SCOPE=worktree` remains an explicit development/test
+  isolation mode, not normal project selection.
 
 - Singleton:
   - lock file + PID ownership check for duplicate suppression
