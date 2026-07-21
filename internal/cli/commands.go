@@ -1486,6 +1486,32 @@ func AttachCommand(deps *Dependencies, issueID string) error {
 	return printCommandOutput(resp)
 }
 
+// ResumeCommand asks the daemon to resume lifecycle intent for an existing
+// session. It deliberately uses the same daemon-authoritative target lookup as
+// attach rather than treating a preserved worker as a new session start.
+func ResumeCommand(deps *Dependencies, issueID string) error {
+	ctx := context.Background()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+	target, err := resolveSessionIssueTarget(ctx, deps, issueID)
+	if err != nil {
+		return err
+	}
+	restoreProject := applyIssueProjectOverride(deps, target.ProjectID)
+	defer restoreProject()
+
+	deps.Logger.Info("resuming session", "project_id", target.ProjectID, "issue_id", target.IssueID)
+	resp, err := deps.DaemonClient.Command(ctx, newSessionRequest(commandSessionResume, target.ProjectID, target.IssueID, ""))
+	if err != nil {
+		return fmt.Errorf("failed to resume session: %w", err)
+	}
+	if err := responseError(resp, "failed to resume session"); err != nil {
+		return err
+	}
+	return printCommandOutput(resp)
+}
+
 func KillCommand(deps *Dependencies, issueID string) error {
 	return KillCommandWithOptions(deps, issueID, SessionCommandOptions{})
 }

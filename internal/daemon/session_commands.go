@@ -396,10 +396,12 @@ func sessionProjectionCountsByIssueKey(sessions []daemonstate.Session, namingSco
 		if isAgentScopedSessionID(session.ID) {
 			counts.PaneScoped++
 		}
-		switch sessionActivityState(session) {
-		case domain.SessionError, domain.SessionPaused, domain.SessionIdle, domain.SessionWaiting:
+		// Lifecycle pause is an explicit desired-state choice. Hook-backed idle
+		// and waiting describe a live worker's input state, not a paused
+		// lifecycle, so keep them out of PausedCount.
+		if state == daemonstate.SessionStatePaused {
 			counts.Paused++
-		default:
+		} else {
 			counts.Active++
 		}
 		byIssueKey[key] = counts

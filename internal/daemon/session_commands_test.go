@@ -12914,6 +12914,18 @@ func TestPersistTmuxSessionRuntimeStateKeepsAgentHookActivityWhenPaneLives(t *te
 	}
 }
 
+func TestSessionProjectionCountsSeparateLifecyclePauseFromIdleAndWaitingActivity(t *testing.T) {
+	issueID := "dyc"
+	counts := sessionProjectionCountsByIssueKey([]daemonstate.Session{
+		{ID: "az-dyc.pane-idle", IssueID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "idle"},
+		{ID: "az-dyc.pane-waiting", IssueID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "waiting"},
+		{ID: "az-dyc.pane-paused", IssueID: issueID, State: daemonstate.SessionStatePaused, ObservedState: daemonstate.SessionStateRunning, Activity: "idle"},
+	}, "az")[sessionKey(issueID)]
+	if counts.Total != 3 || counts.Active != 2 || counts.Paused != 1 {
+		t.Fatalf("counts = %+v, want total=3 active=2 paused=1", counts)
+	}
+}
+
 func TestSessionActivityLabelForDisplayUsesStartupGraceOnlyForFreshUnknownActivity(t *testing.T) {
 	now := time.Date(2026, time.June, 17, 8, 0, 0, 0, time.UTC)
 	previousNow := timeNow
