@@ -761,6 +761,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.openProjectionDeltaStores(ctx); err != nil {
 		return fmt.Errorf("open projection delta stores before IPC serve: %w", err)
 	}
+	// Bind before materializer bootstrap so lifecycle restart readiness reflects
+	// a live IPC endpoint, while Serve remains deferred until the projection
+	// boundary below is fully initialized.
+	if err := d.serve.Bind(); err != nil {
+		return fmt.Errorf("bind IPC listener before materializer bootstrap: %w", err)
+	}
+	defer func() { _ = d.serve.Close() }()
 	if err := d.startProjectReadMaterializers(serveCtx); err != nil {
 		return fmt.Errorf("start project read materializers before IPC serve: %w", err)
 	}

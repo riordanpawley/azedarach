@@ -19,7 +19,9 @@ type daemonLockManager interface {
 }
 
 type daemonServer interface {
+	Bind() error
 	Serve(context.Context) error
+	Close() error
 }
 
 type syncBootstrapDiagnostic struct {

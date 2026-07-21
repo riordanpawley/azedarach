@@ -89,6 +89,80 @@ func TestClientServerHandshakeAndCommand(t *testing.T) {
 	}
 }
 
+func TestServerBindSignalsReadinessBeforeServingRequests(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	socket := tempSocketPath(t)
+	srv := NewServer(socket, Handlers{
+		Handshake: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+			return protocol.HelloAck{Accepted: true}, nil
+		},
+		Command: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			return protocol.ResponseEnvelope{OK: true}, nil
+		},
+		Subscribe: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, func(), error) {
+			ch := make(chan protocol.EventEnvelope)
+			close(ch)
+			return ch, func() {}, nil
+		},
+	})
+	if err := srv.Bind(); err != nil {
+		if isSocketPermissionError(err) {
+			t.Skipf("sandbox does not permit socket bind/listen: %v", err)
+		}
+		t.Fatalf("Bind() error = %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	select {
+	case <-srv.Ready():
+	default:
+		t.Fatal("Ready() did not close after Bind")
+	}
+	if !socketDialReady(socket) {
+		t.Fatal("bound listener was not dialable before Serve")
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ctx) }()
+	client := NewClient(socket)
+	if _, err := client.Handshake(ctx, protocol.Hello{ProtocolVersion: protocol.CurrentVersion}); err != nil {
+		t.Fatalf("handshake after Serve: %v", err)
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+}
+
+func TestServerBindRefusesRebindAfterClose(t *testing.T) {
+	t.Parallel()
+	srv := NewServer(tempSocketPath(t), Handlers{
+		Handshake: func(context.Context, protocol.Hello) (protocol.HelloAck, error) { return protocol.HelloAck{}, nil },
+		Command: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			return protocol.ResponseEnvelope{}, nil
+		},
+		Subscribe: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, func(), error) {
+			ch := make(chan protocol.EventEnvelope)
+			close(ch)
+			return ch, func() {}, nil
+		},
+	})
+	if err := srv.Bind(); err != nil {
+		if isSocketPermissionError(err) {
+			t.Skipf("sandbox does not permit socket bind/listen: %v", err)
+		}
+		t.Fatalf("Bind() error = %v", err)
+	}
+	if err := srv.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := srv.Bind(); !errors.Is(err, errServerClosed) {
+		t.Fatalf("Bind() after Close() error = %v, want errServerClosed", err)
+	}
+}
+
 func TestSubscribeStreamsEvents(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
