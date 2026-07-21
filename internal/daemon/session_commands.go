@@ -3120,10 +3120,11 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	var b strings.Builder
 	fmt.Fprintf(&b, "Active Sessions (%d):\n\n", len(tmuxSessions))
 	activityByIssueKey := d.sessionDisplayActivityByIssueKey(ctx, cmd.ProjectID)
+	lifecycleByIssueKey := d.sessionLifecycleLabelsByIssueKey(ctx, cmd.ProjectID)
 	progressByIssue := d.sessionStartProgressByIssue(ctx, cmd.ProjectID)
 	sessionStartProgress := make([]taskGraphSessionStartProgress, 0, len(progressByIssue))
-	b.WriteString("ISSUE ID\tSTATUS\tACTIVITY\tTITLE\n")
-	b.WriteString("-------\t------\t--------\t-----\n")
+	b.WriteString("ISSUE ID\tSTATUS\tLIFECYCLE\tACTIVITY\tTITLE\n")
+	b.WriteString("-------\t------\t---------\t--------\t-----\n")
 	for _, name := range tmuxSessions {
 		issueIDRaw := name
 		if parsedIssueID, ok := naming.ParseIssueIDFromSessionName(name, d.sessionNamingScope(cmd.ProjectID)); ok {
@@ -3146,6 +3147,10 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 		activity := "unknown"
 		activitySource := ""
 		issueKey := sessionKey(issueIDRaw)
+		lifecycle := lifecycleByIssueKey[issueKey]
+		if lifecycle == "" {
+			lifecycle = "unknown"
+		}
 		if display, ok := activityByIssueKey[issueKey]; ok && display.Activity != "" {
 			activity = display.Activity
 			activitySource = display.Source
@@ -3161,7 +3166,7 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 				Percent:        90,
 			})
 		}
-		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", issueIDRaw, status, activity, title)
+		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\t%s\n", issueIDRaw, status, lifecycle, activity, title)
 	}
 	if output, ok := sessionStartStatusProgressSection(sessionStartProgress); ok {
 		b.WriteString("\n")
@@ -3172,6 +3177,38 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 		d.cfg.Logger.Info("daemon session status snapshot", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "active_sessions", len(tmuxSessions))
 	}
 	return d.commandOutput(req, b.String()), nil
+}
+
+// sessionLifecycleLabelsByIssueKey exposes desired lifecycle separately from
+// hook-backed activity so callers never have to infer a pause from an idle or
+// permission-waiting agent.
+func (d *Daemon) sessionLifecycleLabelsByIssueKey(ctx context.Context, projectID string) map[string]string {
+	labels := make(map[string]string)
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return labels
+	}
+	sessions, err := store.ListSessionStates(ctx, d.canonicalProjectID(projectID))
+	if err != nil {
+		return labels
+	}
+	for _, session := range sessions {
+		if session.Role == daemonstate.SessionRoleAdvisor || daemonSessionProjectionStopped(session) {
+			continue
+		}
+		key := sessionKey(sessionProjectionIssueID(session, d.sessionNamingScope(projectID)))
+		if key == "" {
+			continue
+		}
+		if daemonstate.NormalizeSessionState(session.State) == daemonstate.SessionStatePaused {
+			labels[key] = "paused"
+			continue
+		}
+		if labels[key] == "" {
+			labels[key] = "running"
+		}
+	}
+	return labels
 }
 
 func (d *Daemon) pendingSessionStartStatusOutput(ctx context.Context, projectID, issueID string) (string, bool) {

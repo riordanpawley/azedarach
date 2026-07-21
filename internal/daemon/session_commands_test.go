@@ -9117,14 +9117,14 @@ func TestSessionStatusReportsHookBackedActivity(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &payload); err != nil {
 		t.Fatalf("unmarshal status response: %v", err)
 	}
-	if !strings.Contains(payload.Output, "ISSUE ID\tSTATUS\tACTIVITY\tTITLE") {
-		t.Fatalf("status output = %q, want activity header", payload.Output)
+	if !strings.Contains(payload.Output, "ISSUE ID\tSTATUS\tLIFECYCLE\tACTIVITY\tTITLE") {
+		t.Fatalf("status output = %q, want lifecycle and activity header", payload.Output)
 	}
-	if !strings.Contains(payload.Output, busyIssueID+"\tin_progress\tbusy\tBusy worker") {
+	if !strings.Contains(payload.Output, busyIssueID+"\tin_progress\trunning\tbusy\tBusy worker") {
 		t.Fatalf("status output = %q, want busy hook-backed activity", payload.Output)
 	}
-	if !strings.Contains(payload.Output, idleIssueID+"\tin_progress\tidle\tIdle worker") {
-		t.Fatalf("status output = %q, want idle hook-backed activity", payload.Output)
+	if !strings.Contains(payload.Output, idleIssueID+"\tin_progress\tpaused\tidle\tIdle worker") {
+		t.Fatalf("status output = %q, want lifecycle pause distinct from idle hook activity", payload.Output)
 	}
 }
 
