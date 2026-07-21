@@ -450,7 +450,7 @@ func testSessionRestartAllPreservesProjectOrchestratorAuthority(t *testing.T, ap
 	}
 	launchScript := runner.launchScriptContents[sessionID]
 	if appServer {
-		if !strings.Contains(launchScript, "app-server daemon start") || !strings.Contains(launchScript, "resume --remote unix:// --last") {
+		if !strings.Contains(launchScript, "app-server daemon start") || !strings.Contains(launchScript, "resume --remote unix:// '019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02'") || strings.Contains(launchScript, "--last") {
 			t.Fatalf("project orchestrator app-server restart script = %q", launchScript)
 		}
 	} else if !strings.Contains(launchScript, "codex "+codexFloopFailOpenConfigExpansion+" resume") || strings.Contains(launchScript, "app-server") || strings.Contains(launchScript, "--remote") {
@@ -722,6 +722,8 @@ func TestRootedOrchestratorSessionRetryRejectsStaleShellRuntime(t *testing.T) {
 		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: store}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
 		worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager}, revision: map[string]uint64{},
 	}
+	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, &recordingAuthoritativeReceiver{accepted: map[string]string{}}, "rooted-stale-shell-test")
+	d.agentInput.delivered = d.acknowledgeDeliveredRootedBootstrap
 	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
 	scope, err := domain.RootedOrchestrationScope(rootID)
 	if err != nil {
@@ -754,6 +756,12 @@ func TestRootedOrchestratorSessionRetryRejectsStaleShellRuntime(t *testing.T) {
 
 	runner.currentCommand = "codex"
 	retried, err := d.handleOrchestratorSession(ctx, request)
+	if err == nil && retried.Error != nil && retried.Error.Code == protocol.ErrorCodeUnavailable {
+		if retryErr := d.agentInput.RetryPending(ctx, projectID, 10); retryErr != nil {
+			t.Fatalf("retry queued rooted bootstrap: %v", retryErr)
+		}
+		retried, err = d.handleOrchestratorSession(ctx, request)
+	}
 	if err != nil || retried.Error != nil {
 		t.Fatalf("rooted retry response=%+v err=%v", retried.Error, err)
 	}
@@ -772,7 +780,7 @@ func TestRootedOrchestratorSessionRetryRejectsStaleShellRuntime(t *testing.T) {
 		t.Fatalf("stale rooted pane identity survived for %s", sessionID)
 	}
 	finalRetry, err := d.handleOrchestratorSession(ctx, request)
-	if err != nil || finalRetry.Error != nil || !runner.sessions[sessionID] {
+	if err != nil || (finalRetry.Error != nil && finalRetry.Error.Code != protocol.ErrorCodeUnavailable) || !runner.sessions[sessionID] {
 		t.Fatalf("rooted final retry response=%+v err=%v live=%t", finalRetry.Error, err, runner.sessions[sessionID])
 	}
 }
@@ -803,6 +811,8 @@ func TestRootedOrchestratorSessionCancelledLaunchCleansDurableStateAndRetries(t 
 		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: store}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
 		worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager}, revision: map[string]uint64{},
 	}
+	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, &recordingAuthoritativeReceiver{accepted: map[string]string{}}, "rooted-cancelled-start-test")
+	d.agentInput.delivered = d.acknowledgeDeliveredRootedBootstrap
 	scope, err := domain.RootedOrchestrationScope(rootID)
 	if err != nil {
 		t.Fatal(err)
@@ -837,6 +847,12 @@ func TestRootedOrchestratorSessionCancelledLaunchCleansDurableStateAndRetries(t 
 	runner.onNewSessionCommand = nil
 	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
 	retried, err := d.handleOrchestratorSession(context.Background(), request)
+	if err == nil && retried.Error != nil && retried.Error.Code == protocol.ErrorCodeUnavailable {
+		if retryErr := d.agentInput.RetryPending(context.Background(), projectID, 10); retryErr != nil {
+			t.Fatalf("retry queued rooted bootstrap: %v", retryErr)
+		}
+		retried, err = d.handleOrchestratorSession(context.Background(), request)
+	}
 	if err != nil || retried.Error != nil || !runner.sessions[sessionID] {
 		t.Fatalf("rooted retry response=%+v err=%v live=%t", retried.Error, err, runner.sessions[sessionID])
 	}
@@ -876,6 +892,13 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
 		revision:                  map[string]uint64{},
 	}
+	d.agentInput = newAgentInputDeliveryService(
+		func(string) *daemonstate.RuntimeStateStore { return runtimeStore },
+		func(string) *issues.Client { return issuesClient },
+		&recordingAuthoritativeReceiver{accepted: map[string]string{}, sink: func(payload string) { tmuxRunner.inputPayloads = append(tmuxRunner.inputPayloads, payload) }},
+		"rooted-bootstrap-test",
+	)
+	d.agentInput.delivered = d.acknowledgeDeliveredRootedBootstrap
 	scope, err := domain.RootedOrchestrationScope(rootID)
 	if err != nil {
 		t.Fatal(err)
@@ -903,6 +926,13 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	}
 	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
 	delegated, err := d.handleSessionStartDirect(ctx, genericStart)
+	if err == nil && delegated.Error != nil && delegated.Error.Code == protocol.ErrorCodeUnavailable {
+		now := time.Now().UTC()
+		if _, _, observeErr := runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: rootedSessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now, ObservedVersion: now.UnixNano()}); observeErr != nil {
+			t.Fatal(observeErr)
+		}
+		delegated, err = d.handleSessionStartDirect(ctx, genericStart)
+	}
 	if err != nil || delegated.Error != nil || !strings.Contains(string(delegated.Body), "Starting rooted orchestrator session for epic") {
 		t.Fatalf("generic epic start did not delegate: response=%+v body=%q err=%v", delegated.Error, delegated.Body, err)
 	}
@@ -919,7 +949,10 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if !started.Live {
 		t.Fatalf("started = %+v", started)
 	}
-	prompt := tmuxRunner.launchPromptContents[started.SessionID]
+	prompt, err := d.rootedOrchestratorBootstrapPrompt(ctx, projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{
 		"Role: orchestrator",
 		"Rooted startup contract (root " + rootID + ")",
@@ -1016,7 +1049,7 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if restartResult.Restarted != 1 || restartResult.Failed != 0 {
 		t.Fatalf("restart rooted agent result = %+v", restartResult)
 	}
-	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || len(tmuxRunner.handoffPromptContents) != handoffsBefore+1 {
+	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || len(tmuxRunner.handoffPromptContents) != handoffsBefore {
 		t.Fatalf("restart rooted acknowledgement delivery inputs=%d handoffs=%d", len(tmuxRunner.inputPayloads)-inputsBefore, len(tmuxRunner.handoffPromptContents)-handoffsBefore)
 	}
 	restartedNonce := tmuxRunner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]
@@ -1083,7 +1116,7 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if repaired.Disposition != string(daemonstate.OrchestratorLeaseAttached) {
 		t.Fatalf("repaired = %+v", repaired)
 	}
-	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || !strings.Contains(tmuxRunner.inputPayloads[len(tmuxRunner.inputPayloads)-1], sessionLaunchArtifactPrefix) {
+	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || !strings.Contains(tmuxRunner.inputPayloads[len(tmuxRunner.inputPayloads)-1], "Rooted startup contract") {
 		t.Fatalf("bootstrap repair delivery = %+v", tmuxRunner.inputPayloads[inputsBefore:])
 	}
 	repairedAck, found, err := ackAuthority.Get(ctx, identity)
@@ -1107,10 +1140,10 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if err != nil || response.Error != nil {
 		t.Fatalf("repair reused ordinary runtime: response=%+v err=%v", response.Error, err)
 	}
-	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || len(tmuxRunner.handoffPromptContents) != handoffsBefore+1 {
+	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || len(tmuxRunner.handoffPromptContents) != handoffsBefore {
 		t.Fatalf("ordinary runtime repair delivery inputs=%d handoffs=%d", len(tmuxRunner.inputPayloads)-inputsBefore, len(tmuxRunner.handoffPromptContents)-handoffsBefore)
 	}
-	repairPrompt := tmuxRunner.handoffPromptContents[len(tmuxRunner.handoffPromptContents)-1]
+	repairPrompt := tmuxRunner.inputPayloads[len(tmuxRunner.inputPayloads)-1]
 	if !strings.Contains(repairPrompt, "Role: orchestrator") || strings.Contains(repairPrompt, "Role: contributor") || strings.Contains(repairPrompt, "Role: worker") {
 		t.Fatalf("ordinary runtime repair prompt = %q", repairPrompt)
 	}
@@ -1555,6 +1588,62 @@ func TestRootedStartFailsClosedForUnavailableForeignProjectBlocker(t *testing.T)
 	}
 }
 
+func TestRootedBootstrapDeliveryCannotReviveClearedPendingFence(t *testing.T) {
+	ctx := context.Background()
+	projectID := "rooted-bootstrap-manual-pause"
+	rootID := "root-bootstrap"
+	sessionID := "az-root-bootstrap"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[sessionID] = true
+	d := &Daemon{
+		cfg:                    Config{RepoDir: t.TempDir(), CLITool: "codex", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		tmux:                   tmux.NewClient(runner, slog.Default()),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+	}
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).Acquire(ctx, identity, sessionID, d.tmux.HasSession); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).SetLifecycle(ctx, identity, sessionID, domain.OrchestratorPaused); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	managed := daemonstate.ManagedAgentIdentity{ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "1", PanePID: 101, AgentIncarnation: "incarnation-1", AgentThreadID: "thread-1", ObservedAt: now}
+	if err := store.UpsertManagedAgentIdentity(ctx, managed); err != nil {
+		t.Fatal(err)
+	}
+	if err := daemonstate.NewRootedBootstrapAcknowledgementAuthority(store).Acknowledge(ctx, daemonstate.RootedBootstrapAcknowledgement{Identity: identity, SessionID: sessionID, PromptHash: rootedOrchestratorPromptHash("bootstrap"), RuntimeNonce: rootedBootstrapPendingNoncePrefix + "nonce-1", TmuxPaneID: managed.TmuxPaneID, PanePID: managed.PanePID, AgentIncarnation: managed.AgentIncarnation, AgentThreadID: managed.AgentThreadID, AcknowledgedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.pauseRootedOrchestratorAndClearBootstrapPending(ctx, projectID, identity, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	err = d.acknowledgeDeliveredRootedBootstrap(ctx, domain.AgentInputDeliveryRequest{
+		ProjectID: projectID, SessionID: sessionID, Kind: domain.AgentInputMessageRootedBootstrap, Payload: "bootstrap",
+		Target:    domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: managed.TmuxPaneID, PanePID: managed.PanePID, AgentIncarnation: managed.AgentIncarnation, AgentThreadID: managed.AgentThreadID},
+		IntentKey: "rooted-bootstrap:" + rootID + ":nonce-1:" + managed.AgentIncarnation,
+	})
+	if err == nil || !strings.Contains(err.Error(), "pending fence changed") {
+		t.Fatalf("stale bootstrap delivery error = %v, want cleared pending fence", err)
+	}
+	lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity)
+	if err != nil || !found || lease.Lifecycle != domain.OrchestratorPaused {
+		t.Fatalf("lease after stale delivery = %+v found=%t err=%v", lease, found, err)
+	}
+	if _, found, err := daemonstate.NewRootedBootstrapAcknowledgementAuthority(store).Get(ctx, identity); err != nil || found {
+		t.Fatalf("acknowledgement after manual pause = found=%t err=%v", found, err)
+	}
+}
+
 func TestRootedRestartAfterCallerCancellationSerializesAndAcknowledgesReplacement(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -1586,6 +1675,11 @@ func TestRootedRestartAfterCallerCancellationSerializesAndAcknowledgesReplacemen
 		}
 	}
 	first, second := newDaemon(firstStore), newDaemon(secondStore)
+	receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}, sink: func(payload string) { runner.inputPayloads = append(runner.inputPayloads, payload) }}
+	for _, daemon := range []*Daemon{first, second} {
+		daemon.agentInput = newAgentInputDeliveryService(daemon.sessionRuntimeStateStoreIfConfigured, daemon.issueClientForProject, receiver, "rooted-restart-test")
+		daemon.agentInput.delivered = daemon.acknowledgeDeliveredRootedBootstrap
+	}
 	scope, err := domain.RootedOrchestrationScope(rootID)
 	if err != nil {
 		t.Fatal(err)

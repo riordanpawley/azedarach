@@ -259,7 +259,10 @@ func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, re
 			ID string `json:"id"`
 		} `json:"thread"`
 	}
-	threadID := strings.TrimSpace(request.Delivery.Target.AgentIncarnation)
+	threadID := strings.TrimSpace(request.Delivery.Target.AgentThreadID)
+	if threadID == "" {
+		return ack, errors.New("managed Codex target has no exact durable thread id")
+	}
 	if err := rpc.Call(ctx, "thread/resume", map[string]any{"threadId": threadID, "excludeTurns": true}, &resumed); err != nil {
 		return ack, fmt.Errorf("resume exact Codex thread: %w", err)
 	}
@@ -345,7 +348,7 @@ func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, re
 		return ack, errors.New("Codex turn/start omitted accepted turn id")
 	}
 	return authoritativeAgentInputAcknowledgement{ProjectID: request.Delivery.ProjectID, IntentKey: request.Delivery.IntentKey,
-		AgentIncarnation: threadID, LeaseToken: request.LeaseToken, AcknowledgementToken: turnID}, nil
+		AgentIncarnation: request.Delivery.Target.AgentIncarnation, LeaseToken: request.LeaseToken, AcknowledgementToken: turnID}, nil
 }
 
 func (a *codexAppServerInputAuthority) recoverSupersededGate(ctx context.Context, request *authoritativeAgentInputRequest) error {

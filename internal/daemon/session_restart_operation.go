@@ -49,6 +49,7 @@ type sessionRestartRecoveryPlan struct {
 	SessionID             string                           `json:"session_id"`
 	IssueID               string                           `json:"issue_id,omitempty"`
 	Activity              string                           `json:"activity"`
+	AgentTool             string                           `json:"agent_tool,omitempty"`
 	Old                   daemonstate.ManagedAgentIdentity `json:"old"`
 	PlannedIncarnation    string                           `json:"planned_incarnation"`
 	PromptHandoffRequired bool                             `json:"prompt_handoff_required"`
@@ -282,9 +283,11 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 	if promptHandoffRequired {
 		promptHandoffType = sessionRestartPromptHandoffTypeOwnerOnlyArtifact
 	}
+	agentTool := strings.TrimSpace(d.runtimeConfigForProject(target.ProjectID).CLITool)
 	plan := sessionRestartRecoveryPlan{
 		ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity,
-		Old: old, PlannedIncarnation: incarnation, PromptHandoffRequired: promptHandoffRequired,
+		AgentTool: agentTool,
+		Old:       old, PlannedIncarnation: incarnation, PromptHandoffRequired: promptHandoffRequired,
 		PromptHandoffType: promptHandoffType, Role: target.Role, ScopeKind: target.ScopeKind, ScopeID: target.ScopeID, Stage: "prepare",
 	}
 	if orchestratorIdentity != nil {
@@ -300,7 +303,10 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 		worktree string
 	}
 	prepared, err, timedOut := runRestartStage(ctx, sessionRestartPrepareTimeout, func(stageCtx context.Context) (preparedRestart, error) {
-		artifact, prepareErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchResume, ProjectID: target.ProjectID, IssueID: target.IssueID, SessionID: target.SessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths, Prompt: launchPrompt, LogicalPaneID: old.LogicalPaneID, AgentIncarnation: incarnation})
+		if strings.EqualFold(agentTool, "codex") && strings.TrimSpace(old.AgentThreadID) == "" {
+			return preparedRestart{}, errors.New("managed Codex restart requires an exact durable thread id")
+		}
+		artifact, prepareErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchResume, ProjectID: target.ProjectID, IssueID: target.IssueID, SessionID: target.SessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths, Prompt: launchPrompt, LogicalPaneID: old.LogicalPaneID, AgentIncarnation: incarnation, AgentThreadID: old.AgentThreadID})
 		if prepareErr != nil {
 			return preparedRestart{}, prepareErr
 		}
@@ -612,7 +618,7 @@ func (d *Daemon) repairRecoveredSessionRestartRootedBootstrap(ctx context.Contex
 
 func sameManagedRestartIdentity(a, b daemonstate.ManagedAgentIdentity) bool {
 	return a.ProjectID == b.ProjectID && a.SessionID == b.SessionID && a.LogicalPaneID == b.LogicalPaneID &&
-		sanitizeRuntimePaneID(a.TmuxPaneID) == sanitizeRuntimePaneID(b.TmuxPaneID) && a.PanePID == b.PanePID && a.AgentIncarnation == b.AgentIncarnation
+		sanitizeRuntimePaneID(a.TmuxPaneID) == sanitizeRuntimePaneID(b.TmuxPaneID) && a.PanePID == b.PanePID && a.AgentIncarnation == b.AgentIncarnation && a.AgentThreadID == b.AgentThreadID
 }
 
 func reportSessionRestartProgress(ctx context.Context, plan sessionRestartRecoveryPlan) error {
@@ -892,7 +898,7 @@ func decodeSessionRestartRecoveryPlan(record daemonops.Record) (sessionRestartRe
 	return plan, true
 }
 func restartProtocolIdentity(i daemonstate.ManagedAgentIdentity) *protocol.ManagedAgentIdentity {
-	return &protocol.ManagedAgentIdentity{LogicalPaneID: i.LogicalPaneID, TmuxPaneID: i.TmuxPaneID, PanePID: i.PanePID, AgentIncarnation: i.AgentIncarnation}
+	return &protocol.ManagedAgentIdentity{LogicalPaneID: i.LogicalPaneID, TmuxPaneID: i.TmuxPaneID, PanePID: i.PanePID, AgentIncarnation: i.AgentIncarnation, AgentThreadID: i.AgentThreadID}
 }
 func restartSuccessOutcome(activity string) string {
 	switch strings.ToLower(strings.TrimSpace(activity)) {

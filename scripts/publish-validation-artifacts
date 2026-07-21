@@ -1,0 +1,1063 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Config;
+use Cwd qw(abs_path);
+use Digest::SHA;
+use Fcntl qw(:DEFAULT O_NOFOLLOW);
+use File::Basename qw(dirname basename);
+use File::Path qw(remove_tree);
+use File::Spec;
+use JSON::PP qw(decode_json encode_json);
+use POSIX qw(strftime uname);
+use Time::Piece;
+
+my %arg;
+my $stage;
+my $openat_syscall;
+my ($mkdirat_syscall, $renameat_syscall, $unlinkat_syscall);
+my ($stage_parent_handle, $stage_name);
+my $stage_attachment;
+my $destination_attachment;
+END {
+    remove_tree_at($stage_parent_handle, $stage_name,
+        $stage_attachment->{device}, $stage_attachment->{inode}, undef, $stage_attachment)
+        if $stage_parent_handle && defined($stage_name) && $stage_attachment;
+}
+while (@ARGV) {
+    my $flag = shift @ARGV;
+    die "unknown option $flag\n" unless $flag =~ /^--(.+)$/;
+    my $name = $1;
+    if ($name eq 'prune-only' || $name eq 'capability-check') { $arg{$name} = 1; next; }
+    $arg{$name} = shift(@ARGV) // die "$flag requires a value\n";
+}
+
+if ($arg{'capability-check'}) {
+    my $platform = $arg{platform} // native_platform();
+    my $capability = openat_capability($platform);
+    print encode_json($capability) . "\n";
+    exit($capability->{available} ? 0 : 78);
+}
+
+my $project_root = canonical_directory($arg{'project-root'} // die "--project-root is required\n");
+$openat_syscall = require_openat_capability(native_platform());
+initialize_at_syscalls(native_platform());
+verify_openat_capability($openat_syscall, native_platform());
+my ($project_root_handle, $project_attachment) = attached_directory_handle($project_root);
+$destination_attachment = $project_attachment;
+if ($arg{'prune-only'}) {
+    my ($artifact_root, $artifact_handle) = safe_directory_chain_at($project_root, $project_root_handle, qw(.azedarach validation-artifacts));
+    my ($failure_root, $failure_handle) = safe_directory_chain_at($artifact_root, $artifact_handle, 'failures');
+    prune_unreferenced($failure_root, $failure_handle);
+    exit 0;
+}
+
+for my $required (qw(candidate-root control-root evidence gate-output request revision exit-code)) {
+    die "--$required is required\n" unless defined($arg{$required}) && $arg{$required} ne '';
+}
+my ($artifact_root, $artifact_root_handle) = safe_directory_chain_at($project_root, $project_root_handle, qw(.azedarach validation-artifacts));
+my ($failure_root, $failure_root_handle) = safe_directory_chain_at($artifact_root, $artifact_root_handle, 'failures');
+destination_test_barrier('artifact-root');
+prune_unreferenced($failure_root, $failure_root_handle);
+my ($candidate_root, $candidate_root_handle) = canonical_directory_handle($arg{'candidate-root'});
+if (my $ready = delete($ENV{AZEDARACH_VALIDATION_TEST_CANDIDATE_ROOTFD_READY_FILE})) {
+    sysopen(my $ready_fh, $ready, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+        or die "create candidate rootfd test marker: $!\n";
+    close $ready_fh or die "close candidate rootfd test marker: $!\n";
+    my $release = delete($ENV{AZEDARACH_VALIDATION_TEST_CANDIDATE_ROOTFD_RELEASE_FILE}) || '';
+    sleep 0.01 until $release ne '' && -e $release;
+}
+my $control_root = canonical_directory($arg{'control-root'});
+my $evidence_path = trusted_control_path($control_root, $arg{evidence}, 1);
+my $gate_output_path = trusted_control_path($control_root, $arg{'gate-output'}, 1);
+my $request = safe_identity($arg{request}, 'request');
+my $revision = safe_identity($arg{revision}, 'revision');
+die "--exit-code must be non-zero\n" unless $arg{'exit-code'} =~ /^\d+$/ && $arg{'exit-code'} != 0;
+
+my $evidence = read_json_nofollow($evidence_path, 'validation evidence');
+die "validation evidence request mismatch\n" if ($evidence->{request_id} // '') ne $request;
+die "validation evidence revision mismatch\n" if ($evidence->{source_revision} // '') ne $revision;
+if ((($evidence->{purpose} // '') eq 'review_evidence' || (($evidence->{purpose} // '') eq 'push_gate' && (($evidence->{issue_id} // '') ne '' || ($evidence->{reviewer_id} // '') ne ''))) && !$evidence->{synthetic_request}) {
+    die "review evidence requires reviewer_id\n" if safe_identity($evidence->{reviewer_id} // '', 'reviewer id') eq '';
+    die "review evidence requires review_epoch_event_id\n" unless ($evidence->{review_epoch_event_id} // 0) =~ /^\d+$/ && 0 + $evidence->{review_epoch_event_id} > 0;
+}
+my $publication_nonce = safe_identity($evidence->{publication_nonce} // '', 'publication nonce');
+$evidence->{fatal_phase} = $arg{'fatal-phase'} if ($arg{'fatal-phase'} // '') ne '';
+$evidence->{fatal_detail} = $arg{'fatal-detail'} if ($arg{'fatal-detail'} // '') ne '';
+
+my ($revision_dir, $revision_handle) = safe_directory_chain_at($failure_root, $failure_root_handle, $revision);
+destination_test_barrier('revision');
+my $final_dir = File::Spec->catdir($revision_dir, $request);
+if (my $final_handle = openat_directory_nofollow($revision_handle, $request)) {
+    recover_existing($final_dir, $final_handle, $evidence, $evidence_path, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
+    exit 0;
+}
+die "existing artifact destination is unsafe\n" if directory_entry_exists($revision_handle, $request);
+
+$stage_name = ".${request}.tmp.$$";
+$stage_parent_handle = $revision_handle;
+$stage = File::Spec->catdir($revision_dir, $stage_name);
+mkdirat_component($revision_handle, $stage_name, 0700) or die "create artifact staging directory: $!\n";
+my $stage_handle = openat_directory_nofollow($revision_handle, $stage_name) or die "open artifact staging directory: $!\n";
+$stage_attachment = register_destination_link($revision_handle, $stage_name, $stage_handle);
+destination_test_barrier('stage');
+die "forced validation artifact stage failure\n"
+    if delete($ENV{AZEDARACH_VALIDATION_TEST_FAIL_AFTER_STAGE});
+my ($reports_root, $reports_handle) = safe_directory_chain_at($stage, $stage_handle, 'reports');
+
+my @candidate_report_paths = ref($evidence->{report_paths}) eq 'ARRAY'
+    ? grep { !ref($_) } @{$evidence->{report_paths}}
+    : ();
+push @candidate_report_paths, $evidence->{report_path}
+    if !ref($evidence->{report_path}) && ($evidence->{report_path} // '') ne '';
+my @source_reports = unique_nonempty(@candidate_report_paths);
+my (@measurements, @report_dirs);
+for my $source_report (@source_reports) {
+    my $source_dir = open_candidate_report_directory($candidate_root, $candidate_root_handle, $source_report);
+    next unless $source_dir;
+    my $index = @report_dirs + 1;
+    my $destination_name = sprintf('%03d', $index);
+    my ($destination, $destination_handle) = safe_directory_chain_at($reports_root, $reports_handle, $destination_name);
+    if (my $ready = delete($ENV{AZEDARACH_VALIDATION_TEST_CANDIDATE_DIRFD_READY_FILE})) {
+        sysopen(my $ready_fh, $ready, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+            or die "create candidate dirfd test marker: $!\n";
+        close $ready_fh or die "close candidate dirfd test marker: $!\n";
+        my $release = delete($ENV{AZEDARACH_VALIDATION_TEST_CANDIDATE_DIRFD_RELEASE_FILE}) || '';
+        sleep 0.01 until $release ne '' && -e $release;
+    }
+    for my $name (qw(report.json report.md events.jsonl stderr.txt)) {
+        my $source = openat_regular_nofollow($source_dir, $name);
+        copy_handle_at($source, $destination_handle, $name) if $source;
+    }
+    my $measurement = eval { read_json_at($destination_handle, 'report.json', 'timing report') };
+    push @measurements, $measurement if $measurement;
+    push @report_dirs, {path => $destination, handle => $destination_handle};
+}
+unless (@report_dirs) {
+    my ($path, $handle) = safe_directory_chain_at($reports_root, $reports_handle, '001');
+    push @report_dirs, {path => $path, handle => $handle};
+}
+
+my $summary = failure_summary(\@measurements, $evidence, $gate_output_path);
+for my $index (0 .. $#report_dirs) {
+    complete_standard_bundle_at($report_dirs[$index]{handle}, $summary, $request, $revision, $index + 1);
+    my $published_dir = File::Spec->catdir($final_dir, 'reports', sprintf('%03d', $index + 1));
+    rewrite_report_paths_at($report_dirs[$index]{handle}, $published_dir);
+}
+copy_nofollow_at($gate_output_path, $stage_handle, 'gate-output.log');
+
+my @artifacts;
+for my $directory (@report_dirs) {
+    for my $name (qw(report.json report.md events.jsonl stderr.txt)) {
+        push @artifacts, artifact_metadata_at($directory->{handle}, $name, File::Spec->catfile('reports', basename($directory->{path}), $name));
+    }
+}
+push @artifacts, artifact_metadata_at($stage_handle, 'gate-output.log', 'gate-output.log');
+
+my @references;
+unless ($evidence->{synthetic_request}) {
+    push @references, {kind => 'validation_request', id => $request};
+    push @references, {kind => 'issue', id => $evidence->{issue_id}}
+        if ($evidence->{issue_id} // '') ne '';
+    push @references, {kind => 'reviewer', id => $evidence->{reviewer_id}}
+        if ($evidence->{reviewer_id} // '') ne '';
+    push @references, {kind => 'review_epoch', id => 0 + $evidence->{review_epoch_event_id}}
+        if ($evidence->{review_epoch_event_id} // 0) > 0;
+}
+my $manifest = {
+    schema => 'azedarach.validation_artifact_manifest.v1',
+    request_id => $request,
+    candidate_revision => $revision,
+    publication_nonce => $publication_nonce,
+    synthetic_request => $evidence->{synthetic_request} ? JSON::PP::true : JSON::PP::false,
+    exit_code => 0 + $arg{'exit-code'},
+    created_at => strftime('%Y-%m-%dT%H:%M:%SZ', gmtime()),
+    failure_summary => $summary,
+    references => \@references,
+    artifacts => \@artifacts,
+};
+write_json_exclusive_at($stage_handle, 'manifest.json', $manifest, 0600);
+
+if (!renameat_component($revision_handle, $stage_name, $revision_handle, $request)) {
+    my $rename_error = $!;
+    remove_tree_at($revision_handle, $stage_name,
+        $stage_attachment->{device}, $stage_attachment->{inode}, $stage_handle, $stage_attachment);
+    undef $stage;
+    undef $stage_name;
+    undef $stage_attachment;
+    my $final_handle = openat_directory_nofollow($revision_handle, $request);
+    die "publish validation artifact directory: $rename_error\n" unless $final_handle;
+    recover_existing($final_dir, $final_handle, $evidence, $evidence_path, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
+    exit 0;
+}
+undef $stage;
+undef $stage_name;
+unregister_destination_link($stage_attachment);
+undef $stage_attachment;
+my $final_handle = openat_directory_nofollow($revision_handle, $request) or die "open committed artifact directory: $!\n";
+print STDERR "[gate] committed validation artifacts=$final_dir\n";
+validate_existing_manifest($final_dir, $final_handle, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
+finish_publication($final_dir, $final_handle, $evidence, $evidence_path, $request, $revision, $summary, 0 + $arg{'exit-code'});
+
+sub canonical_directory {
+    my ($path) = @_;
+    die "directory path must be absolute\n" unless File::Spec->file_name_is_absolute($path);
+    reject_symlink_components($path);
+    my $canonical = abs_path($path) || '';
+    die "directory is unavailable: $path\n" unless $canonical ne '' && safe_existing_directory($canonical);
+    return $canonical;
+}
+
+sub canonical_directory_handle {
+    my ($path) = @_;
+    my $canonical = canonical_directory($path);
+    sysopen(my $directory, File::Spec->rootdir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        or die "open filesystem root without symlink following: $!\n";
+    for my $component (grep { $_ ne '' && $_ ne '.' } File::Spec->splitdir($canonical)) {
+        my $next = openat_handle($directory, $component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        die "open canonical directory component $component: $!\n" unless $next;
+        stat($next) or die "inspect canonical directory component $component: $!\n";
+        die "canonical directory component is not a directory\n" unless -d _;
+        $directory = $next;
+    }
+    return ($canonical, $directory);
+}
+
+sub safe_identity {
+    my ($value, $name) = @_;
+    die "invalid $name identity\n" unless $value =~ /^[A-Za-z0-9_.-]+$/;
+    return $value;
+}
+
+sub safe_existing_directory {
+    my ($path) = @_;
+    my @stat = lstat($path);
+    return @stat && -d _ && !-l _;
+}
+
+sub safe_directory_chain {
+    my ($root, @components) = @_;
+    my $path = $root;
+    die "unsafe directory root: $root\n" unless safe_existing_directory($path);
+    for my $component (@components) {
+        die "unsafe directory component\n" unless $component =~ /^[A-Za-z0-9_.-]+$/ && $component ne '..';
+        $path = File::Spec->catdir($path, $component);
+        if (-e $path || -l $path) {
+            die "artifact path component is not a real directory: $path\n" unless safe_existing_directory($path);
+        } else {
+            mkdir($path, 0700) or die "create artifact directory $path: $!\n";
+        }
+    }
+    return $path;
+}
+
+sub path_within {
+    my ($root, $path) = @_;
+    my $relative = File::Spec->abs2rel($path, $root);
+    return !File::Spec->file_name_is_absolute($relative) && $relative !~ /^\.\.(?:[\\\/]|$)/;
+}
+
+sub trusted_control_path {
+    my ($root, $path, $must_exist) = @_;
+    die "control path must be absolute\n" unless File::Spec->file_name_is_absolute($path);
+    reject_symlink_components(dirname($path));
+    my $parent = abs_path(dirname($path)) || '';
+    die "control path escapes trusted directory\n" unless $parent ne '' && path_within($root, $parent) && safe_existing_directory($parent);
+    my $resolved = File::Spec->catfile($parent, basename($path));
+    if ($must_exist) {
+        die "control file is unsafe: $resolved\n" unless safe_regular_file($resolved);
+    } elsif (-e $resolved || -l $resolved) {
+        die "control output already exists: $resolved\n";
+    }
+    return $resolved;
+}
+
+sub reject_symlink_components {
+    my ($path) = @_;
+    die "path must be absolute\n" unless File::Spec->file_name_is_absolute($path);
+    my $cursor = File::Spec->rootdir;
+    for my $component (grep { $_ ne '' && $_ ne '.' } split(/[\\\/]+/, File::Spec->canonpath($path))) {
+        $cursor = File::Spec->catfile($cursor, $component);
+        my @stat = lstat($cursor);
+        die "path component is unavailable: $cursor\n" unless @stat;
+        if (-l _) {
+            my $link = readlink($cursor) // '';
+            next if $cursor eq '/var' && ($link eq '/private/var' || $link eq 'private/var');
+            die "path component is a symlink: $cursor\n";
+        }
+    }
+}
+
+sub safe_regular_file {
+    my ($path) = @_;
+    my @stat = lstat($path);
+    return @stat && -f _ && !-l _;
+}
+
+sub safe_existing_file {
+    my ($root, $path) = @_;
+    return '' unless File::Spec->file_name_is_absolute($path);
+    my $relative = File::Spec->abs2rel(File::Spec->canonpath($path), $root);
+    return '' if File::Spec->file_name_is_absolute($relative) || $relative =~ /^\.\.(?:[\\\/]|$)/;
+    my $cursor = $root;
+    my @parts = File::Spec->splitdir($relative);
+    for my $index (0 .. $#parts - 1) {
+        $cursor = File::Spec->catdir($cursor, $parts[$index]);
+        return '' unless safe_existing_directory($cursor);
+    }
+    return safe_regular_file($path) ? $path : '';
+}
+
+sub safe_candidate_file {
+    my ($root, $path) = @_;
+    $path = File::Spec->catfile($root, $path) unless File::Spec->file_name_is_absolute($path);
+    return safe_existing_file($root, File::Spec->canonpath($path));
+}
+
+sub native_platform {
+    my @uname = uname();
+    my $arch = lc($uname[4] // $Config{archname} // 'unknown');
+    $arch = 'amd64' if $arch =~ /(?:x86_64|amd64)/;
+    $arch = 'arm64' if $arch =~ /(?:aarch64|arm64)/;
+    return lc($^O) . '/' . $arch;
+}
+
+sub openat_capability {
+    my ($platform) = @_;
+    my %syscalls = (
+        'darwin/amd64' => 463,
+        'darwin/arm64' => 463,
+        'linux/amd64' => 257,
+    );
+    my $number = $syscalls{$platform};
+    return {
+        schema => 'azedarach.validation_artifact_capability.v1',
+        capability => 'descriptor_relative_openat_nofollow',
+        platform => $platform,
+        supported_platforms => [sort keys %syscalls],
+        available => defined($number) ? JSON::PP::true : JSON::PP::false,
+        (defined($number) ? (syscall_number => $number) :
+            (diagnostic => "validation artifact publication capability unavailable on $platform: descriptor-relative openat syscall is not registered")),
+    };
+}
+
+sub require_openat_capability {
+    my ($platform) = @_;
+    my $capability = openat_capability($platform);
+    unless ($capability->{available}) {
+        print STDERR encode_json($capability) . "\n";
+        exit 78;
+    }
+    return $capability->{syscall_number};
+}
+
+sub initialize_at_syscalls {
+    my ($platform) = @_;
+    my %numbers = (
+        'darwin/amd64' => [475, 465, 472, 0x0080],
+        'darwin/arm64' => [475, 465, 472, 0x0080],
+        'linux/amd64' => [258, 264, 263, 0x0200],
+    );
+    my $entry = $numbers{$platform} or die "destination *at capability unavailable on $platform\n";
+    ($mkdirat_syscall, $renameat_syscall, $unlinkat_syscall, $arg{'at-removedir'}) = @$entry;
+}
+
+sub mkdirat_component {
+    my ($parent, $name, $mode) = @_;
+    safe_at_name($name);
+    validate_destination_attachment();
+    return syscall($mkdirat_syscall, fileno($parent), $name, $mode) == 0;
+}
+
+sub renameat_component {
+    my ($from_parent, $from, $to_parent, $to) = @_;
+    safe_at_name($from); safe_at_name($to);
+    validate_destination_attachment();
+    return syscall($renameat_syscall, fileno($from_parent), $from, fileno($to_parent), $to) == 0;
+}
+
+sub unlinkat_component {
+    my ($parent, $name, $flags) = @_;
+    safe_at_name($name);
+    validate_destination_attachment();
+    return syscall($unlinkat_syscall, fileno($parent), $name, $flags || 0) == 0;
+}
+
+sub safe_at_name {
+    my ($name) = @_;
+    die "unsafe descriptor-relative component\n" unless defined($name) && $name ne '' && $name ne '.' && $name ne '..' && $name !~ m{[\\/]};
+}
+
+sub openat_directory_nofollow {
+    my ($parent, $name) = @_;
+    my $handle = openat_handle($parent, $name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    return undef unless $handle;
+    my @stat = stat($handle);
+    return @stat && -d _ ? $handle : undef;
+}
+
+sub safe_directory_chain_at {
+    my ($path, $handle, @components) = @_;
+    for my $component (@components) {
+        safe_at_name($component);
+        my $next = openat_directory_nofollow($handle, $component);
+        unless ($next) {
+            unless (mkdirat_component($handle, $component, 0700)) {
+                die "artifact path component is not a real directory: $path/$component\n" if $!{EEXIST};
+                die "create artifact directory $path/$component: $!\n";
+            }
+            $next = openat_directory_nofollow($handle, $component) or die "open artifact directory $path/$component: $!\n";
+        }
+        register_destination_link($handle, $component, $next);
+        $path = File::Spec->catdir($path, $component);
+        $handle = $next;
+    }
+    return ($path, $handle);
+}
+
+sub attached_directory_handle {
+    my ($path) = @_;
+    die "attached directory path must be absolute\n" unless File::Spec->file_name_is_absolute($path);
+    sysopen(my $handle, File::Spec->rootdir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        or die "open filesystem root for destination attachment: $!\n";
+    my $attachment = {links => []};
+    for my $component (grep { $_ ne '' && $_ ne '.' } File::Spec->splitdir($path)) {
+        safe_at_name($component);
+        my $next = openat_directory_nofollow($handle, $component)
+            or die "open attached destination component $component: $!\n";
+        my @stat = stat($next);
+        push @{$attachment->{links}}, {parent => $handle, name => $component, device => $stat[0], inode => $stat[1]};
+        $handle = $next;
+    }
+    return ($handle, $attachment);
+}
+
+sub register_destination_link {
+    my ($parent, $name, $child) = @_;
+    return unless $destination_attachment;
+    my @stat = stat($child);
+    die "inspect destination attachment $name: $!\n" unless @stat;
+    my $link = {parent => $parent, name => $name, device => $stat[0], inode => $stat[1]};
+    push @{$destination_attachment->{links}}, $link;
+    return $link;
+}
+
+sub unregister_destination_link {
+    my ($target) = @_;
+    return unless $destination_attachment && $target;
+    @{$destination_attachment->{links}} = grep { $_ != $target } @{$destination_attachment->{links}};
+}
+
+sub validate_destination_attachment {
+    return unless $destination_attachment;
+    for my $link (@{$destination_attachment->{links}}) {
+        my $current = openat_directory_nofollow($link->{parent}, $link->{name});
+        die "validation artifact destination detached from trusted project root at $link->{name}\n" unless $current;
+        my @stat = stat($current);
+        die "validation artifact destination attachment changed at $link->{name}\n"
+            unless @stat && $stat[0] == $link->{device} && $stat[1] == $link->{inode};
+    }
+}
+
+sub validate_directory_identity {
+    my ($parent, $name, $device, $inode) = @_;
+    my $current = openat_directory_nofollow($parent, $name);
+    die "validation artifact destination detached at $name\n" unless $current;
+    my @stat = stat($current);
+    die "validation artifact destination identity changed at $name\n"
+        unless @stat && $stat[0] == $device && $stat[1] == $inode;
+}
+
+sub destination_test_barrier {
+    my ($phase) = @_;
+    return unless (($ENV{AZEDARACH_VALIDATION_TEST_DESTINATION_PHASE} || '') eq $phase);
+    my $ready = delete($ENV{AZEDARACH_VALIDATION_TEST_DESTINATION_READY_FILE}) || '';
+    my $release = delete($ENV{AZEDARACH_VALIDATION_TEST_DESTINATION_RELEASE_FILE}) || '';
+    return if $ready eq '' || $release eq '';
+    sysopen(my $ready_fh, $ready, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+        or die "create destination attachment test marker: $!\n";
+    close $ready_fh or die "close destination attachment test marker: $!\n";
+    sleep 0.01 until -e $release;
+}
+
+sub remove_tree_at {
+    my ($parent, $name, $expected_device, $expected_inode, $directory, $attachment) = @_;
+    return unless $parent && defined($name);
+    validate_destination_attachment();
+    $directory ||= openat_directory_nofollow($parent, $name);
+    unless ($directory) {
+        validate_destination_attachment();
+        unlinkat_component($parent, $name, 0);
+        return;
+    }
+    my @directory_stat = stat($directory);
+    die "validation artifact deletion identity changed at $name\n"
+        if defined($expected_device) && (!@directory_stat
+            || $directory_stat[0] != $expected_device || $directory_stat[1] != $expected_inode);
+    $attachment ||= register_destination_link($parent, $name, $directory);
+    destination_test_barrier('remove-tree');
+    validate_destination_attachment();
+    opendir(my $entries, fd_directory_path($directory)) or die "enumerate artifact directory: $!\n";
+    for my $entry (grep { $_ ne '.' && $_ ne '..' } readdir($entries)) {
+        if (my $child = openat_directory_nofollow($directory, $entry)) {
+            my @child_stat = stat($child);
+            die "inspect recursive artifact directory $entry: $!\n" unless @child_stat;
+            remove_tree_at($directory, $entry, $child_stat[0], $child_stat[1], $child);
+        } else {
+            validate_destination_attachment();
+            unlinkat_component($directory, $entry, 0) or die "remove artifact file $entry: $!\n";
+        }
+    }
+    closedir($entries);
+    validate_destination_attachment();
+    unlinkat_component($parent, $name, $arg{'at-removedir'}) or die "remove artifact directory $name: $!\n";
+    unregister_destination_link($attachment);
+}
+
+sub fd_directory_path {
+    my ($handle) = @_;
+    if ($^O eq 'darwin') {
+        my $buffer = "\0" x 1024;
+        fcntl($handle, 50, $buffer) or die "resolve retained directory descriptor: $!\n";
+        $buffer =~ s/\0.*//s;
+        return $buffer;
+    }
+    my $path = readlink('/proc/self/fd/' . fileno($handle));
+    die "resolve retained directory descriptor: $!\n" unless defined($path);
+    return $path;
+}
+
+sub directory_entry_exists {
+    my ($directory, $name) = @_;
+    safe_at_name($name);
+    my $entry = openat_handle($directory, $name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    return 1 if $entry;
+    return !$!{ENOENT};
+}
+
+sub verify_openat_capability {
+    my ($number, $platform) = @_;
+    sysopen(my $root, File::Spec->rootdir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        or die "open filesystem root for openat capability probe: $!\n";
+    my $component = '.';
+    my $fd = syscall($number, fileno($root), $component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0);
+    if ($fd < 0) {
+        my $capability = {
+            %{openat_capability($platform)},
+            available => JSON::PP::false,
+            diagnostic => "validation artifact publication capability probe failed on $platform: descriptor-relative openat syscall $number: $!",
+        };
+        print STDERR encode_json($capability) . "\n";
+        exit 78;
+    }
+    open(my $probe, '<&=', $fd) or die "adopt openat capability probe descriptor: $!\n";
+    my @root_stat = stat($root);
+    my @probe_stat = stat($probe);
+    unless (@root_stat && @probe_stat && $root_stat[0] == $probe_stat[0] && $root_stat[1] == $probe_stat[1]) {
+        print STDERR encode_json({
+            %{openat_capability($platform)},
+            available => JSON::PP::false,
+            diagnostic => "validation artifact publication capability probe returned the wrong inode on $platform",
+        }) . "\n";
+        exit 78;
+    }
+    close $probe or die "close openat capability probe descriptor: $!\n";
+    close $root or die "close openat capability probe root: $!\n";
+}
+
+sub openat_handle {
+    my ($directory, $name, $flags) = @_;
+    die "unsafe openat component\n"
+        unless defined($name) && $name ne '' && $name ne '.' && $name ne '..' && $name !~ m{[\\/]};
+    die "openat capability was not initialized\n" unless defined($openat_syscall);
+    my $fd = syscall($openat_syscall, fileno($directory), $name, $flags, 0);
+    return undef if $fd < 0;
+    open(my $handle, '<&=', $fd) or die "adopt openat descriptor for $name: $!\n";
+    return $handle;
+}
+
+sub candidate_relative_components {
+    my ($root, $path) = @_;
+    return unless defined($path) && $path ne '';
+    my $absolute = File::Spec->file_name_is_absolute($path)
+        ? File::Spec->canonpath($path)
+        : File::Spec->catfile($root, $path);
+    my $relative = File::Spec->abs2rel($absolute, $root);
+    return if File::Spec->file_name_is_absolute($relative);
+    my @parts = grep { $_ ne '' && $_ ne '.' } File::Spec->splitdir($relative);
+    return if !@parts || grep { $_ eq '..' || $_ =~ m{[\\/]} } @parts;
+    return @parts;
+}
+
+sub open_candidate_report_directory {
+    my ($root, $root_handle, $report_path) = @_;
+    my @parts = candidate_relative_components($root, $report_path);
+    return unless @parts && pop(@parts) eq 'report.json';
+    open(my $directory, '<&', fileno($root_handle))
+        or die "duplicate retained candidate root handle: $!\n";
+    for my $component (@parts) {
+        my $next = openat_handle($directory, $component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        return undef unless $next;
+        stat($next) or die "inspect candidate directory handle: $!\n";
+        return undef unless -d _;
+        $directory = $next;
+    }
+    my $report = openat_regular_nofollow($directory, 'report.json');
+    return undef unless $report;
+    return $directory;
+}
+
+sub openat_regular_nofollow {
+    my ($directory, $name) = @_;
+    my $file = openat_handle($directory, $name, O_RDONLY | O_NOFOLLOW);
+    return undef unless $file;
+    my @stat = stat($file);
+    die "inspect candidate artifact handle: $!\n" unless @stat;
+    return -f _ && $stat[3] == 1 ? $file : undef;
+}
+
+sub unique_nonempty {
+    my %seen;
+    return grep { defined($_) && $_ ne '' && !$seen{$_}++ } @_;
+}
+
+sub open_read_nofollow {
+    my ($path) = @_;
+    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or die "open $path without symlink following: $!\n";
+    return $fh;
+}
+
+sub read_json_nofollow {
+    my ($path, $label) = @_;
+    my $in = open_read_nofollow($path);
+    local $/;
+    my $decoded = eval { decode_json(<$in> // '') };
+    close $in;
+    die "decode $label $path\n" unless ref($decoded) eq 'HASH';
+    return $decoded;
+}
+
+sub read_json_at {
+    my ($directory, $name, $label) = @_;
+    my $in = openat_regular_nofollow($directory, $name) or die "open $label without symlink following: $!\n";
+    local $/;
+    my $decoded = eval { decode_json(<$in> // '') };
+    close $in;
+    die "decode $label\n" unless ref($decoded) eq 'HASH';
+    return $decoded;
+}
+
+sub create_at {
+    my ($directory, $name, $mode) = @_;
+    safe_at_name($name);
+    validate_destination_attachment();
+    my $fd = syscall($openat_syscall, fileno($directory), $name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, $mode);
+    die "create artifact $name exclusively: $!\n" if $fd < 0;
+    open(my $handle, '>&=', $fd) or die "adopt artifact output descriptor for $name: $!\n";
+    destination_test_barrier('write-open');
+    validate_destination_attachment();
+    chmod($mode, $handle) or die "set artifact mode for $name: $!\n";
+    return $handle;
+}
+
+sub write_attached {
+    my ($out, $value, $label) = @_;
+    my $offset = 0;
+    while ($offset < length($value)) {
+        destination_test_barrier('write-chunk') if $offset > 0;
+        validate_destination_attachment();
+        my $written = syswrite($out, $value, length($value) - $offset, $offset);
+        die "write artifact $label: $!\n" unless defined($written) && $written > 0;
+        $offset += $written;
+    }
+}
+
+sub write_json_exclusive_at {
+    my ($directory, $name, $value, $mode) = @_;
+    my $out = create_at($directory, $name, $mode);
+    write_attached($out, encode_json($value) . "\n", $name);
+    close $out or die "close $name: $!\n";
+}
+
+sub write_text_exclusive_at {
+    my ($directory, $name, $value) = @_;
+    my $out = create_at($directory, $name, 0600);
+    write_attached($out, $value, $name);
+    close $out or die "close $name: $!\n";
+}
+
+sub write_json_exclusive {
+    my ($path, $value, $mode) = @_;
+    sysopen(my $out, $path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, $mode)
+        or die "create $path exclusively: $!\n";
+    print {$out} encode_json($value) . "\n";
+    close $out or die "close $path: $!\n";
+}
+
+sub atomic_write_json {
+    my ($path, $value, $mode) = @_;
+    my $parent = dirname($path);
+    die "unsafe atomic output parent\n" unless safe_existing_directory($parent);
+    die "atomic output target is a symlink\n" if -l $path;
+    my $temporary = File::Spec->catfile($parent, '.' . basename($path) . ".tmp.$$" );
+    unlink($temporary) if safe_regular_file($temporary);
+    write_json_exclusive($temporary, $value, $mode);
+    rename($temporary, $path) or die "replace $path atomically: $!\n";
+}
+
+sub copy_nofollow {
+    my ($source, $target) = @_;
+    my $in = open_read_nofollow($source);
+    sysopen(my $out, $target, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+        or die "create artifact $target exclusively: $!\n";
+    my $buffer;
+    while (1) {
+        my $read = sysread($in, $buffer, 64 * 1024);
+        die "read artifact $source: $!\n" unless defined $read;
+        last if $read == 0;
+        my $offset = 0;
+        while ($offset < $read) {
+            my $written = syswrite($out, $buffer, $read - $offset, $offset);
+            die "write artifact $target: $!\n" unless defined $written;
+            $offset += $written;
+        }
+    }
+    close $in;
+    close $out or die "close artifact $target: $!\n";
+}
+
+sub copy_handle {
+    my ($in, $target) = @_;
+    sysopen(my $out, $target, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+        or die "create artifact $target exclusively: $!\n";
+    my $buffer;
+    while (1) {
+        my $read = sysread($in, $buffer, 64 * 1024);
+        die "read candidate artifact handle: $!\n" unless defined $read;
+        last if $read == 0;
+        my $offset = 0;
+        while ($offset < $read) {
+            my $written = syswrite($out, $buffer, $read - $offset, $offset);
+            die "write artifact $target: $!\n" unless defined $written;
+            $offset += $written;
+        }
+    }
+    close $in or die "close candidate artifact handle: $!\n";
+    close $out or die "close artifact $target: $!\n";
+}
+
+sub copy_handle_at {
+    my ($in, $directory, $name) = @_;
+    my $out = create_at($directory, $name, 0600);
+    my $buffer;
+    while (1) {
+        my $read = sysread($in, $buffer, 64 * 1024);
+        die "read candidate artifact handle: $!\n" unless defined $read;
+        last if $read == 0;
+        my $offset = 0;
+        while ($offset < $read) {
+            destination_test_barrier('write-chunk');
+            validate_destination_attachment();
+            my $written = syswrite($out, $buffer, $read - $offset, $offset);
+            die "write artifact $name: $!\n" unless defined $written;
+            $offset += $written;
+        }
+    }
+    close $in or die "close candidate artifact handle: $!\n";
+    close $out or die "close artifact $name: $!\n";
+}
+
+sub copy_nofollow_at {
+    my ($source, $directory, $name) = @_;
+    copy_handle_at(open_read_nofollow($source), $directory, $name);
+}
+
+sub write_text_exclusive {
+    my ($path, $text) = @_;
+    sysopen(my $out, $path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+        or die "create $path exclusively: $!\n";
+    print {$out} $text;
+    close $out or die "close $path: $!\n";
+}
+
+sub complete_standard_bundle {
+    my ($directory, $summary, $request_id, $candidate_revision, $index) = @_;
+    my $report_json = File::Spec->catfile($directory, 'report.json');
+    unless (safe_regular_file($report_json)) {
+        write_json_exclusive($report_json, {
+            schema => 'azedarach.validation_failure_report.v1',
+            exit_code => 1,
+            failures => [{package => 'validation', output => $summary}],
+            request_id => $request_id,
+            source_revision => $candidate_revision,
+            bundle_index => $index,
+        }, 0600);
+    }
+    my $report_md = File::Spec->catfile($directory, 'report.md');
+    write_text_exclusive($report_md, "# Candidate validation failure\n\n$summary\n") unless safe_regular_file($report_md);
+    my $events = File::Spec->catfile($directory, 'events.jsonl');
+    write_text_exclusive($events, encode_json({Action => 'fail', Package => 'validation', Output => $summary}) . "\n") unless safe_regular_file($events);
+    my $stderr = File::Spec->catfile($directory, 'stderr.txt');
+    write_text_exclusive($stderr, "$summary\n") unless safe_regular_file($stderr);
+}
+
+sub complete_standard_bundle_at {
+    my ($directory, $summary, $request_id, $candidate_revision, $index) = @_;
+    unless (openat_regular_nofollow($directory, 'report.json')) {
+        write_json_exclusive_at($directory, 'report.json', {
+            schema => 'azedarach.validation_failure_report.v1', exit_code => 1,
+            failures => [{package => 'validation', output => $summary}],
+            request_id => $request_id, source_revision => $candidate_revision, bundle_index => $index,
+        }, 0600);
+    }
+    write_text_exclusive_at($directory, 'report.md', "# Candidate validation failure\n\n$summary\n") unless openat_regular_nofollow($directory, 'report.md');
+    write_text_exclusive_at($directory, 'events.jsonl', encode_json({Action => 'fail', Package => 'validation', Output => $summary}) . "\n") unless openat_regular_nofollow($directory, 'events.jsonl');
+    write_text_exclusive_at($directory, 'stderr.txt', "$summary\n") unless openat_regular_nofollow($directory, 'stderr.txt');
+}
+
+sub read_file_at {
+    my ($directory, $name, $limit) = @_;
+    my $in = openat_regular_nofollow($directory, $name) or die "open artifact $name: $!\n";
+    my @stat = stat($in);
+    my $size = @stat ? $stat[7] : 0;
+    seek($in, $size - $limit, 0) if $size > $limit;
+    my $value = '';
+    read($in, $value, $limit);
+    close $in;
+    return $value;
+}
+
+sub rewrite_report_paths_at {
+    my ($directory, $published_dir) = @_;
+    my $measurement = read_json_at($directory, 'report.json', 'timing report');
+    my $old_raw = $measurement->{raw_json_path} || '';
+    my $old_stderr = $measurement->{stderr_path} || '';
+    $measurement->{raw_json_path} = File::Spec->catfile($published_dir, 'events.jsonl');
+    $measurement->{stderr_path} = File::Spec->catfile($published_dir, 'stderr.txt');
+    write_json_exclusive_at($directory, '.report.json.rewrite', $measurement, 0600);
+    renameat_component($directory, '.report.json.rewrite', $directory, 'report.json') or die "replace report json: $!\n";
+    my $markdown = read_file_at($directory, 'report.md', 1024 * 1024);
+    my $published_events = File::Spec->catfile($published_dir, 'events.jsonl');
+    my $published_stderr = File::Spec->catfile($published_dir, 'stderr.txt');
+    $markdown =~ s/\Q$old_raw\E/$published_events/g if $old_raw ne '';
+    $markdown =~ s/\Q$old_stderr\E/$published_stderr/g if $old_stderr ne '';
+    $markdown .= "\nRaw events: `$published_events`\nStderr: `$published_stderr`\n";
+    write_text_exclusive_at($directory, '.report.md.rewrite', $markdown);
+    renameat_component($directory, '.report.md.rewrite', $directory, 'report.md') or die "replace report markdown: $!\n";
+}
+
+sub artifact_metadata_at {
+    my ($directory, $name, $relative) = @_;
+    my $in = openat_regular_nofollow($directory, $name) or die "open artifact $name: $!\n";
+    my @stat = stat($in);
+    my $digest = Digest::SHA->new(256);
+    $digest->addfile($in);
+    close $in;
+    return {path => $relative, bytes => (@stat ? $stat[7] : 0), sha256 => $digest->hexdigest};
+}
+
+sub open_relative_parent {
+    my ($root, $relative) = @_;
+    return unless defined($relative) && $relative ne '' && !File::Spec->file_name_is_absolute($relative);
+    my @parts = grep { $_ ne '' && $_ ne '.' } File::Spec->splitdir($relative);
+    return if !@parts || grep { $_ eq '..' || $_ =~ m{[\\/]} } @parts;
+    my $name = pop @parts;
+    open(my $parent, '<&', fileno($root)) or die "duplicate artifact root handle: $!\n";
+    for my $part (@parts) {
+        $parent = openat_directory_nofollow($parent, $part) or return;
+    }
+    return ($parent, $name);
+}
+
+sub rewrite_report_paths {
+    my ($directory, $published_dir) = @_;
+    my $report_path = File::Spec->catfile($directory, 'report.json');
+    my $measurement = read_json_nofollow($report_path, 'timing report');
+    my $old_raw = $measurement->{raw_json_path} || '';
+    my $old_stderr = $measurement->{stderr_path} || '';
+    $measurement->{raw_json_path} = File::Spec->catfile($published_dir, 'events.jsonl');
+    $measurement->{stderr_path} = File::Spec->catfile($published_dir, 'stderr.txt');
+    atomic_write_json($report_path, $measurement, 0600);
+    my $markdown_path = File::Spec->catfile($directory, 'report.md');
+    my $markdown = read_file_nofollow($markdown_path, 1024 * 1024);
+    my $published_events = File::Spec->catfile($published_dir, 'events.jsonl');
+    my $published_stderr = File::Spec->catfile($published_dir, 'stderr.txt');
+    $markdown =~ s/\Q$old_raw\E/$published_events/g if $old_raw ne '';
+    $markdown =~ s/\Q$old_stderr\E/$published_stderr/g if $old_stderr ne '';
+    $markdown .= "\nRaw events: `" . File::Spec->catfile($published_dir, 'events.jsonl') . "`\n";
+    $markdown .= "Stderr: `" . File::Spec->catfile($published_dir, 'stderr.txt') . "`\n";
+    my $replacement = "$markdown_path.rewrite.$$";
+    write_text_exclusive($replacement, $markdown);
+    rename($replacement, $markdown_path) or die "replace report markdown: $!\n";
+}
+
+sub artifact_metadata {
+    my ($root, $path) = @_;
+    my $in = open_read_nofollow($path);
+    my $digest = Digest::SHA->new(256);
+    $digest->addfile($in);
+    close $in;
+    return {path => File::Spec->abs2rel($path, $root), bytes => (-s $path || 0), sha256 => $digest->hexdigest};
+}
+
+sub failure_summary {
+    my ($measurements, $evidence_value, $gate_output) = @_;
+    for my $measurement (@$measurements) {
+        my @failures = grep { ref($_) eq 'HASH' } @{$measurement->{failures} || []};
+        @failures = sort { ($b->{test} ? 1 : 0) <=> ($a->{test} ? 1 : 0) } @failures;
+        for my $failure (@failures) {
+            my $identity = $failure->{package} || 'validation';
+            $identity .= '::' . $failure->{test} if $failure->{test};
+            my $detail = meaningful_line($failure->{output} || '');
+            return $detail ne '' ? "$identity: $detail" : $identity;
+        }
+    }
+    if (($evidence_value->{fatal_phase} || '') ne '' || ($evidence_value->{fatal_detail} || '') ne '') {
+        return one_line($evidence_value->{fatal_phase} || 'validation') . ': ' .
+            one_line($evidence_value->{fatal_detail} || 'validation payload configuration failed');
+    }
+    my $detail = meaningful_last_line(read_file_nofollow($gate_output, 64 * 1024));
+    return $detail if $detail ne '';
+    return 'validation command exited without a structured failure';
+}
+
+sub read_file_nofollow {
+    my ($path, $limit) = @_;
+    my $in = open_read_nofollow($path);
+    my $size = -s $path || 0;
+    seek($in, $size - $limit, 0) if $size > $limit;
+    my $value = '';
+    read($in, $value, $limit);
+    close $in;
+    return $value;
+}
+
+sub meaningful_line {
+    my ($value) = @_;
+    for my $line (split /\R/, $value) {
+        $line = one_line($line);
+        next if $line eq '' || $line =~ /^(?:=== RUN|--- FAIL|FAIL(?:\s|$))/;
+        return $line;
+    }
+    return '';
+}
+
+sub meaningful_last_line {
+    my ($value) = @_;
+    my @meaningful;
+    for my $line (split /\R/, $value) {
+        $line = one_line($line);
+        next if $line eq '' || $line =~ /^(?:=== RUN|--- FAIL|FAIL(?:\s|$))/;
+        push @meaningful, $line;
+    }
+    return @meaningful ? $meaningful[-1] : '';
+}
+
+sub one_line {
+    my ($value) = @_;
+    $value //= '';
+    $value =~ s/\s+/ /g;
+    $value =~ s/^\s+|\s+$//g;
+    return substr($value, 0, 1000);
+}
+
+sub validate_existing_manifest {
+    my ($directory, $directory_handle, $request_id, $candidate_revision, $exit_code, $nonce) = @_;
+    my $manifest = read_json_at($directory_handle, 'manifest.json', 'artifact manifest');
+    die "existing artifact manifest schema mismatch\n" unless ($manifest->{schema} || '') eq 'azedarach.validation_artifact_manifest.v1';
+    die "existing artifact manifest request mismatch\n" unless ($manifest->{request_id} || '') eq $request_id;
+    die "existing artifact manifest revision mismatch\n" unless ($manifest->{candidate_revision} || '') eq $candidate_revision;
+    die "existing artifact manifest exit mismatch\n" unless ($manifest->{exit_code} || 0) == $exit_code;
+    die "existing artifact manifest nonce mismatch\n" unless ($manifest->{publication_nonce} || '') eq $nonce;
+    my %artifact_paths = map { ($_->{path} || '') => 1 } grep { ref($_) eq 'HASH' } @{$manifest->{artifacts} || []};
+    for my $required (qw(gate-output.log reports/001/report.json reports/001/report.md reports/001/events.jsonl reports/001/stderr.txt)) {
+        die "existing artifact manifest bundle incomplete\n" unless $artifact_paths{$required};
+    }
+    my $has_request_reference = grep {
+        ref($_) eq 'HASH' && ($_->{kind} || '') eq 'validation_request' && ($_->{id} || '') eq $request_id
+    } @{$manifest->{references} || []};
+    die "existing artifact manifest request reference missing\n"
+        unless $manifest->{synthetic_request} || $has_request_reference;
+    for my $artifact (@{$manifest->{artifacts} || []}) {
+        die "invalid existing artifact metadata\n" unless ref($artifact) eq 'HASH';
+        my ($parent, $name) = open_relative_parent($directory_handle, $artifact->{path} || '');
+        die "existing artifact is missing or unsafe\n" unless $parent && openat_regular_nofollow($parent, $name);
+        my $metadata = artifact_metadata_at($parent, $name, $artifact->{path});
+        die "existing artifact checksum mismatch\n" unless ($artifact->{sha256} || '') eq $metadata->{sha256};
+    }
+    return $manifest;
+}
+
+sub recover_existing {
+    my ($directory, $directory_handle, $evidence_value, $evidence_output, $request_id, $candidate_revision, $exit_code, $nonce) = @_;
+    my $manifest = validate_existing_manifest($directory, $directory_handle, $request_id, $candidate_revision, $exit_code, $nonce);
+    print STDERR "[gate] recovered committed validation artifacts=$directory\n";
+    finish_publication($directory, $directory_handle, $evidence_value, $evidence_output, $request_id, $candidate_revision,
+        $manifest->{failure_summary} || 'validation failed', $manifest->{exit_code});
+}
+
+sub finish_publication {
+    my ($directory, $directory_handle, $evidence_value, $evidence_output, $request_id, $candidate_revision, $summary, $exit_code) = @_;
+    my @reports;
+    if (my $reports_handle = openat_directory_nofollow($directory_handle, 'reports')) {
+        opendir(my $entries, fd_directory_path($reports_handle)) or die "enumerate reports: $!\n";
+        for my $entry (sort grep { $_ ne '.' && $_ ne '..' } readdir($entries)) {
+            my $bundle = openat_directory_nofollow($reports_handle, $entry) or next;
+            push @reports, File::Spec->catfile($directory, 'reports', $entry, 'report.json') if openat_regular_nofollow($bundle, 'report.json');
+        }
+        closedir($entries);
+    }
+    @reports = (File::Spec->catfile($directory, 'manifest.json')) unless @reports;
+    $evidence_value->{report_path} = $reports[0];
+    $evidence_value->{report_paths} = \@reports;
+    $evidence_value->{failure_summary} = $summary;
+    $evidence_value->{artifact_exit_code} = 0 + $exit_code;
+    atomic_write_json($evidence_output, $evidence_value, 0600);
+    print join(' ', '[gate]', 'validation_request=' . $request_id,
+        'candidate_head=' . $candidate_revision, 'failure=' . one_line($summary),
+        'artifacts=' . $directory) . "\n";
+}
+
+sub prune_unreferenced {
+    my ($root, $root_handle) = @_;
+    my @orphans;
+    opendir(my $revisions, fd_directory_path($root_handle)) or die "enumerate artifact revisions: $!\n";
+    for my $revision (grep { $_ ne '.' && $_ ne '..' } readdir($revisions)) {
+        my $revision_handle = openat_directory_nofollow($root_handle, $revision) or next;
+        register_destination_link($root_handle, $revision, $revision_handle);
+        validate_destination_attachment();
+        opendir(my $requests, fd_directory_path($revision_handle)) or next;
+        for my $request (grep { $_ ne '.' && $_ ne '..' } readdir($requests)) {
+            my $directory = openat_directory_nofollow($revision_handle, $request) or next;
+            my @request_stat = stat($directory);
+            next unless @request_stat;
+            my $manifest = eval { read_json_at($directory, 'manifest.json', 'artifact manifest') };
+            next unless $manifest;
+            my $references = $manifest->{references};
+            next if ref($references) eq 'ARRAY' && @$references;
+            my $created = eval { Time::Piece->strptime($manifest->{created_at} || '', '%Y-%m-%dT%H:%M:%SZ')->epoch } || 0;
+            push @orphans, {
+                parent => $revision_handle,
+                name => $request,
+                device => $request_stat[0],
+                inode => $request_stat[1],
+                created => $created,
+            };
+        }
+        closedir($requests);
+    }
+    closedir($revisions);
+    @orphans = sort { $b->{created} <=> $a->{created} } @orphans;
+    destination_test_barrier('prune');
+    my $cutoff = time() - 30 * 24 * 60 * 60;
+    for my $index (0 .. $#orphans) {
+        next if $index < 20 && $orphans[$index]{created} >= $cutoff;
+        validate_destination_attachment();
+        validate_directory_identity($orphans[$index]{parent}, $orphans[$index]{name},
+            $orphans[$index]{device}, $orphans[$index]{inode});
+        my $selected = openat_directory_nofollow($orphans[$index]{parent}, $orphans[$index]{name});
+        die "validation artifact prune target detached at $orphans[$index]{name}\n" unless $selected;
+        remove_tree_at($orphans[$index]{parent}, $orphans[$index]{name},
+            $orphans[$index]{device}, $orphans[$index]{inode}, $selected);
+    }
+}

@@ -825,15 +825,25 @@ func (d *Daemon) validatePublicationReviewAuthority(ctx context.Context, operati
 	if issueClient == nil {
 		return fmt.Errorf("issue store unavailable for accepted-review authority")
 	}
-	events, err := issueClient.ListIssueObservationEvents(ctx, operation.IssueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}, NewestIDFirst: true})
+	eventsByIssue, err := issueClient.ListLatestIssueObservationEventsByIssue(ctx, issues.LatestIssueObservationEventOptions{
+		IssueIDs: []string{operation.IssueID}, Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration",
+		CommandOutcomePairs: []issues.IssueObservationCommandOutcomePair{
+			{SourceCommand: "review-accept", Outcomes: []string{string(domain.ReviewOutcomeAccepted)}},
+			{SourceCommand: "review-return", Outcomes: []string{string(domain.ReviewOutcomeReturned)}},
+		},
+		RequiredPayloadTextKeys: []string{"actor_id"},
+		PayloadTextEquals:       map[string]string{"actor_kind": domain.ReviewerOwnerKindOrchestrator}, CurrentReviewEpoch: true,
+	})
 	if err != nil {
 		return fmt.Errorf("read accepted-review authority: %w", err)
 	}
-	for _, event := range events {
-		outcome, trusted := domain.TrustedReviewOutcome(event)
-		if event.ID == operation.AcceptedReviewEventID && trusted && outcome == domain.ReviewOutcomeAccepted && strings.EqualFold(observationPayloadString(event.Payload, "actor_id"), operation.ActorID) && observationPayloadString(event.Payload, "publication_operation_id") == operation.AcceptedPublicationOperationID && reviewPayloadInt64(event.Payload["review_epoch_event_id"]) == operation.ReviewEpochEventID {
-			return nil
-		}
+	event, found := eventsByIssue[operation.IssueID]
+	outcome, trusted := domain.TrustedReviewOutcome(event)
+	if found && trusted && event.ID == operation.AcceptedReviewEventID && outcome == domain.ReviewOutcomeAccepted && strings.EqualFold(observationPayloadString(event.Payload, "actor_id"), operation.ActorID) && observationPayloadString(event.Payload, "publication_operation_id") == operation.AcceptedPublicationOperationID && reviewPayloadInt64(event.Payload["review_epoch_event_id"]) == operation.ReviewEpochEventID {
+		return nil
+	}
+	if found && trusted {
+		return fmt.Errorf("publication accepted-review event %d was superseded by authoritative event %d", operation.AcceptedReviewEventID, event.ID)
 	}
 	return fmt.Errorf("publication accepted-review event %d is missing or incompatible", operation.AcceptedReviewEventID)
 }

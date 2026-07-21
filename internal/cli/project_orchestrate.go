@@ -183,6 +183,8 @@ func OrchestrateReviewCommand(deps *Dependencies, opts OrchestrateReviewOptions)
 	request := protocol.OrchestrationIntentRequest{
 		Scope: scope, Kind: kind, IntentKey: intentKey, ActorID: orchestrateOwnerID(),
 		IssueIDs: opts.IssueIDs, RepoDir: deps.RepoDir, Findings: findings, ReviewPass: reviewPass, RestartWorker: opts.RestartWorker,
+		ReviewPromptDigest: opts.ReviewPromptDigest, ReviewEpochEventID: opts.ReviewEpochEventID,
+		ReviewPromptBindings: opts.ReviewPromptBindings,
 	}
 	result, err := deps.DaemonClient.ApplyOrchestrationIntent(ctx, request)
 	if err != nil {

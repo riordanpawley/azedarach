@@ -862,10 +862,7 @@ func (d *Daemon) taskClosePublicationProvenance(ctx context.Context, projectID, 
 			strings.TrimSpace(operation.ValidationRequestID) == "" {
 			continue
 		}
-		if d.operationRuntime == nil || d.operationRuntime.store == nil {
-			return domain.PublicationOperation{}, domain.ValidationRequest{}, fmt.Errorf("exact publication validation store unavailable")
-		}
-		validation, validationErr := d.operationRuntime.store.ValidationRequest(ctx, projectID, operation.ValidationRequestID)
+		validation, validationErr := publicationStore.ValidationRequest(ctx, projectID, operation.ValidationRequestID)
 		if validationErr != nil {
 			continue
 		}

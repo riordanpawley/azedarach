@@ -22,7 +22,7 @@ func TestRootlessOrchestrateParsersAcceptProjectScope(t *testing.T) {
 		{"watch", func(args []string) error { _, err := ParseOrchestrateWatchArgs(args); return err }},
 		{"complete-check", func(args []string) error { _, err := ParseOrchestrateCompleteCheckArgs(args); return err }},
 		{"review accept", func(args []string) error {
-			_, err := ParseOrchestrateReviewArgs("accept", []string{"--issue", "az-review"})
+			_, err := ParseOrchestrateReviewArgs("accept", []string{"--issue", "az-review", "--review-prompt-digest", strings.Repeat("a", 64), "--review-epoch", "7"})
 			return err
 		}},
 	}
@@ -58,14 +58,15 @@ func TestPrintProjectOrchestrationSnapshotReportsDegradedValidationCapacity(t *t
 }
 
 func TestParseOrchestrateReviewArgsEnforcesDecisionShape(t *testing.T) {
-	accept, err := ParseOrchestrateReviewArgs("accept", []string{"--root", "az-root", "--issue", "az-2", "--issue", "az-1", "--issue", "az-2", "--intent-key", "accept-1", "--json"})
+	promptArgs := []string{"--review-prompt-digest", strings.Repeat("a", 64), "--review-epoch", "7"}
+	accept, err := ParseOrchestrateReviewArgs("accept", []string{"--root", "az-root", "--issue", "az-2", "--issue", "az-1", "--issue", "az-2", "--intent-key", "accept-1", "--json", "--review-prompt-binding", "az-1=7:" + strings.Repeat("a", 64), "--review-prompt-binding", "az-2=8:" + strings.Repeat("a", 64)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if accept.Action != "accept" || accept.RootIssueID != "az-root" || accept.IntentKey != "accept-1" || !accept.JSON || len(accept.IssueIDs) != 2 || accept.IssueIDs[0] != "az-1" {
 		t.Fatalf("accept options = %+v", accept)
 	}
-	returned, err := ParseOrchestrateReviewArgs("return", []string{"--issue", "az-2", "--finding", "fix race", "--finding", "add regression", "--severity", "medium", "--review-pass", `{"verdict":"returned","angle":"concurrency","affected_invariants":["task.publication_queue"],"broader_invalidation":false,"matrix":{"type":"stateful","covered_cells":["recovery"],"skipped_cells":[]}}`, "--restart-worker"})
+	returned, err := ParseOrchestrateReviewArgs("return", append([]string{"--issue", "az-2", "--finding", "fix race", "--finding", "add regression", "--severity", "medium", "--review-pass", `{"verdict":"returned","angle":"concurrency","affected_invariants":["task.publication_queue"],"broader_invalidation":false,"matrix":{"type":"stateful","covered_cells":["recovery"],"skipped_cells":[]}}`, "--restart-worker"}, promptArgs...))
 	if err != nil {
 		t.Fatal(err)
 	}

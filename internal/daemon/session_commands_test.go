@@ -406,10 +406,12 @@ func TestCodexAppServerLaunchUsesStockRemoteTUIAndSupervisedResume(t *testing.T)
 		SessionShell:               "sh",
 	}}
 	command := d.buildSessionLaunchCommand(protocol.DefaultProjectID, "dbc", "az-dbc", true, nil, "start here")
+	if !strings.Contains(command, "initial Codex recovery is daemon-owned after exact hook thread binding") {
+		t.Fatalf("initial Codex supervisor may recover through a fresh thread: %s", command)
+	}
 	for _, want := range []string{
 		"codex " + codexFloopFailOpenConfigExpansion + " app-server daemon start",
 		"codex " + codexFloopFailOpenConfigExpansion + " --remote unix:// --dangerously-bypass-approvals-and-sandbox",
-		"codex " + codexFloopFailOpenConfigExpansion + " resume --remote unix:// --dangerously-bypass-approvals-and-sandbox --last",
 		"codex mcp get --json floop",
 		"codex " + codexFloopFailOpenConfigExpansion + " --remote unix:// --dangerously-bypass-approvals-and-sandbox --",
 		codexFloopFailOpenConfig,
@@ -455,6 +457,25 @@ func TestCodexAppServerLaunchUsesStockRemoteTUIAndSupervisedResume(t *testing.T)
 		if strings.Contains(supervisor, signal) {
 			t.Fatalf("supervisor directly terminates processes instead of preserving native daemon ownership: %s", supervisor)
 		}
+	}
+}
+
+func TestCodexManagedResumeUsesExactDurableThreadWithoutPickerFallback(t *testing.T) {
+	d := &Daemon{cfg: Config{CLITool: "codex", CodexAppServer: true}}
+	command := d.buildCodexResumeCommand(protocol.DefaultProjectID, "root", "019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02", false, nil)
+	if !strings.Contains(command, "resume --remote unix:// '019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02'") {
+		t.Fatalf("exact-thread resume command = %q", command)
+	}
+	if strings.Contains(command, "--last") || strings.Contains(command, "send-keys") || strings.Contains(command, "paste") {
+		t.Fatalf("exact-thread resume permits ambiguous/picker delivery = %q", command)
+	}
+}
+
+func TestCodexManagedResumeWithoutDurableThreadFailsClosed(t *testing.T) {
+	d := &Daemon{cfg: Config{CLITool: "codex", CodexAppServer: true}}
+	command := d.buildCodexResumeCommand(protocol.DefaultProjectID, "root", "", false, nil)
+	if !strings.Contains(command, "false # managed Codex resume refused") || strings.Contains(command, "--last") {
+		t.Fatalf("missing-thread resume command = %q", command)
 	}
 }
 
@@ -2086,6 +2107,7 @@ type sessionStartTmuxRunner struct {
 	captureOutput               string
 	currentCommand              string
 	listPanesCalls              int
+	listPanesErrAfter           int
 	onListPanes                 func(int)
 	onSendKeys                  func(string, string)
 	onRunWithInput              func(context.Context, string, []string) (string, error)
@@ -2158,7 +2180,7 @@ func seedManagedRestartIdentity(t *testing.T, d *Daemon, runner *sessionStartTmu
 	runner.panePIDs[sessionID] = 123
 	if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{
 		ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "1",
-		PanePID: 123, AgentIncarnation: "pre-restart", ObservedAt: time.Now().UTC(),
+		PanePID: 123, AgentIncarnation: "pre-restart", AgentThreadID: "019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02", ObservedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -2179,10 +2201,15 @@ func seedManagedRestartIdentity(t *testing.T, d *Daemon, runner *sessionStartTmu
 				continue
 			}
 			runner.panePIDs[sessionID] = 124
-			return store.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{
+			if err := store.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{
 				ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "1",
-				PanePID: 124, AgentIncarnation: incarnation[1], ObservedAt: time.Now().UTC().Add(time.Second),
-			})
+				PanePID: 124, AgentIncarnation: incarnation[1], AgentThreadID: "019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02", ObservedAt: time.Now().UTC().Add(time.Second),
+			}); err != nil {
+				return err
+			}
+			now := time.Now().UTC().Add(2 * time.Second)
+			_, _, err = store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now, ObservedVersion: now.UnixNano()})
+			return err
 		}
 		return errors.New("restart artifact did not contain an agent incarnation")
 	}
@@ -2190,6 +2217,21 @@ func seedManagedRestartIdentity(t *testing.T, d *Daemon, runner *sessionStartTmu
 
 func acknowledgeManagedAgentOnInitialLaunch(t *testing.T, d *Daemon, runner *sessionStartTmuxRunner, projectID string) {
 	t.Helper()
+	previousListPanes := runner.onListPanes
+	runner.onListPanes = func(calls int) {
+		if previousListPanes != nil {
+			previousListPanes(calls)
+		}
+		for sessionID := range runner.sessions {
+			store := d.sessionRuntimeStateStore(projectID)
+			identity, found, err := store.GetManagedAgentIdentity(context.Background(), d.canonicalProjectID(projectID), sessionID, "agent")
+			if err != nil || !found || identity.AgentIncarnation == "" {
+				continue
+			}
+			now := time.Now().UTC()
+			_, _, _ = store.ApplyPhysicalSessionObservation(context.Background(), daemonstate.PhysicalSessionObservation{ProjectID: d.canonicalProjectID(projectID), SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now, ObservedVersion: now.UnixNano()})
+		}
+	}
 	previous := runner.onNewSession
 	runner.onNewSession = func(sessionID string) {
 		if previous != nil {
@@ -2230,11 +2272,22 @@ func acknowledgeManagedAgentOnInitialLaunch(t *testing.T, d *Daemon, runner *ses
 			}
 			return
 		}
+		agentThreadID := ""
+		if strings.EqualFold(strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool), "codex") {
+			agentThreadID = "019c44b1-2bb7-7ff0-8ca4-ff6dfc833e02"
+		}
 		if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{
 			ProjectID: d.canonicalProjectID(projectID), SessionID: sessionID, LogicalPaneID: "agent",
-			TmuxPaneID: "1", PanePID: panePID, AgentIncarnation: incarnation[1], ObservedAt: observedAt,
+			TmuxPaneID: "1", PanePID: panePID, AgentIncarnation: incarnation[1], AgentThreadID: agentThreadID, ObservedAt: observedAt,
 		}); err != nil {
 			t.Errorf("acknowledge initial managed agent launch: %v", err)
+			return
+		}
+		if _, _, err := store.ApplyPhysicalSessionObservation(context.Background(), daemonstate.PhysicalSessionObservation{
+			ProjectID: d.canonicalProjectID(projectID), SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning,
+			Activity: "idle", ActivitySource: "hooks", UpdatedAt: observedAt, ObservedVersion: observedAt.UnixNano(),
+		}); err != nil {
+			t.Errorf("record initial managed agent hook readiness: %v", err)
 		}
 	}
 }
@@ -2521,6 +2574,9 @@ func (r *sessionStartTmuxRunner) Run(ctx context.Context, args ...string) (strin
 		r.listPanesCalls++
 		if r.onListPanes != nil {
 			r.onListPanes(r.listPanesCalls)
+		}
+		if r.listPanesErrAfter > 0 && r.listPanesCalls >= r.listPanesErrAfter {
+			return "", errors.New("injected list-panes failure")
 		}
 		lines := make([]string, 0, len(r.sessions))
 		for name := range r.sessions {

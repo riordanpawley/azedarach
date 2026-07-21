@@ -5153,11 +5153,11 @@ func prepareSessionLaunchScript(artifactDir, shell, launchPayload string) (strin
 	return path, "exec " + singleQuoteForShell(shell) + " -i " + singleQuoteForShell(filepath.ToSlash(path)), nil
 }
 
-func (d *Daemon) buildCodexResumeCommand(projectID, issueID string, yolo bool, imagePaths []string) string {
+func (d *Daemon) buildCodexResumeCommand(projectID, issueID, threadID string, yolo bool, imagePaths []string) string {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	tool := strings.TrimSpace(projectCfg.CLITool)
 	if projectCfg.CodexAppServer {
-		resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
+		resume := d.codexAppServerResumeCommandForThread(projectID, issueID, threadID, yolo)
 		return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), resume, resume)
 	}
 
@@ -5177,9 +5177,11 @@ func (d *Daemon) buildCodexResumeCommand(projectID, issueID string, yolo bool, i
 	if yolo || projectCfg.DangerouslySkipPermissions {
 		parts = append(parts, "--dangerously-bypass-approvals-and-sandbox")
 	}
-	// Azedarach tracks tmux session IDs, not Codex conversation UUIDs.
-	// Codex's cwd filter makes --last target this worktree's latest session.
-	parts = append(parts, "--last")
+	if threadID = strings.TrimSpace(threadID); threadID != "" {
+		parts = append(parts, singleQuoteForShell(threadID))
+	} else {
+		return "false # managed Codex resume refused: missing exact durable thread id"
+	}
 	command := strings.Join(parts, " ")
 	command = codexFloopFailOpenProbe(tool) + "; " + command
 	return command
@@ -5240,7 +5242,7 @@ func (d *Daemon) buildSessionLaunchArtifactPayload(spec sessionLaunchSpec, promp
 		var command string
 		switch strings.ToLower(tool) {
 		case "codex":
-			command = d.buildCodexResumeCommand(spec.ProjectID, spec.IssueID, spec.Yolo, spec.ImagePaths)
+			command = d.buildCodexResumeCommand(spec.ProjectID, spec.IssueID, spec.AgentThreadID, spec.Yolo, spec.ImagePaths)
 		case "claude":
 			command = d.buildClaudeContinueCommand(spec.ProjectID, spec.IssueID, spec.Yolo, promptHandoff.bootstrapPrompt())
 		case "opencode":
@@ -6143,8 +6145,7 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 		}
 		command := promptAssignment + "; " + strings.Join(parts, " ")
 		if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
-			resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
-			return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, resume)
+			return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, "false # initial Codex recovery is daemon-owned after exact hook thread binding")
 		}
 		if strings.EqualFold(tool, "codex") {
 			return codexFloopFailOpenProbe(tool) + "; " + command
@@ -6154,8 +6155,7 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 
 	command := strings.Join(parts, " ")
 	if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
-		resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
-		return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, resume)
+		return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, "false # initial Codex recovery is daemon-owned after exact hook thread binding")
 	}
 	if strings.EqualFold(tool, "codex") {
 		return codexFloopFailOpenProbe(tool) + "; " + command
@@ -6163,7 +6163,7 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 	return command
 }
 
-func (d *Daemon) codexAppServerResumeCommand(projectID, issueID string, yolo bool) string {
+func (d *Daemon) codexAppServerResumeCommandForThread(projectID, issueID, threadID string, yolo bool) string {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	parts := []string{
 		fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)),
@@ -6176,7 +6176,11 @@ func (d *Daemon) codexAppServerResumeCommand(projectID, issueID string, yolo boo
 	if yolo || projectCfg.DangerouslySkipPermissions {
 		parts = append(parts, "--dangerously-bypass-approvals-and-sandbox")
 	}
-	parts = append(parts, "--last")
+	if threadID = strings.TrimSpace(threadID); threadID != "" {
+		parts = append(parts, singleQuoteForShell(threadID))
+	} else {
+		return "false # managed Codex resume refused: missing exact durable thread id"
+	}
 	return strings.Join(parts, " ")
 }
 

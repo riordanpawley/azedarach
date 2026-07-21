@@ -80,6 +80,7 @@ test-boundary:
 test-build-contract:
     ./scripts/test-build-artifact-isolation.sh
     ./scripts/test-go-validation-admission.sh
+    ./scripts/test-validation-artifacts.sh
 
 test-jaeger-contract:
     ./scripts/test-jaeger-local-termination.sh

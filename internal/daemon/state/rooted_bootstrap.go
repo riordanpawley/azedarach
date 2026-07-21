@@ -15,12 +15,16 @@ import (
 // RootedBootstrapAcknowledgement is the durable accepted prompt-delivery
 // projection for one rooted orchestration scope and live tmux marker.
 type RootedBootstrapAcknowledgement struct {
-	Identity       domain.OrchestratorIdentity
-	SessionID      string
-	PromptHash     string
-	RuntimeNonce   string
-	AcknowledgedAt time.Time
-	UpdatedAt      time.Time
+	Identity         domain.OrchestratorIdentity
+	SessionID        string
+	PromptHash       string
+	RuntimeNonce     string
+	TmuxPaneID       string
+	PanePID          int
+	AgentIncarnation string
+	AgentThreadID    string
+	AcknowledgedAt   time.Time
+	UpdatedAt        time.Time
 }
 
 type RootedBootstrapAcknowledgementStore interface {
@@ -113,7 +117,7 @@ func (s *RuntimeStateStore) ListRootedBootstrapAcknowledgements(ctx context.Cont
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT root_issue_id,session_id,prompt_hash,runtime_nonce,acknowledged_at,updated_at FROM `+rootedBootstrapAckTable+` WHERE project_id=? ORDER BY root_issue_id`, projectID)
+	rows, err := db.QueryContext(ctx, `SELECT root_issue_id,session_id,prompt_hash,runtime_nonce,COALESCE(tmux_pane_id,''),COALESCE(pane_pid,0),COALESCE(agent_incarnation,''),COALESCE(agent_thread_id,''),acknowledged_at,updated_at FROM `+rootedBootstrapAckTable+` WHERE project_id=? ORDER BY root_issue_id`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list rooted bootstrap acknowledgements: %w", err)
 	}
@@ -121,7 +125,9 @@ func (s *RuntimeStateStore) ListRootedBootstrapAcknowledgements(ctx context.Cont
 	var out []RootedBootstrapAcknowledgement
 	for rows.Next() {
 		var rootID, sessionID, promptHash, runtimeNonce, acknowledgedAt, updatedAt string
-		if err := rows.Scan(&rootID, &sessionID, &promptHash, &runtimeNonce, &acknowledgedAt, &updatedAt); err != nil {
+		var tmuxPaneID, agentIncarnation, agentThreadID string
+		var panePID int
+		if err := rows.Scan(&rootID, &sessionID, &promptHash, &runtimeNonce, &tmuxPaneID, &panePID, &agentIncarnation, &agentThreadID, &acknowledgedAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan rooted bootstrap acknowledgement: %w", err)
 		}
 		identity, err := domain.NewOrchestratorIdentity(projectID, domain.OrchestrationScope{Kind: domain.OrchestrationScopeRooted, RootIssueID: naming.IssueID(rootID)})
@@ -136,7 +142,7 @@ func (s *RuntimeStateStore) ListRootedBootstrapAcknowledgements(ctx context.Cont
 		if err != nil {
 			return nil, fmt.Errorf("parse rooted bootstrap updated_at: %w", err)
 		}
-		out = append(out, RootedBootstrapAcknowledgement{Identity: identity, SessionID: sessionID, PromptHash: promptHash, RuntimeNonce: runtimeNonce, AcknowledgedAt: ackTime, UpdatedAt: updateTime})
+		out = append(out, RootedBootstrapAcknowledgement{Identity: identity, SessionID: sessionID, PromptHash: promptHash, RuntimeNonce: runtimeNonce, TmuxPaneID: tmuxPaneID, PanePID: panePID, AgentIncarnation: agentIncarnation, AgentThreadID: agentThreadID, AcknowledgedAt: ackTime, UpdatedAt: updateTime})
 	}
 	return out, rows.Err()
 }
@@ -151,12 +157,19 @@ func (s *RuntimeStateStore) UpsertRootedBootstrapAcknowledgement(ctx context.Con
 		if err != nil {
 			return err
 		}
-		_, err = db.ExecContext(writeCtx, `INSERT INTO `+rootedBootstrapAckTable+` (project_id,root_issue_id,session_id,prompt_hash,runtime_nonce,acknowledged_at,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(project_id,root_issue_id) DO UPDATE SET session_id=excluded.session_id,prompt_hash=excluded.prompt_hash,runtime_nonce=excluded.runtime_nonce,acknowledged_at=excluded.acknowledged_at,updated_at=excluded.updated_at`, acknowledgement.Identity.ProjectID, acknowledgement.Identity.Scope.RootIssueID, acknowledgement.SessionID, acknowledgement.PromptHash, acknowledgement.RuntimeNonce, acknowledgement.AcknowledgedAt.Format(time.RFC3339Nano), acknowledgement.UpdatedAt.Format(time.RFC3339Nano))
+		_, err = db.ExecContext(writeCtx, `INSERT INTO `+rootedBootstrapAckTable+` (project_id,root_issue_id,session_id,prompt_hash,runtime_nonce,tmux_pane_id,pane_pid,agent_incarnation,agent_thread_id,acknowledged_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,root_issue_id) DO UPDATE SET session_id=excluded.session_id,prompt_hash=excluded.prompt_hash,runtime_nonce=excluded.runtime_nonce,tmux_pane_id=excluded.tmux_pane_id,pane_pid=excluded.pane_pid,agent_incarnation=excluded.agent_incarnation,agent_thread_id=excluded.agent_thread_id,acknowledged_at=excluded.acknowledged_at,updated_at=excluded.updated_at`, acknowledgement.Identity.ProjectID, acknowledgement.Identity.Scope.RootIssueID, acknowledgement.SessionID, acknowledgement.PromptHash, acknowledgement.RuntimeNonce, nullableTrimmed(acknowledgement.TmuxPaneID), nullablePositiveInt(acknowledgement.PanePID), nullableTrimmed(acknowledgement.AgentIncarnation), nullableTrimmed(acknowledgement.AgentThreadID), acknowledgement.AcknowledgedAt.Format(time.RFC3339Nano), acknowledgement.UpdatedAt.Format(time.RFC3339Nano))
 		if err != nil {
 			return fmt.Errorf("upsert rooted bootstrap acknowledgement: %w", err)
 		}
 		return nil
 	})
+}
+
+func nullablePositiveInt(value int) any {
+	if value > 0 {
+		return value
+	}
+	return nil
 }
 
 func (s *RuntimeStateStore) DeleteRootedBootstrapAcknowledgement(ctx context.Context, identity domain.OrchestratorIdentity, sessionID string) error {

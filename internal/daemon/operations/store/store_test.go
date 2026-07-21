@@ -17,6 +17,21 @@ import (
 	"github.com/riordanpawley/azedarach/internal/testisolation"
 )
 
+func TestNormalizeSQLiteDefinitionIgnoresSchemaFormattingHistory(t *testing.T) {
+	canonical := "CREATE TABLE publication (id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT '', CHECK (state IN ('queued', 'merged')));"
+	historical := "CREATE TABLE publication( id TEXT PRIMARY KEY ,state TEXT NOT NULL DEFAULT '' ,CHECK(state IN('queued','merged')) )"
+
+	if got, want := normalizeSQLiteDefinition(historical), normalizeSQLiteDefinition(canonical); got != want {
+		t.Fatalf("normalized historical definition = %q, want %q", got, want)
+	}
+	if got := normalizeSQLiteDefinition("CREATE TABLE publication (id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT '', CHECK (state IN ('queued', 'failed')))"); got == normalizeSQLiteDefinition(canonical) {
+		t.Fatal("normalization accepted a semantic check-constraint change")
+	}
+	if got := normalizeSQLiteDefinition("CREATE TABLE publication (id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT '', CHECK (state IN ('QUEUED', 'merged')))"); got == normalizeSQLiteDefinition(canonical) {
+		t.Fatal("normalization accepted a case-sensitive string literal change")
+	}
+}
+
 func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 	rawPaths := strings.TrimSpace(os.Getenv("AZEDARACH_PROJECT_DB_CLONES"))
 	if rawPaths == "" {

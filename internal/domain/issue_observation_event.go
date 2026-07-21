@@ -33,6 +33,7 @@ const (
 	IssueEventValidationFailed                    IssueObservationEventType = "validation.failed"
 	IssueEventEvidenceSubmitted                   IssueObservationEventType = "evidence.submitted"
 	IssueEventReviewCompleted                     IssueObservationEventType = "review.completed"
+	IssueEventReviewPromptBound                   IssueObservationEventType = "review.prompt_bound"
 	IssueEventReviewCloseFailed                   IssueObservationEventType = "review.close_failed"
 	IssueEventTaskIntegrationCompleted            IssueObservationEventType = "task.integration_completed"
 	IssueEventTaskIntegrationHistoricalAuthorized IssueObservationEventType = "task.integration_historical_authorized"
@@ -118,6 +119,7 @@ func IssueObservationEventTypeRequiresAuthority(eventType IssueObservationEventT
 		IssueEventIssueUnarchived,
 		IssueEventIssueDeleted,
 		IssueEventReviewCompleted,
+		IssueEventReviewPromptBound,
 		IssueEventReviewCloseFailed,
 		IssueEventTaskIntegrationCompleted,
 		IssueEventTaskIntegrationHistoricalAuthorized,

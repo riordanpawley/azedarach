@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,16 +80,19 @@ type OrchestrateCompleteCheckOptions struct {
 }
 
 type OrchestrateReviewOptions struct {
-	Project        string
-	RootIssueID    string
-	Action         string
-	IntentKey      string
-	IssueIDs       []string
-	Severity       string
-	Findings       []string
-	ReviewPassJSON string
-	RestartWorker  bool
-	JSON           bool
+	Project              string
+	RootIssueID          string
+	Action               string
+	IntentKey            string
+	IssueIDs             []string
+	Severity             string
+	Findings             []string
+	ReviewPassJSON       string
+	ReviewPromptDigest   string
+	ReviewEpochEventID   int64
+	ReviewPromptBindings map[string]protocol.OrchestrationReviewPromptBinding
+	RestartWorker        bool
+	JSON                 bool
 }
 
 type OrchestratePromptOptions struct {
@@ -730,6 +734,24 @@ func ParseOrchestrateReviewArgs(action string, args []string) (OrchestrateReview
 		return nil
 	})
 	fs.StringVar(&opts.ReviewPassJSON, "review-pass", "", "structured JSON review checkpoint facts")
+	fs.StringVar(&opts.ReviewPromptDigest, "review-prompt-digest", "", "SHA-256 digest from the delivered review prompt")
+	fs.Int64Var(&opts.ReviewEpochEventID, "review-epoch", 0, "review epoch event ID from the delivered review prompt")
+	fs.Func("review-prompt-binding", "issue=epoch:digest from the delivered prompt (repeatable for multi-issue accept)", func(value string) error {
+		issueAndBinding := strings.SplitN(strings.TrimSpace(value), "=", 2)
+		if len(issueAndBinding) != 2 {
+			return fmt.Errorf("review prompt binding must be issue=epoch:digest")
+		}
+		epochAndDigest := strings.SplitN(issueAndBinding[1], ":", 2)
+		epoch, err := strconv.ParseInt(epochAndDigest[0], 10, 64)
+		if err != nil || len(epochAndDigest) != 2 || epoch <= 0 || len(strings.TrimSpace(epochAndDigest[1])) != 64 {
+			return fmt.Errorf("review prompt binding must contain a positive epoch and SHA-256 digest")
+		}
+		if opts.ReviewPromptBindings == nil {
+			opts.ReviewPromptBindings = make(map[string]protocol.OrchestrationReviewPromptBinding)
+		}
+		opts.ReviewPromptBindings[strings.TrimSpace(issueAndBinding[0])] = protocol.OrchestrationReviewPromptBinding{Digest: strings.ToLower(strings.TrimSpace(epochAndDigest[1])), ReviewEpochEventID: epoch}
+		return nil
+	})
 	fs.BoolVar(&opts.RestartWorker, "restart-worker", false, "restart an inactive owned worker after returning findings")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
 	if err := fs.Parse(args); err != nil {
@@ -741,10 +763,24 @@ func ParseOrchestrateReviewArgs(action string, args []string) (OrchestrateReview
 	opts.Project = normalizeIssueProject(opts.Project)
 	opts.RootIssueID = strings.TrimSpace(opts.RootIssueID)
 	opts.IntentKey = strings.TrimSpace(opts.IntentKey)
+	opts.ReviewPromptDigest = strings.ToLower(strings.TrimSpace(opts.ReviewPromptDigest))
 	opts.IssueIDs = dedupeSortedStrings(opts.IssueIDs)
 	opts.Severity = strings.ToLower(strings.TrimSpace(opts.Severity))
 	if len(opts.IssueIDs) == 0 {
 		return OrchestrateReviewOptions{}, fmt.Errorf("at least one --issue is required")
+	}
+	if len(opts.IssueIDs) == 1 && len(opts.ReviewPromptBindings) == 0 && (len(opts.ReviewPromptDigest) != 64 || opts.ReviewEpochEventID <= 0) {
+		return OrchestrateReviewOptions{}, fmt.Errorf("review decision requires --review-prompt-digest and positive --review-epoch from the delivered prompt")
+	}
+	if len(opts.IssueIDs) > 1 && len(opts.ReviewPromptBindings) != len(opts.IssueIDs) {
+		return OrchestrateReviewOptions{}, fmt.Errorf("multi-issue review decision requires one --review-prompt-binding per issue")
+	}
+	if len(opts.ReviewPromptBindings) > 0 {
+		for _, issueID := range opts.IssueIDs {
+			if _, ok := opts.ReviewPromptBindings[issueID]; !ok {
+				return OrchestrateReviewOptions{}, fmt.Errorf("review prompt binding is missing for issue %s", issueID)
+			}
+		}
 	}
 	if opts.Action == "accept" {
 		if len(opts.Findings) > 0 || opts.RestartWorker {

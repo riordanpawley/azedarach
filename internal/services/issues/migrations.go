@@ -45,6 +45,7 @@ const orchestrationStartIntentsMigrationID = "0058_orchestration_start_intents"
 const orchestrationStartIntentsMigrationChecksum = "68b5ca7149782ade0701bd684e23379145b312805e022ad33e5f267c29cc3a00"
 const taskCreationIntentsMigrationID = "0059_task_creation_intents"
 const taskCreationIntentsMigrationChecksum = "cf9f4a7b9968f120d594183ddfe46abdd73d9a7a9823dd8a2febf2fdfc41bea2"
+const managedAgentThreadIdentityMigrationID = "0060_managed_agent_thread_identity"
 
 const mailboxObservationReplayRepairMaxRows = 50000
 const legacyAttachmentBlobForwardMigrationID = "0056_legacy_attachment_blob_forward"
@@ -115,6 +116,7 @@ var orderedMigrations = []migration{
 	{id: agentInputDeliveryMigrationID, path: "migrations/0057_agent_input_delivery.sql"},
 	{id: orchestrationStartIntentsMigrationID, path: "migrations/0058_orchestration_start_intents.sql"},
 	{id: taskCreationIntentsMigrationID, path: "migrations/0059_task_creation_intents.sql"},
+	{id: managedAgentThreadIdentityMigrationID, path: "migrations/0060_managed_agent_thread_identity.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -183,6 +185,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: agentInputDeliveryMigrationID, Path: "migrations/0057_agent_input_delivery.sql", Checksum: agentInputDeliveryMigrationChecksum},
 	{ID: orchestrationStartIntentsMigrationID, Path: "migrations/0058_orchestration_start_intents.sql", Checksum: orchestrationStartIntentsMigrationChecksum},
 	{ID: taskCreationIntentsMigrationID, Path: "migrations/0059_task_creation_intents.sql", Checksum: taskCreationIntentsMigrationChecksum},
+	{ID: managedAgentThreadIdentityMigrationID, Path: "migrations/0060_managed_agent_thread_identity.sql", Checksum: "63b0aa130fd8694e8828842c2f3507165d6961271b4db0491925ef3aaa92fd1d"},
 }
 
 func validateMigrationRegistry() error {
@@ -649,6 +652,12 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		}
 
 		if shouldApply {
+			if m.id == managedAgentThreadIdentityMigrationID {
+				if err := c.applyManagedAgentThreadIdentityMigration(ctx, db, m.id); err != nil {
+					return err
+				}
+				continue
+			}
 			if m.id == legacyAttachmentBlobForwardMigrationID {
 				if err := c.applyLegacyAttachmentBlobForwardMigration(ctx, db, m.id); err != nil {
 					return err
@@ -769,6 +778,15 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	}
 	if agentInputApplied {
 		if err := validateAgentInputDeliverySchema(ctx, db); err != nil {
+			return err
+		}
+	}
+	managedThreadIdentityApplied, err := isMigrationApplied(ctx, db, managedAgentThreadIdentityMigrationID)
+	if err != nil {
+		return fmt.Errorf("check managed agent thread identity migration: %w", err)
+	}
+	if managedThreadIdentityApplied {
+		if err := validateManagedAgentThreadIdentitySchema(ctx, db); err != nil {
 			return err
 		}
 	}
@@ -1702,6 +1720,21 @@ func validateManagedAgentIdentitySchema(ctx context.Context, db *sql.DB) error {
 }
 
 func validateAgentInputDeliverySchema(ctx context.Context, db sqlIssueQueryer) error {
+	var applied int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE id=?`, managedAgentThreadIdentityMigrationID).Scan(&applied); err != nil {
+		return fmt.Errorf("inspect managed thread identity migration: %w", err)
+	}
+	contract, err := cachedAgentInputDeliverySchemaContract()
+	if applied == 1 {
+		contract, err = cachedAgentInputDeliveryLatestSchemaContract()
+	}
+	if err != nil {
+		return fmt.Errorf("derive agent input delivery schema from pinned artifact: %w", err)
+	}
+	return validateAgentInputDeliverySchemaContract(ctx, db, contract)
+}
+
+func validateAgentInputDeliveryBaseSchema(ctx context.Context, db sqlIssueQueryer) error {
 	contract, err := cachedAgentInputDeliverySchemaContract()
 	if err != nil {
 		return fmt.Errorf("derive agent input delivery schema from pinned artifact: %w", err)
@@ -1747,6 +1780,7 @@ type agentInputDeliverySchemaContract struct {
 }
 
 var cachedAgentInputDeliverySchemaContract = sync.OnceValues(deriveAgentInputDeliverySchemaContract)
+var cachedAgentInputDeliveryLatestSchemaContract = sync.OnceValues(deriveAgentInputDeliveryLatestSchemaContract)
 
 func deriveAgentInputDeliverySchemaContract() (*agentInputDeliverySchemaContract, error) {
 	if err := validateMigrationRegistry(); err != nil {
@@ -1765,6 +1799,27 @@ func deriveAgentInputDeliverySchemaContract() (*agentInputDeliverySchemaContract
 	}
 	if _, err := db.ExecContext(ctx, baseSQL); err != nil {
 		return nil, fmt.Errorf("execute pinned migration 0053 reference artifact: %w", err)
+	}
+	return inspectAgentInputDeliverySchemaContract(ctx, db)
+}
+
+func deriveAgentInputDeliveryLatestSchemaContract() (*agentInputDeliverySchemaContract, error) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return nil, fmt.Errorf("open latest reference database: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+	ctx := context.Background()
+	baseSQL, err := loadRegisteredMigrationSQL(agentInputDeliveryMigrationID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := db.ExecContext(ctx, baseSQL); err != nil {
+		return nil, fmt.Errorf("execute pinned agent input reference artifact: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE agent_input_delivery_intents ADD COLUMN agent_thread_id TEXT CHECK (agent_thread_id IS NULL OR trim(agent_thread_id) <> '')`); err != nil {
+		return nil, fmt.Errorf("execute pinned managed thread identity expansion: %w", err)
 	}
 	return inspectAgentInputDeliverySchemaContract(ctx, db)
 }
@@ -2296,6 +2351,59 @@ func applyOrchestratorLifecycleClockMigration(ctx context.Context, db *sql.DB, i
 	return nil
 }
 
+func validateManagedAgentThreadIdentitySchema(ctx context.Context, q sqlIssueQueryer) error {
+	columns := []struct {
+		table, name, columnType, check string
+	}{
+		{"daemon_managed_agent_incarnations", "agent_thread_id", "TEXT", "check (agent_thread_id is null or trim(agent_thread_id) <> '')"},
+		{"agent_input_delivery_intents", "agent_thread_id", "TEXT", "check (agent_thread_id is null or trim(agent_thread_id) <> '')"},
+		{"daemon_rooted_bootstrap_acknowledgements", "tmux_pane_id", "TEXT", ""},
+		{"daemon_rooted_bootstrap_acknowledgements", "pane_pid", "INTEGER", ""},
+		{"daemon_rooted_bootstrap_acknowledgements", "agent_incarnation", "TEXT", ""},
+		{"daemon_rooted_bootstrap_acknowledgements", "agent_thread_id", "TEXT", ""},
+	}
+	for _, want := range columns {
+		rows, err := q.QueryContext(ctx, `PRAGMA table_info(`+want.table+`)`)
+		if err != nil {
+			return fmt.Errorf("inspect managed thread identity column %s.%s: %w", want.table, want.name, err)
+		}
+		found := false
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, columnType string
+			var defaultSQL sql.NullString
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultSQL, &primaryKey); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan managed thread identity column %s.%s: %w", want.table, want.name, err)
+			}
+			if name == want.name {
+				found = true
+				if !strings.EqualFold(strings.TrimSpace(columnType), want.columnType) || notNull != 0 || defaultSQL.Valid || primaryKey != 0 {
+					rows.Close()
+					return fmt.Errorf("managed thread identity column %s.%s has wrong definition", want.table, want.name)
+				}
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close managed thread identity column inspection %s.%s: %w", want.table, want.name, err)
+		}
+		if !found {
+			return fmt.Errorf("managed thread identity column %s.%s is missing", want.table, want.name)
+		}
+		if want.check != "" {
+			var tableSQL string
+			if err := q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, want.table).Scan(&tableSQL); err != nil {
+				return fmt.Errorf("inspect managed thread identity table %s: %w", want.table, err)
+			}
+			normalized := strings.ToLower(strings.Join(strings.Fields(tableSQL), " "))
+			if !strings.Contains(normalized, want.check) {
+				return fmt.Errorf("managed thread identity column %s.%s has wrong definition", want.table, want.name)
+			}
+		}
+	}
+	return nil
+}
+
 func applyContextualLearningActivationMigration(ctx context.Context, db *sql.DB, id string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -2517,7 +2625,45 @@ func (c *Client) applyAgentInputDeliveryMigration(ctx context.Context, db *sql.D
 			return fmt.Errorf("migration %s rolled back: %w", id, err)
 		}
 	}
-	if err := validateAgentInputDeliverySchema(ctx, tx); err != nil {
+	if err := validateAgentInputDeliveryBaseSchema(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s: %w", id, err)
+	}
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+func (c *Client) applyManagedAgentThreadIdentityMigration(ctx context.Context, db *sql.DB, id string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer tx.Rollback()
+	columns := []struct{ table, name, definition string }{
+		{"daemon_managed_agent_incarnations", "agent_thread_id", "TEXT CHECK (agent_thread_id IS NULL OR trim(agent_thread_id) <> '')"},
+		{"agent_input_delivery_intents", "agent_thread_id", "TEXT CHECK (agent_thread_id IS NULL OR trim(agent_thread_id) <> '')"},
+		{"daemon_rooted_bootstrap_acknowledgements", "tmux_pane_id", "TEXT"},
+		{"daemon_rooted_bootstrap_acknowledgements", "pane_pid", "INTEGER"},
+		{"daemon_rooted_bootstrap_acknowledgements", "agent_incarnation", "TEXT"},
+		{"daemon_rooted_bootstrap_acknowledgements", "agent_thread_id", "TEXT"},
+	}
+	for _, column := range columns {
+		exists, err := columnExistsDB(ctx, tx, column.table, column.name)
+		if err != nil {
+			return fmt.Errorf("inspect migration %s column %s.%s: %w", id, column.table, column.name, err)
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE `+column.table+` ADD COLUMN `+column.name+` `+column.definition); err != nil {
+			return fmt.Errorf("apply migration %s column %s.%s: %w", id, column.table, column.name, err)
+		}
+	}
+	if err := validateManagedAgentThreadIdentitySchema(ctx, tx); err != nil {
 		return fmt.Errorf("validate migration %s: %w", id, err)
 	}
 	if err := recordAppliedMigration(ctx, tx, id); err != nil {

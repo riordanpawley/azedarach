@@ -658,14 +658,11 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	publication := domain.PublicationOperation{
 		OperationID: "publication-close-exact", ProjectID: projectID, IssueID: issueID, IntentKey: "review-accept",
 		RequestFingerprint: "fingerprint", ActorID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator,
-		ReviewEpochEventID: 1, AcceptedReviewEventID: 2, PatchEvidenceID: "publication-close-exact", TargetID: "base", TargetBranch: "main",
+		ReviewEpochEventID: 1, AcceptedReviewEventID: 2, PatchEvidenceID: "publication-close-exact", AcceptedPublicationOperationID: "publication-close-exact", TargetID: "base", TargetBranch: "main",
 		SourceRevision: sourceOID, BaseRevision: baseOID, PolicyVersion: "portable-v1", EnvironmentFingerprint: "node-consumer",
 		ValidationCommand: "npm run verify-publication", State: domain.PublicationOperationQueued, CreatedAt: started,
 	}
-	mergedA := publication
-	mergedA.OperationID = "publication-merged-a"
-	mergedA.PatchEvidenceID = mergedA.OperationID
-	mergedA.IntentKey = "review-accept-a"
+	mergedA := refreshedPublicationOperationAttempt(publication, publication.BaseRevision, publication.ValidationCommand, publication.PolicyVersion, publication.EnvironmentFingerprint)
 	storedMergedA, _, err := runtime.store.EnqueuePublication(ctx, mergedA, "publication-merged-a")
 	require.NoError(t, err)
 	claimedMergedA, acquired, err := runtime.store.ClaimPublicationOperation(ctx, storedMergedA.OperationID, operationstore.PublicationOperationClaim{
@@ -698,6 +695,12 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 		update.ReusedEvidenceID = push.AuthoritativeRequestID
 	})
 	require.NoError(t, err)
+	foreignRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir()})
+	t.Cleanup(func() { _ = foreignRuntime.Close() })
+	d.operationRuntime = foreignRuntime
+	t.Cleanup(d.closePublicationStores)
+	_, foreignValidationErr := foreignRuntime.store.ValidationRequest(ctx, projectID, push.RequestID)
+	require.Error(t, foreignValidationErr, "the daemon-canonical store must not contain routed project validation evidence")
 	_, _, err = d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, "portable-v1", "npm run verify-publication", "node-consumer")
 	require.Error(t, err, "an unbound close must not adopt another in-flight publication")
 	for name, binding := range map[string]taskClosePublicationBinding{
@@ -765,6 +768,7 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	assert.Equal(t, domain.ValidationExecutionReused, resolvedValidation.Execution)
 	_, _, fallbackErr := d.taskClosePublicationProvenance(ctx, "unrouted-project", issueID, integration, "portable-v1", "npm run verify-publication", "node-consumer")
 	require.Error(t, fallbackErr, "unrouted project fallback must not authorize publication provenance")
+	d.operationRuntime = runtime
 	// Model the durable state after integration receipt succeeds but publication
 	// identity/evidence persistence fails. Concurrent retries must append one
 	// corrected binding and one merge-result evidence record without reapplying.

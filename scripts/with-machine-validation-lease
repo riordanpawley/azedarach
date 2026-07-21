@@ -1,8 +1,9 @@
 #!/usr/bin/env perl
 use strict;
 use warnings;
-use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
-use File::Basename qw(basename);
+use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC O_RDONLY O_WRONLY O_CREAT O_EXCL O_NOFOLLOW :mode);
+use File::Basename qw(basename dirname);
+use File::Spec;
 use File::Temp qw(tempfile);
 use File::Path qw(remove_tree);
 use IO::Select;
@@ -197,6 +198,9 @@ $request_id =~ s/[^A-Za-z0-9_.-]/_/g;
 my $git_common_dir = capture($git, 'rev-parse', '--path-format=absolute', '--git-common-dir');
 $git_common_dir =~ s/\s+\z//;
 die "resolve Git common directory for validation admission\n" unless $git_common_dir;
+my $candidate_root = capture($git, 'rev-parse', '--show-toplevel');
+$candidate_root =~ s/\s+\z//;
+my $project_root = dirname($git_common_dir);
 my $production_admission = "$git_common_dir/azedarach-production-admission";
 my $production_owner = "$production_admission/production";
 my $production_epoch_file = "$production_admission/production-epoch";
@@ -275,6 +279,13 @@ if ($execution eq 'reused' || $execution eq 'joined' || $execution eq 'skipped')
     exit 1;
 }
 die "validation request became $acquired->{state} before execution\n" unless $acquired->{state} eq 'active';
+my $publication_evidence_path = delete($ENV{AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE}) || '';
+my $candidate_issue_id = delete($ENV{AZEDARACH_CANDIDATE_ISSUE_ID}) || ($acquired->{issue_id} || '');
+my $failure_publisher = delete($ENV{AZEDARACH_VALIDATION_FAILURE_PUBLISHER}) || '';
+my $failure_project_root = delete($ENV{AZEDARACH_VALIDATION_FAILURE_PROJECT_ROOT}) || '';
+my $failure_candidate_root = delete($ENV{AZEDARACH_VALIDATION_FAILURE_CANDIDATE_ROOT}) || '';
+my $failure_control_root = delete($ENV{AZEDARACH_VALIDATION_FAILURE_CONTROL_ROOT}) || '';
+my $failure_gate_output = delete($ENV{AZEDARACH_VALIDATION_FAILURE_GATE_OUTPUT}) || '';
 $ENV{AZEDARACH_VALIDATION_REQUEST_ID} = $request_id;
 $ENV{AZEDARACH_VALIDATION_CLASS} = $class;
 $ENV{AZEDARACH_VALIDATION_PROFILE} = $profile;
@@ -284,10 +295,13 @@ $ENV{AZEDARACH_VALIDATION_PURPOSE} = $purpose;
 $ENV{AZEDARACH_VALIDATION_EXECUTION} = 'executed';
 $ENV{AZEDARACH_VALIDATION_AUTHORITATIVE_REQUEST_ID} = $request_id;
 $ENV{AZEDARACH_VALIDATION_OVERRIDE} = $override;
-my ($evidence_fh, $evidence_file) = tempfile('azedarach-validation-evidence-XXXXXX', TMPDIR => 1, UNLINK => 0);
+my %evidence_temp_location = $failure_control_root ne '' ? (DIR => $failure_control_root) : (TMPDIR => 1);
+my ($evidence_fh, $evidence_file) = tempfile('azedarach-validation-evidence-XXXXXX', %evidence_temp_location, UNLINK => 0);
+my @evidence_identity = stat($evidence_fh);
 close $evidence_fh;
 $ENV{AZEDARACH_VALIDATION_EVIDENCE_FILE} = $evidence_file;
 my ($fatal_evidence_fh, $fatal_evidence_file) = tempfile('azedarach-validation-fatal-XXXXXX', TMPDIR => 1, UNLINK => 0);
+my @fatal_evidence_identity = stat($fatal_evidence_fh);
 close $fatal_evidence_fh;
 $ENV{AZEDARACH_VALIDATION_FATAL_EVIDENCE_FILE} = $fatal_evidence_file;
 my ($runtime_fh, $candidate_runtime) = tempfile('azedarach-validation-runtime-XXXXXX', TMPDIR => 1, UNLINK => 1);
@@ -361,11 +375,24 @@ my $supervisor = fork();
 die "fork validation command supervisor: $!\n" unless defined $supervisor;
 if ($supervisor == 0) {
     close $broker_parent;
+    pipe(my $status_reader, my $status_writer) or die "create validation payload status pipe: $!\n";
     my $parent = $wrapper_pid;
     my $payload = fork();
     die "fork validation command: $!\n" unless defined $payload;
     if ($payload == 0) {
+        close $status_reader;
         setpgid(0, 0);
+        my $command = fork();
+        die "fork validation command worker: $!\n" unless defined $command;
+        if ($command != 0) {
+            my $waited = waitpid($command, 0);
+            my $command_status = $waited == $command ? wait_status_code($?) : 127;
+            print {$status_writer} "$command_status\n" or die "write validation payload status: $!\n";
+            close $status_writer or die "close validation payload status: $!\n";
+            # Remain as the unreaped process-group identity anchor until the
+            # supervisor has terminated the complete group.
+            sleep 3600 while 1;
+        }
         delete $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN};
         # Control and cleanup client routing belongs to the wrapper supervisors,
         # never to the payload. Route candidate runtime assets through the
@@ -385,28 +412,59 @@ if ($supervisor == 0) {
         $ENV{AZEDARACH_VALIDATION_NESTED_FD} = fileno($broker_child);
         exec @ARGV or die "exec validation command $ARGV[0]: $!\n";
     }
+    close $status_writer;
     close $broker_child;
     eval { setpgid($payload, $payload) };
-    my $forward = sub { my ($signal) = @_; kill $signal, -$payload if $payload; };
+    my $payload_interrupted = 0;
+    my %payload_signal_exit = (HUP => 129, INT => 130, TERM => 143);
+    my $forward = sub {
+        my ($signal) = @_;
+        $payload_interrupted = $payload_signal_exit{$signal};
+        kill $signal, -$payload if $payload;
+    };
     local $SIG{TERM} = sub { $forward->('TERM') };
     local $SIG{INT} = sub { $forward->('INT') };
     local $SIG{HUP} = sub { $forward->('HUP') };
+    my $payload_exit_code;
+    my $status_selector = IO::Select->new($status_reader);
+    my $status_buffer = '';
     while (1) {
-        my $waited = waitpid($payload, WNOHANG);
-        exit wait_status_code($?) if $waited == $payload;
-        if (getppid() != $parent) {
-            kill 'TERM', -$payload;
-            for (1..20) {
-                $waited = waitpid($payload, WNOHANG);
-                exit wait_status_code($?) if $waited == $payload;
-                sleep 0.1;
+        for my $ready ($status_selector->can_read(0.1)) {
+            my $bytes = sysread($ready, my $chunk, 64);
+            if (defined($bytes) && $bytes > 0) {
+                $status_buffer .= $chunk;
+                if ($status_buffer =~ /^(\d+)\n/) {
+                    $payload_exit_code = 0 + $1;
+                    last;
+                }
+            } elsif ($payload_interrupted) {
+                $payload_exit_code = $payload_interrupted;
+                last;
             }
-            kill 'KILL', -$payload;
-            waitpid($payload, 0);
-            exit 137;
         }
-        sleep 0.1;
+        last if defined $payload_exit_code;
+        if (getppid() != $parent) {
+            $payload_exit_code = 143;
+            last;
+        }
     }
+    close $status_reader;
+    # The anchor remains an unreaped child throughout TERM/KILL delivery, so
+    # its PID and therefore the payload PGID cannot be reused by an unrelated
+    # process group before cleanup completes.
+    if (my $ready = delete($ENV{AZEDARACH_VALIDATION_TEST_GROUP_ANCHOR_READY_FILE})) {
+        sysopen(my $ready_fh, $ready, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+            or die "create payload group anchor test marker: $!\n";
+        print {$ready_fh} "$payload\n" or die "write payload group anchor test marker: $!\n";
+        close $ready_fh or die "close payload group anchor test marker: $!\n";
+        my $release = delete($ENV{AZEDARACH_VALIDATION_TEST_GROUP_ANCHOR_RELEASE_FILE}) || '';
+        sleep 0.01 until $release ne '' && -e $release;
+    }
+    kill 'TERM', -$payload;
+    sleep 0.1;
+    kill 'KILL', -$payload;
+    waitpid($payload, 0);
+    exit $payload_exit_code;
 }
 close $broker_child;
 
@@ -477,7 +535,9 @@ if ($production_install_overlapped && $exit_code == 0) {
     $exit_code = 74;
 }
 
-merge_whole_gate_evidence($evidence_file, {
+my $post_acquire_error = '';
+eval {
+merge_whole_gate_evidence($evidence_file, \@evidence_identity, $fatal_evidence_file, \@fatal_evidence_identity, {
     held => JSON::PP::true, request_id => $request_id, class => $class,
     scope => $scope, purpose => $purpose, execution => 'executed',
     authoritative_request_id => $request_id, override => $override,
@@ -488,16 +548,76 @@ merge_whole_gate_evidence($evidence_file, {
     cleanup_error => $cleanup_error,
     payload_exit_code => $payload_exit_code,
     production_install_overlapped => $production_install_overlapped ? JSON::PP::true : JSON::PP::false,
+    issue_id => $candidate_issue_id,
+    reviewer_id => $ENV{AZEDARACH_REVIEWER_ID} || $acquired->{reviewer_id} || '',
+    review_epoch_event_id => 0 + ($ENV{AZEDARACH_REVIEW_EPOCH_EVENT_ID} || $acquired->{review_epoch_event_id} || 0),
+    publication_nonce => sha256_hex(join(':', $request_id, $revision, $$, time(), rand())),
 });
 if ($purpose eq 'capacity' && $class eq 'aggregate' && $overlap_detected && $exit_code == 0) {
     warn "aggregate validation overlapped $max_external_go unleased Go process(es)\n";
     $exit_code = 75;
 }
+if ($exit_code != 0 && $failure_publisher ne '') {
+    die "incomplete validation failure publication configuration\n"
+        unless $failure_project_root ne '' && $failure_candidate_root ne '' &&
+            $failure_control_root ne '' && $failure_gate_output ne '';
+    my @publish = ($failure_publisher,
+        '--project-root', $failure_project_root,
+        '--candidate-root', $failure_candidate_root,
+        '--control-root', $failure_control_root,
+        '--evidence', $evidence_file,
+        '--gate-output', $failure_gate_output,
+        '--request', $request_id,
+        '--revision', $revision,
+        '--exit-code', $exit_code);
+    my $publish_status = system(@publish);
+    die "publish validation failure evidence before terminal finish: " .
+        ($publish_status == -1 ? $! : 'exit ' . wait_status_code($publish_status)) . "\n"
+        if $publish_status != 0;
+    adopt_trusted_file_identity($evidence_file, \@evidence_identity);
+}
+# Publication evidence must be valid while it still has the publisher-adopted
+# identity. Do not copy malformed or identity-swapped bytes into trusted output.
+decode_json(read_trusted_file($evidence_file, \@evidence_identity) || '{}');
+if (my $ready = delete($ENV{AZEDARACH_VALIDATION_TEST_POST_PUBLISH_READY_FILE})) {
+    open my $ready_fh, '>', $ready or die "create post-publisher test marker: $!\n";
+    close $ready_fh or die "close post-publisher test marker: $!\n";
+    my $release = delete($ENV{AZEDARACH_VALIDATION_TEST_POST_PUBLISH_RELEASE_FILE}) || '';
+    sleep 0.01 until $release ne '' && -e $release;
+}
+write_publication_evidence($evidence_file, \@evidence_identity, $publication_evidence_path)
+    if $publication_evidence_path ne '';
+1;
+} or $post_acquire_error = $@ || 'validation evidence finalization failed';
+if ($post_acquire_error ne '') {
+    warn "validation evidence finalization failed: $post_acquire_error";
+    $exit_code = 70 if $exit_code == 0;
+    my $detail = bounded_outcome_detail($post_acquire_error);
+    eval {
+        replace_trusted_evidence($evidence_file, \@evidence_identity, {
+            held => JSON::PP::true,
+            request_id => $request_id,
+            source_revision => $revision,
+            issue_id => $candidate_issue_id,
+            present => JSON::PP::true,
+            payload_exit_code => $payload_exit_code,
+            fatal_phase => 'evidence_finalization',
+            fatal_detail => $detail,
+        });
+        1;
+    } or warn "replace failed validation evidence: " . ($@ || 'unknown error');
+}
 my $terminal = $interrupted ? 'cancelled' : ($exit_code == 0 ? 'completed' : 'failed');
 kill 'TERM', $heartbeat;
 waitpid($heartbeat, 0);
 my $outcome = "exit $exit_code";
-my $fatal_evidence = read_json_file($evidence_file);
+my $fatal_evidence = eval { read_trusted_json_file($evidence_file, \@evidence_identity) } || {};
+if ($@) {
+    my $detail = bounded_outcome_detail($@);
+    $outcome .= " phase=evidence_finalization detail=$detail";
+    $terminal = 'failed';
+    $exit_code = 70 if $exit_code == 0;
+}
 if (($fatal_evidence->{fatal_phase} || '') ne '') {
     my $payload_phase = bounded_outcome_detail($fatal_evidence->{fatal_phase});
     my $payload_detail = bounded_outcome_detail($fatal_evidence->{fatal_detail} || 'validation payload configuration failed');
@@ -513,10 +633,16 @@ if (($fatal_evidence->{fatal_phase} || '') ne '') {
 }
 my @finish = ($control_az, 'validation', 'finish', '--request', $request_id, '--state', $terminal, '--outcome', $outcome);
 if (-s $evidence_file) {
-    open my $final_evidence, '<', $evidence_file or die "open validation evidence: $!\n";
-    local $/;
-    push @finish, '--evidence-json', (<$final_evidence> // '');
-    close $final_evidence;
+    my $finish_evidence = eval { read_trusted_file($evidence_file, \@evidence_identity) };
+    if (defined $finish_evidence) {
+        push @finish, '--evidence-json', $finish_evidence;
+    } else {
+        warn "omit unreadable validation finish evidence: " . ($@ || 'unknown error');
+        $terminal = 'failed';
+        $exit_code = 70 if $exit_code == 0;
+        @finish = ($control_az, 'validation', 'finish', '--request', $request_id,
+            '--state', $terminal, '--outcome', "$outcome phase=evidence_finalization detail=trusted_read_failed");
+    }
 }
 my $finish_failed = !eval { control_capture(@finish); 1 };
 warn "validation finish failed for $request_id\n" if $finish_failed;
@@ -544,6 +670,33 @@ sub read_json_file {
     my $decoded = eval { decode_json(<$fh> // '{}') };
     close $fh;
     return $decoded && ref($decoded) eq 'HASH' ? $decoded : {};
+}
+
+sub write_publication_evidence {
+    my ($source, $identity, $target) = @_;
+    die "publication evidence path must be absolute\n" unless File::Spec->file_name_is_absolute($target);
+    my $parent = dirname($target);
+    my @parent_stat = lstat($parent);
+    die "publication evidence parent is unsafe\n" unless @parent_stat && -d _ && !-l _;
+    die "publication evidence target is a symlink\n" if -l $target;
+    my $contents = read_trusted_file($source, $identity);
+    my $temporary = "$target.tmp.$$";
+    sysopen(my $out, $temporary, O_WRONLY | O_CREAT | O_EXCL, 0600)
+        or die "create publication evidence atomically: $!\n";
+    print {$out} $contents;
+    close $out or die "close publication evidence: $!\n";
+    rename($temporary, $target) or die "commit publication evidence: $!\n";
+}
+
+sub replace_trusted_evidence {
+    my ($path, $identity, $evidence) = @_;
+    my $parent = dirname($path);
+    my ($fh, $temporary) = tempfile('azedarach-validation-recovery-XXXXXX', DIR => $parent, UNLINK => 0);
+    chmod 0600, $temporary or die "secure recovered validation evidence: $!\n";
+    print {$fh} JSON::PP->new->canonical->encode($evidence);
+    close $fh or die "close recovered validation evidence: $!\n";
+    rename($temporary, $path) or die "commit recovered validation evidence: $!\n";
+    adopt_trusted_file_identity($path, $identity);
 }
 
 sub bounded_outcome_detail {
@@ -642,14 +795,17 @@ sub external_go_processes {
 }
 
 sub merge_whole_gate_evidence {
-    my ($path, $whole) = @_;
+    my ($path, $identity, $fatal_path, $fatal_identity, $whole) = @_;
     my $existing = {};
-    my $fatal = read_json_file($ENV{AZEDARACH_VALIDATION_FATAL_EVIDENCE_FILE} || $path . '.fatal');
-    if (-s $path) {
-        open my $in, '<', $path or die "open accumulated validation evidence: $!\n";
-        local $/;
-        $existing = decode_json(<$in> // '{}');
-        close $in;
+    my $fatal = read_trusted_json_file($fatal_path, $fatal_identity);
+    my $content = eval { read_trusted_file($path, $identity) };
+    if (!defined $content) {
+        $whole->{fatal_phase} = 'evidence_identity';
+        $whole->{fatal_detail} = 'candidate replaced validation evidence file';
+    } elsif ($content ne '') {
+        $existing = decode_json($content);
+    }
+    if (%$existing) {
         for my $field (qw(held request_id class scope purpose execution authoritative_request_id override profile source_revision)) {
             die "accumulated validation lease evidence identity changed\n" if defined($existing->{$field}) && "$existing->{$field}" ne "$whole->{$field}";
         }
@@ -663,9 +819,53 @@ sub merge_whole_gate_evidence {
     $whole->{fatal_detail} = $existing->{fatal_detail} if $existing->{fatal_detail};
     $whole->{fatal_phase} = $fatal->{fatal_phase} if $fatal->{fatal_phase};
     $whole->{fatal_detail} = $fatal->{fatal_detail} if $fatal->{fatal_detail};
-    open my $out, '>', $path or die "write whole-gate validation evidence: $!\n";
-    print {$out} encode_json($whole) . "\n";
-    close $out;
+    atomic_replace_trusted_file($path, $identity, encode_json($whole) . "\n");
+}
+
+sub read_trusted_json_file {
+    my ($path, $identity) = @_;
+    return {} unless -s $path;
+    my $content = eval { read_trusted_file($path, $identity) };
+    return {} unless defined $content;
+    return decode_json($content || '{}');
+}
+
+sub read_trusted_file {
+    my ($path, $identity) = @_;
+    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or die "open trusted validation evidence: $!\n";
+    my @actual = stat($fh);
+    die "validation evidence is not a regular file\n" unless @actual && S_ISREG($actual[2]);
+    die "validation evidence identity changed\n"
+        unless $actual[0] == $identity->[0] && $actual[1] == $identity->[1];
+    local $/;
+    my $content = <$fh> // '';
+    close $fh or die "close trusted validation evidence: $!\n";
+    return $content;
+}
+
+sub adopt_trusted_file_identity {
+    my ($path, $identity) = @_;
+    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or die "open published validation evidence: $!\n";
+    my @actual = stat($fh);
+    close $fh or die "close published validation evidence: $!\n";
+    die "published validation evidence is not a regular file\n" unless @actual && S_ISREG($actual[2]);
+    @$identity = @actual;
+}
+
+sub atomic_replace_trusted_file {
+    my ($path, $identity, $content) = @_;
+    my ($out, $temporary) = tempfile('.azedarach-validation-evidence-XXXXXX', DIR => dirname($path), UNLINK => 0);
+    chmod 0600, $temporary or die "protect validation evidence replacement: $!\n";
+    print {$out} $content or die "write validation evidence replacement: $!\n";
+    close $out or die "close validation evidence replacement: $!\n";
+    my @current = lstat($path);
+    my $unchanged = @current && S_ISREG($current[2]) && $current[0] == $identity->[0] && $current[1] == $identity->[1];
+    my $replaced = @current && !$unchanged;
+    rename($temporary, $path) or die "commit validation evidence replacement: $!\n";
+    my @committed = lstat($path);
+    die "committed validation evidence is not a regular file\n" unless @committed && S_ISREG($committed[2]);
+    @$identity = @committed;
+    return !$replaced;
 }
 
 sub capture {

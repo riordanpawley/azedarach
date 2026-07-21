@@ -8072,6 +8072,7 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 		hub:          d.hub,
 		nextRevision: d.nextRevision,
 	})
+	t.Cleanup(func() { _ = d.operationRuntime.Close() })
 	d.gitStatusAdapter = &gitServiceAdapter{
 		client:            git.NewClient(runner, logger),
 		runtimeStateStore: runtimeStore,
@@ -8770,13 +8771,15 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	}); err != nil {
 		t.Fatalf("claim reviewer lease: %v", err)
 	}
-	if _, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+	acceptedReviewEvent, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
 			"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator,
+			"review_epoch_event_id":    admission.ReviewEpochEventID,
 			"reviewed_evidence_source": evidencePin.Source, "reviewed_evidence_event_id": evidencePin.EventID,
 			"reviewed_evidence_seq": evidencePin.Seq, "reviewed_evidence_digest": evidencePin.Digest,
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("record accepted review: %v", err)
 	}
 	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
@@ -8860,6 +8863,7 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 		hub:          d.hub,
 		nextRevision: d.nextRevision,
 	})
+	t.Cleanup(func() { _ = d.operationRuntime.Close() })
 	d.gitStatusAdapter = &gitServiceAdapter{
 		client:            git.NewClient(runner, logger),
 		runtimeStateStore: runtimeStore,
@@ -8883,6 +8887,8 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 
 	body, err := json.Marshal(taskCloseRequest{
 		TaskID: taskID, IntegrateBeforeClose: true, ExpectedReviewEvidence: evidencePin, ExpectedReviewerID: "reviewer",
+		ExpectedReviewerKind: domain.ReviewerOwnerKindOrchestrator, ExpectedReviewEpochEventID: admission.ReviewEpochEventID,
+		ExpectedAcceptedReviewEventID: acceptedReviewEvent.ID,
 	})
 	if err != nil {
 		t.Fatalf("marshal task close request: %v", err)
@@ -9267,6 +9273,7 @@ func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T
 		hub:          d.hub,
 		nextRevision: d.nextRevision,
 	})
+	t.Cleanup(func() { _ = d.operationRuntime.Close() })
 	d.gitStatusAdapter = &gitServiceAdapter{
 		client:            git.NewClient(runner, logger),
 		runtimeStateStore: runtimeStore,
@@ -9542,6 +9549,7 @@ func TestTaskCloseDeferredWorktreeCleanupCancelledWhenIssueReopens(t *testing.T)
 		hub:          d.hub,
 		nextRevision: d.nextRevision,
 	})
+	t.Cleanup(func() { _ = d.operationRuntime.Close() })
 	d.gitStatusAdapter = &gitServiceAdapter{
 		client:            git.NewClient(runner, logger),
 		runtimeStateStore: runtimeStore,

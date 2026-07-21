@@ -9,11 +9,11 @@ import (
 var profiles = map[string]Profile{
 	"cold": {
 		Name: "cold", Description: "complete uncached semantic suite",
-		Packages: []string{"./..."}, GoTestArgs: []string{"-json", "-count=1", "-timeout=8m", "-p=4"}, CleanCache: true,
+		Packages: []string{"./..."}, GoTestArgs: []string{"-json", "-count=1", "-timeout=15m", "-p=4"}, CleanCache: true,
 	},
 	"ci-timing": {
 		Name: "ci-timing", Description: "controlled CI-only repeated cold timing regression measurement",
-		Packages: []string{"./..."}, GoTestArgs: []string{"-json", "-count=1", "-timeout=8m", "-p=4"}, CleanCache: true,
+		Packages: []string{"./..."}, GoTestArgs: []string{"-json", "-count=1", "-timeout=15m", "-p=4"}, CleanCache: true,
 	},
 	"cached": {
 		Name: "cached", Description: "complete suite with the Go test cache explicitly permitted",

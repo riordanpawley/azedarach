@@ -468,6 +468,7 @@ func New(cfg Config) *Daemon {
 	d.codexAgentInput.recoveryOwner = agentInputOwner + ":recovery"
 	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, d.codexAgentInput, agentInputOwner)
 	d.agentInput.deliveryEligible = d.agentInputDeliveryEligible
+	d.agentInput.delivered = d.acknowledgeDeliveredRootedBootstrap
 	if !cfg.ScopedRuntime && strings.TrimSpace(os.Getenv("AZEDARACH_DISABLE_USER_DB")) != "1" {
 		if store, err := userstore.Open(userstore.DefaultPath()); err != nil {
 			cfg.Logger.Warn("initialize user cross-project projection", "error", err)
@@ -760,6 +761,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.openProjectionDeltaStores(ctx); err != nil {
 		return fmt.Errorf("open projection delta stores before IPC serve: %w", err)
 	}
+	// Bind before materializer bootstrap so lifecycle restart readiness reflects
+	// a live IPC endpoint, while Serve remains deferred until the projection
+	// boundary below is fully initialized.
+	if err := d.serve.Bind(); err != nil {
+		return fmt.Errorf("bind IPC listener before materializer bootstrap: %w", err)
+	}
+	defer func() { _ = d.serve.Close() }()
 	if err := d.startProjectReadMaterializers(serveCtx); err != nil {
 		return fmt.Errorf("start project read materializers before IPC serve: %w", err)
 	}
@@ -1165,6 +1173,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleTaskOwnershipClaim(ctx, req)
 	case "task.ownership.release":
 		return d.handleTaskOwnershipRelease(ctx, req)
+	case "task.review_lease.recover":
+		return d.handleTaskReviewLeaseRecovery(ctx, req)
 	case "task.update_status":
 		return d.handleTaskUpdateStatus(ctx, req)
 	case "task.update_details":
@@ -2071,6 +2081,20 @@ func (d *Daemon) recoverInterruptedSessionRestartBatch(ctx context.Context, batc
 }
 
 func (d *Daemon) recoverInterruptedSessionRestartLocked(ctx context.Context, store *daemonstate.RuntimeStateStore, plan sessionRestartRecoveryPlan) (interruptedOperationRecovery, bool) {
+	tool := strings.TrimSpace(plan.AgentTool)
+	if tool == "" {
+		// Plans written before agent_tool was persisted retain compatibility for
+		// non-Codex agents, while the configured Codex path still fails closed.
+		tool = strings.TrimSpace(d.runtimeConfigForProject(plan.ProjectID).CLITool)
+	}
+	requiresExactThread := strings.EqualFold(tool, "codex")
+	if requiresExactThread && strings.TrimSpace(plan.Old.AgentThreadID) == "" {
+		item := sessionRestartRecoveryItem(plan)
+		item.Outcome = "partial_failure"
+		item.Error = "recover managed Codex restart: durable recovery plan is missing exact thread identity"
+		item.Stages = []protocol.SessionRestartStage{restartStage("recover_"+plan.Stage, "failed", item.Error, sessionRestartObservationTimeout)}
+		return sessionRestartRecoveryResult(item), true
+	}
 	recoveryCtx, cancel := context.WithTimeout(ctx, sessionRestartObservationTimeout)
 	defer cancel()
 	item := sessionRestartRecoveryItem(plan)
@@ -2083,6 +2107,12 @@ func (d *Daemon) recoverInterruptedSessionRestartLocked(ctx context.Context, sto
 		panes, panesErr := d.tmux.ListPaneInfos(recoveryCtx)
 		if identityErr == nil && panesErr == nil {
 			if found && current.AgentIncarnation == plan.PlannedIncarnation && current.PanePID != plan.Old.PanePID && managedRestartIdentityLive(plan.SessionID, current, panes) {
+				if requiresExactThread && strings.TrimSpace(current.AgentThreadID) != strings.TrimSpace(plan.Old.AgentThreadID) {
+					item.Outcome = "partial_failure"
+					item.Error = "recover managed Codex restart: replacement thread identity does not match durable recovery plan"
+					item.Stages = []protocol.SessionRestartStage{restartStage("recover_"+plan.Stage, "failed", item.Error, sessionRestartObservationTimeout)}
+					return sessionRestartRecoveryResult(item), true
+				}
 				handoff, handoffValidationErr := d.validateRecoveredSessionRestartPromptHandoff(plan)
 				if handoffValidationErr != nil {
 					item.Outcome = "partial_failure"

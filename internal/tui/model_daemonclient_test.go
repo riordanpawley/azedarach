@@ -10133,6 +10133,139 @@ func TestAsyncRecoveryRetryMergeUsesFailedOperationProject(t *testing.T) {
 	}
 }
 
+func TestMergeResultValidationFailureRendersRecoveryWithoutSuccessRefresh(t *testing.T) {
+	m := newDaemonTestModel(&recordingDaemonTransport{})
+	result := &daemonclient.MergeResult{
+		Success: false,
+		ValidationAttempts: []domain.IntegrationCandidateValidationAttempt{
+			{CandidateHead: "old", Status: domain.IntegrationCandidateValidationFailed, Message: "old failure"},
+			{
+				CandidateHead: "candidate-123",
+				Status:        domain.IntegrationCandidateValidationFailed,
+				Message:       "TestWidget: expected ready state",
+				Stages: []domain.ValidationStageEvidence{{
+					ID:            "test",
+					Status:        "failed",
+					OutputRoot:    "/repo/.azedarach/validation/candidate-123",
+					ArtifactPaths: []string{"/repo/.azedarach/validation/candidate-123/report.md"},
+				}},
+			},
+		},
+	}
+
+	updated, cmd := m.Update(mergeResultMsg{
+		sourceID: "child",
+		targetID: "parent",
+		project:  asyncRecoveryProjectContext{ProjectID: "project-a"},
+		result:   result,
+	})
+	if cmd != nil {
+		t.Fatalf("validation failure command = %v, want nil (no issue refresh)", cmd)
+	}
+	next := updated.(Model)
+	if len(next.toasts) != 1 || next.toasts[0].Level != ToastError {
+		t.Fatalf("toasts = %+v, want one error toast", next.toasts)
+	}
+	for _, want := range []string{"candidate-123", "TestWidget", "report.md", "Recovery:"} {
+		if !strings.Contains(next.toasts[0].Message, want) {
+			t.Fatalf("toast = %q, want %q", next.toasts[0].Message, want)
+		}
+	}
+	if strings.Contains(next.toasts[0].Message, "Successfully merged") {
+		t.Fatalf("toast = %q, must not report success", next.toasts[0].Message)
+	}
+	if len(next.recoveryNotifications) != 1 {
+		t.Fatalf("recovery notifications = %+v, want one", next.recoveryNotifications)
+	}
+	notification := next.recoveryNotifications[0]
+	if notification.Action != asyncRecoveryActionRetryMerge || notification.SourceID != "child" || notification.TargetID != "parent" {
+		t.Fatalf("recovery notification = %+v, want retry merge for child -> parent", notification)
+	}
+}
+
+func TestFetchAndMergeResultValidationFailureRendersRecoveryWithoutAttach(t *testing.T) {
+	m := newDaemonTestModel(&recordingDaemonTransport{})
+	result := &daemonclient.MergeResult{
+		Success: false,
+		ValidationAttempts: []domain.IntegrationCandidateValidationAttempt{{
+			CandidateHead: "candidate-456",
+			Status:        domain.IntegrationCandidateValidationFailed,
+			Message:       "package ./consumer failed",
+			Stages: []domain.ValidationStageEvidence{{
+				ID:            "consumer-test",
+				Status:        "failed",
+				ArtifactPaths: []string{"/repo/.azedarach/validation/candidate-456/events.jsonl"},
+			}},
+		}},
+	}
+
+	updated, cmd := m.Update(fetchAndMergeResultMsg{
+		worktree:    "/repo/.az/worktrees/child",
+		issueID:     "child",
+		project:     asyncRecoveryProjectContext{ProjectID: "project-a"},
+		attachAfter: true,
+		result:      result,
+	})
+	if cmd != nil {
+		t.Fatalf("validation failure command = %v, want nil (no attach)", cmd)
+	}
+	next := updated.(Model)
+	if len(next.toasts) != 1 || next.toasts[0].Level != ToastError {
+		t.Fatalf("toasts = %+v, want one error toast", next.toasts)
+	}
+	for _, want := range []string{"candidate-456", "package ./consumer failed", "events.jsonl", "Recovery:"} {
+		if !strings.Contains(next.toasts[0].Message, want) {
+			t.Fatalf("toast = %q, want %q", next.toasts[0].Message, want)
+		}
+	}
+	if strings.Contains(next.toasts[0].Message, "Updated from main successfully") {
+		t.Fatalf("toast = %q, must not report success", next.toasts[0].Message)
+	}
+	if len(next.recoveryNotifications) != 1 {
+		t.Fatalf("recovery notifications = %+v, want one", next.recoveryNotifications)
+	}
+	notification := next.recoveryNotifications[0]
+	if notification.Action != asyncRecoveryActionRetryUpdate || notification.Worktree != "/repo/.az/worktrees/child" {
+		t.Fatalf("recovery notification = %+v, want retry update in child worktree", notification)
+	}
+}
+
+func TestMergeResultGenericFailureIsNotClassifiedAsValidation(t *testing.T) {
+	m := newDaemonTestModel(&recordingDaemonTransport{})
+	updated, cmd := m.Update(mergeResultMsg{
+		sourceID: "child", targetID: "parent",
+		result: &daemonclient.MergeResult{Success: false, Message: "publication unavailable"},
+	})
+	if cmd != nil {
+		t.Fatalf("generic merge failure command = %v, want nil", cmd)
+	}
+	next := updated.(Model)
+	if len(next.toasts) != 1 || !strings.Contains(next.toasts[0].Message, "Merge failed: publication unavailable") {
+		t.Fatalf("toasts = %+v, want operation-specific generic failure", next.toasts)
+	}
+	if strings.Contains(next.toasts[0].Message, "validation failed") {
+		t.Fatalf("toast = %q, must not classify generic failure as validation", next.toasts[0].Message)
+	}
+}
+
+func TestFetchAndMergeResultGenericFailureIsNotClassifiedAsValidation(t *testing.T) {
+	m := newDaemonTestModel(&recordingDaemonTransport{})
+	updated, cmd := m.Update(fetchAndMergeResultMsg{
+		issueID: "child", worktree: "/repo/child", attachAfter: true,
+		result: &daemonclient.MergeResult{Success: false, Message: "remote update unavailable"},
+	})
+	if cmd != nil {
+		t.Fatalf("generic update failure command = %v, want nil", cmd)
+	}
+	next := updated.(Model)
+	if len(next.toasts) != 1 || !strings.Contains(next.toasts[0].Message, "Update failed: remote update unavailable") {
+		t.Fatalf("toasts = %+v, want operation-specific generic failure", next.toasts)
+	}
+	if strings.Contains(next.toasts[0].Message, "validation failed") || strings.Contains(next.toasts[0].Message, "Merge failed") {
+		t.Fatalf("toast = %q, must not classify generic update failure as merge validation", next.toasts[0].Message)
+	}
+}
+
 func TestHandleSelectionUpdateFromMainUsesTaskWorkspaceTaskWhenCursorUnavailable(t *testing.T) {
 	transport := &recordingDaemonTransport{
 		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

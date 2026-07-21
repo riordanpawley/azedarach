@@ -189,7 +189,13 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 				result.Disposition = string(daemonstate.OrchestratorLeaseRecoveredStale)
 			}
 			if body.Scope.Kind == domain.OrchestrationScopeRooted {
-				startBody, _ := json.Marshal(sessionCommandBody{ProjectID: projectID, IssueID: body.Scope.RootIssueID.String(), SessionID: acquired.Lease.SessionID, Prompt: rootedPrompt})
+				launchPrompt := rootedPrompt
+				if strings.EqualFold(strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool), "codex") {
+					// Rooted Codex bootstrap is submitted only after the exact hook
+					// identity is ready, via the authoritative app-server path.
+					launchPrompt = ""
+				}
+				startBody, _ := json.Marshal(sessionCommandBody{ProjectID: projectID, IssueID: body.Scope.RootIssueID.String(), SessionID: acquired.Lease.SessionID, Prompt: launchPrompt})
 				startReq := req
 				startReq.Command, startReq.Body = "session.start", startBody
 				startResp, startErr := d.handleSessionStartDirectWithOptions(ctx, startReq, sessionStartOptions{
@@ -283,6 +289,12 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 			bootstrapDisposition, bootstrapErr := d.ensureRootedOrchestratorBootstrap(ctx, projectID, body.Scope, acquired.Lease.SessionID, rootedPrompt, launchedHere)
 			err = bootstrapErr
 			if err != nil {
+				if errors.Is(err, errRootedBootstrapQueued) {
+					if _, pauseErr := authority.SetLifecycle(ctx, identity, acquired.Lease.SessionID, domain.OrchestratorPaused); pauseErr != nil {
+						return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("pause rooted bootstrap pending delivery: %v", pauseErr)), nil
+					}
+					return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("rooted bootstrap is queued pending authoritative managed-agent acknowledgement: %v", err)), nil
+				}
 				var leaseCleanupErr error
 				if launchedHere {
 					leaseCleanupErr = errors.Join(killStartedSession(), pauseOrReleaseLease())
@@ -336,7 +348,11 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 			result.Disposition = "already-stopped"
 			break
 		}
-		lease, err = authority.SetLifecycle(ctx, identity, lease.SessionID, domain.OrchestratorPaused)
+		if body.Scope.Kind == domain.OrchestrationScopeRooted {
+			lease, err = d.pauseRootedOrchestratorAndClearBootstrapPending(ctx, projectID, identity, lease.SessionID)
+		} else {
+			lease, err = authority.SetLifecycle(ctx, identity, lease.SessionID, domain.OrchestratorPaused)
+		}
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("pause orchestrator session lease: %v", err)), nil
 		}
@@ -580,6 +596,11 @@ func (d *Daemon) pauseEndedOrchestratorSession(ctx context.Context, meta protoco
 		if lease.Lifecycle != domain.OrchestratorPaused {
 			if _, leaseErr = authority.SetLifecycle(scopeCtx, identity, sessionID, domain.OrchestratorPaused); leaseErr != nil {
 				return leaseErr
+			}
+		}
+		if scope.Kind == domain.OrchestrationScopeRooted {
+			if clearErr := d.clearRootedBootstrapPending(scopeCtx, projectID, identity, sessionID); clearErr != nil {
+				return fmt.Errorf("clear rooted bootstrap pending fence: %w", clearErr)
 			}
 		}
 		if persistErr := d.persistStoppedOrchestratorSessionProjection(scopeCtx, meta, projectID, scope, sessionID, daemonstate.SessionStatePaused); persistErr != nil {

@@ -59,6 +59,11 @@ func (r *rejectedSubmissionReceiver) DeliverAgentInput(ctx context.Context, requ
 }
 
 func (r *recordingAuthoritativeReceiver) DeliverAgentInput(_ context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
+	if request.CompleteSessionTakeover != nil {
+		if _, err := request.CompleteSessionTakeover(context.Background()); err != nil {
+			return authoritativeAgentInputAcknowledgement{}, err
+		}
+	}
 	if request.BeginSubmission == nil {
 		return authoritativeAgentInputAcknowledgement{}, errors.New("missing submission boundary")
 	}
@@ -153,8 +158,8 @@ func agentInputFixture(t *testing.T) (*daemonstate.RuntimeStateStore, *issues.Cl
 	issueClient := issues.NewClientAtPath(filepath.Join(dir, "issues.db"), logger)
 	t.Cleanup(func() { _ = issueClient.CloseDB() })
 	now := time.Now().UTC()
-	target := domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 123, AgentIncarnation: "inc-1"}
-	if err := runtimeStore.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{ProjectID: "p", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 123, AgentIncarnation: "inc-1", ObservedAt: now}); err != nil {
+	target := domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 123, AgentIncarnation: "inc-1", AgentThreadID: "thread-1"}
+	if err := runtimeStore.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{ProjectID: "p", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 123, AgentIncarnation: "inc-1", AgentThreadID: "thread-1", ObservedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: "p", SessionID: "az-1", ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now, ObservedVersion: now.UnixNano()}); err != nil {

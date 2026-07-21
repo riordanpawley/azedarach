@@ -76,6 +76,7 @@ type agentInputDeliveryService struct {
 	sessionLeaseDuration  time.Duration
 	sessionLeaseHeartbeat time.Duration
 	deliveryEligible      func(context.Context, domain.AgentInputDeliveryRequest, time.Time) (bool, error)
+	delivered             func(context.Context, domain.AgentInputDeliveryRequest) error
 }
 
 func newAgentInputDeliveryService(stores func(string) *state.RuntimeStateStore, issueClients func(string) *issues.Client, receiver authoritativeAgentInputReceiver, owner string) *agentInputDeliveryService {
@@ -101,6 +102,11 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "persist delivery intent"}, err
 	}
 	if intent.State == "delivered" {
+		if s.delivered != nil {
+			if err := s.delivered(ctx, request); err != nil {
+				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "persist delivered-input side effect"}, err
+			}
+		}
 		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputDelivered, Reason: "durably acknowledged"}, nil
 	}
 	if intent.State == "expired" {
@@ -340,6 +346,11 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 	if !acknowledged {
 		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "delivery lease changed before acknowledgement"}, nil
 	}
+	if s.delivered != nil {
+		if err := s.delivered(ctx, request); err != nil {
+			return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "persist delivered-input side effect"}, err
+		}
+	}
 	return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputDelivered, Reason: "receiver acknowledged exact intent and incarnation"}, nil
 }
 
@@ -370,7 +381,7 @@ func (s *agentInputDeliveryService) observeIdentity(ctx context.Context, request
 	if err != nil {
 		return domain.ManagedAgentRuntimeIdentity{}, domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "identity lookup failed"}, fmt.Errorf("lookup managed agent identity: %w", err)
 	}
-	current := domain.ManagedAgentRuntimeIdentity{LogicalPaneID: domain.ManagedAgentPaneID(identity.LogicalPaneID), TmuxPaneID: identity.TmuxPaneID, PanePID: identity.PanePID, AgentIncarnation: identity.AgentIncarnation}
+	current := domain.ManagedAgentRuntimeIdentity{LogicalPaneID: domain.ManagedAgentPaneID(identity.LogicalPaneID), TmuxPaneID: identity.TmuxPaneID, PanePID: identity.PanePID, AgentIncarnation: identity.AgentIncarnation, AgentThreadID: identity.AgentThreadID}
 	if !found || !request.Target.SameIncarnation(current) {
 		return current, domain.AgentInputDeliveryResult{Outcome: domain.AgentInputRejectedStaleTarget, Reason: "managed agent incarnation changed"}, nil
 	}
@@ -392,5 +403,5 @@ func (d *Daemon) currentAgentInputTarget(ctx context.Context, projectID, session
 		return domain.ManagedAgentRuntimeIdentity{}, false, nil
 	}
 	identity, found, err := store.GetManagedAgentIdentity(ctx, projectID, sessionID, "agent")
-	return domain.ManagedAgentRuntimeIdentity{LogicalPaneID: domain.ManagedAgentPaneID(identity.LogicalPaneID), TmuxPaneID: identity.TmuxPaneID, PanePID: identity.PanePID, AgentIncarnation: identity.AgentIncarnation}, found, err
+	return domain.ManagedAgentRuntimeIdentity{LogicalPaneID: domain.ManagedAgentPaneID(identity.LogicalPaneID), TmuxPaneID: identity.TmuxPaneID, PanePID: identity.PanePID, AgentIncarnation: identity.AgentIncarnation, AgentThreadID: identity.AgentThreadID}, found, err
 }

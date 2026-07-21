@@ -294,19 +294,27 @@ type OrchestrationReviewFinding struct {
 }
 
 type OrchestrationIntentRequest struct {
-	Scope               domain.OrchestrationScope            `json:"scope"`
-	Kind                OrchestrationIntentKind              `json:"kind"`
-	IntentKey           string                               `json:"intent_key"`
-	ActorID             string                               `json:"actor_id,omitempty"`
-	IssueIDs            []string                             `json:"issue_ids,omitempty"`
-	Limit               int                                  `json:"limit,omitempty"`
-	RepoDir             string                               `json:"repo_dir,omitempty"`
-	BaseBranch          string                               `json:"base_branch,omitempty"`
-	OverrideBoardHealth bool                                 `json:"override_board_health,omitempty"`
-	Findings            []OrchestrationReviewFinding         `json:"findings,omitempty"`
-	ReviewPass          *OrchestrationReviewPass             `json:"review_pass,omitempty"`
-	RestartWorker       bool                                 `json:"restart_worker,omitempty"`
-	Routes              []domain.OrchestrationCandidateRoute `json:"routes,omitempty"`
+	Scope                domain.OrchestrationScope                   `json:"scope"`
+	Kind                 OrchestrationIntentKind                     `json:"kind"`
+	IntentKey            string                                      `json:"intent_key"`
+	ActorID              string                                      `json:"actor_id,omitempty"`
+	IssueIDs             []string                                    `json:"issue_ids,omitempty"`
+	Limit                int                                         `json:"limit,omitempty"`
+	RepoDir              string                                      `json:"repo_dir,omitempty"`
+	BaseBranch           string                                      `json:"base_branch,omitempty"`
+	OverrideBoardHealth  bool                                        `json:"override_board_health,omitempty"`
+	Findings             []OrchestrationReviewFinding                `json:"findings,omitempty"`
+	ReviewPass           *OrchestrationReviewPass                    `json:"review_pass,omitempty"`
+	ReviewPromptDigest   string                                      `json:"review_prompt_digest,omitempty"`
+	ReviewEpochEventID   int64                                       `json:"review_epoch_event_id,omitempty"`
+	ReviewPromptBindings map[string]OrchestrationReviewPromptBinding `json:"review_prompt_bindings,omitempty"`
+	RestartWorker        bool                                        `json:"restart_worker,omitempty"`
+	Routes               []domain.OrchestrationCandidateRoute        `json:"routes,omitempty"`
+}
+
+type OrchestrationReviewPromptBinding struct {
+	Digest             string `json:"digest"`
+	ReviewEpochEventID int64  `json:"review_epoch_event_id"`
 }
 
 type OrchestrationReviewPass struct {

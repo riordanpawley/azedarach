@@ -359,7 +359,7 @@ func (d *Daemon) validateManagedAgentSignalIdentity(ctx context.Context, project
 		return false, "stale or reused tmux pane process", nil
 	}
 	identity := daemonstate.ManagedAgentIdentity{ProjectID: projectID, SessionID: physicalSessionID, LogicalPaneID: cmd.LogicalPaneID,
-		TmuxPaneID: paneID, PanePID: livePanePID, AgentIncarnation: cmd.AgentIncarnation, ObservedAt: time.Now().UTC()}
+		TmuxPaneID: paneID, PanePID: livePanePID, AgentIncarnation: cmd.AgentIncarnation, AgentThreadID: strings.TrimSpace(cmd.AgentThreadID), ObservedAt: time.Now().UTC()}
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	if store == nil {
 		return false, "session runtime store unavailable", nil

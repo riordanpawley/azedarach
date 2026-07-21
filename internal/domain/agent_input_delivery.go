@@ -10,6 +10,7 @@ const (
 	AgentInputMessageSessionMessage   AgentInputMessageKind = "session_message"
 	AgentInputMessageOrchestratorWake AgentInputMessageKind = "orchestrator_wake"
 	AgentInputMessageDecisionChange   AgentInputMessageKind = "decision_change"
+	AgentInputMessageRootedBootstrap  AgentInputMessageKind = "rooted_bootstrap"
 )
 
 // AgentInputDeliveryOutcome is safe to expose in diagnostics. It never carries

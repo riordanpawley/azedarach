@@ -116,6 +116,16 @@ Artifacts are written beneath `.tmp/test-timing/<profile>-<UTC timestamp>/`:
 - `report.json` is the versioned machine-readable measurement and comparison.
 - `report.md` is the same result rendered for review, sorted slowest first.
 
+When a transactional merge candidate fails its repository push gate, the lease
+wrapper copies these files plus the whole-gate output before the disposable
+integration worktree is removed. The durable location is
+`.azedarach/validation-artifacts/failures/<candidate-revision>/<request-id>/`
+under the canonical project root. Its manifest binds request, revision, exit
+status, concise failure, content hashes, and durable references; validation
+evidence is rewritten to the published paths before the daemon records the
+terminal request. Successful gates publish nothing. Cleanup retains referenced
+evidence and bounds only orphaned data to 30 days and the newest 20 directories.
+
 Controlled CI timing reports sample the host process tree and separate the
 validator's own Go compiler, linker, vet, and test processes from external Go
 load. The daemon retains that capacity-run overlap evidence. Local semantic

@@ -236,7 +236,7 @@ func (*fakeCodexRPC) Close() error { return nil }
 func codexAuthorityRequest() authoritativeAgentInputRequest {
 	return authoritativeAgentInputRequest{Delivery: domain.AgentInputDeliveryRequest{
 		ProjectID: "p", SessionID: "az-dlb", Tool: "codex", IntentKey: "intent", Payload: "automated body",
-		Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 42, AgentIncarnation: "thread-exact"},
+		Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 42, AgentIncarnation: "incarnation-exact", AgentThreadID: "thread-exact"},
 	}, LeaseToken: "lease", SessionLeaseOwner: "daemon", SessionLeaseToken: "fence", BeginSubmission: func(context.Context) (time.Time, error) { return time.Now().Add(time.Minute), nil }, RevalidateSubmissionFence: func(context.Context) (time.Time, error) { return time.Now().Add(time.Minute), nil }, RenewRestoreFence: func(context.Context) (bool, error) { return true, nil }}
 }
 
@@ -874,7 +874,7 @@ func TestCodexInputGateTakeoverWithoutMarkerRotatesFenceWithoutTmuxMutation(t *t
 			request.PreviousSessionLeaseToken = "fence-old"
 			request.SessionLeaseToken = "fence-old"
 			request.CompleteSessionTakeover = func(context.Context) (issues.AgentInputDeliverySessionLease, error) {
-				return issues.AgentInputDeliverySessionLease{ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-exact", LeaseOwner: "daemon-new", LeaseToken: "fence-new"}, nil
+				return issues.AgentInputDeliverySessionLease{ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "incarnation-exact", LeaseOwner: "daemon-new", LeaseToken: "fence-new"}, nil
 			}
 			if err := authority.recoverSupersededGate(context.Background(), &request); err != nil {
 				t.Fatalf("marker-free takeover error = %v", err)

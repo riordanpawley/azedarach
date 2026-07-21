@@ -188,7 +188,11 @@ func (d *Daemon) waitForInitialManagedAgentAcknowledgementWithPoll(waitCtx conte
 		sampleParent := waitCtx
 		if waitCtx.Err() != nil {
 			if finalSample {
-				return d.initialSessionBootstrapFailure(context.WithoutCancel(waitCtx), sessionID, incarnation, last, sessionStartBootstrapAcknowledgementLost, errors.Join(waitCtx.Err(), lastSampleErr))
+				reason := sessionStartBootstrapAcknowledgementLost
+				if sessionStartPaneIsShellFallback(d.runtimeConfigForProject(projectID).SessionShell, last.pane.CurrentCommand) {
+					reason = sessionStartBootstrapShellFallback
+				}
+				return d.initialSessionBootstrapFailure(context.WithoutCancel(waitCtx), sessionID, incarnation, last, reason, errors.Join(waitCtx.Err(), lastSampleErr))
 			}
 			finalSample = true
 			sampleParent = context.WithoutCancel(waitCtx)

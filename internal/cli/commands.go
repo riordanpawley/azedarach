@@ -167,13 +167,16 @@ type IssueGetOptions struct {
 }
 
 type IssueOwnershipOptions struct {
-	Project   string
-	IssueID   string
-	OwnerID   string
-	OwnerKind string
-	TTL       string
-	Force     bool
-	JSON      bool
+	Project               string
+	IssueID               string
+	OwnerID               string
+	OwnerKind             string
+	TTL                   string
+	Force                 bool
+	JSON                  bool
+	RecoverReview         bool
+	ReviewEpochEventID    int64
+	AcceptedReviewEventID int64
 }
 
 type IssueEventsOptions struct {
@@ -3625,6 +3628,9 @@ func ParseIssueOwnershipArgs(args []string, command string) (IssueOwnershipOptio
 	fs.StringVar(&opts.OwnerKind, "kind", "agent", "owner kind: human, agent, or orchestrator")
 	fs.StringVar(&opts.TTL, "ttl", "", "optional lease duration, for example 2h")
 	fs.BoolVar(&opts.Force, "force", false, "take over or release another active owner")
+	fs.BoolVar(&opts.RecoverReview, "recover-review", false, "recover an orphaned accepted-review lease")
+	fs.Int64Var(&opts.ReviewEpochEventID, "review-epoch-event", 0, "exact review request epoch event id")
+	fs.Int64Var(&opts.AcceptedReviewEventID, "accepted-review-event", 0, "exact accepted review event id")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueOwnershipOptions{}, err
 	}
@@ -3644,6 +3650,14 @@ func ParseIssueOwnershipArgs(args []string, command string) (IssueOwnershipOptio
 	opts.OwnerID = strings.TrimSpace(opts.OwnerID)
 	opts.OwnerKind = strings.TrimSpace(opts.OwnerKind)
 	opts.TTL = strings.TrimSpace(opts.TTL)
+	if opts.RecoverReview {
+		if command != "release" || opts.ReviewEpochEventID <= 0 || opts.AcceptedReviewEventID <= 0 {
+			return IssueOwnershipOptions{}, fmt.Errorf("--recover-review requires ticket release with positive --review-epoch-event and --accepted-review-event")
+		}
+		if opts.Force {
+			return IssueOwnershipOptions{}, fmt.Errorf("--recover-review cannot be combined with --force")
+		}
+	}
 	return opts, nil
 }
 
@@ -5716,6 +5730,19 @@ func issueOwnershipCommand(deps *Dependencies, opts IssueOwnershipOptions, claim
 		return err
 	}
 
+	if !claim && opts.RecoverReview {
+		task, recoverErr := deps.DaemonClient.RecoverTaskReviewLease(ctx, opts.IssueID, daemonclient.TaskReviewLeaseRecoveryRequest{ActorID: ownerID, ActorKind: opts.OwnerKind, ReviewEpochEventID: opts.ReviewEpochEventID, AcceptedReviewEventID: opts.AcceptedReviewEventID})
+		if recoverErr != nil {
+			return recoverErr
+		}
+		if opts.JSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(task)
+		}
+		fmt.Printf("Recovered orphaned review lease for issue %s\n", task.ID)
+		return nil
+	}
 	req := daemonclient.TaskOwnershipRequest{
 		OwnerID:   ownerID,
 		OwnerKind: opts.OwnerKind,

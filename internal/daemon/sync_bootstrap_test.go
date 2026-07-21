@@ -41,6 +41,9 @@ type bootstrapRecordingServer struct {
 	started  chan struct{}
 }
 
+func (*bootstrapRecordingServer) Bind() error  { return nil }
+func (*bootstrapRecordingServer) Close() error { return nil }
+
 func (s *bootstrapRecordingServer) Serve(ctx context.Context) error {
 	s.recorder.add("serve")
 	if s.started != nil {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -30,7 +31,7 @@ func TestRootedBootstrapAcknowledgementMigrationFreshHistoricalReopenAndSchemaDr
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`DROP TABLE daemon_rooted_bootstrap_acknowledgements; DELETE FROM schema_migrations WHERE id=?`, rootedBootstrapAcknowledgementMigrationID); err != nil {
+	if _, err := db.Exec(`DROP TABLE daemon_rooted_bootstrap_acknowledgements; DELETE FROM schema_migrations WHERE id IN (?,?)`, rootedBootstrapAcknowledgementMigrationID, managedAgentThreadIdentityMigrationID); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.CloseDB(); err != nil {
@@ -67,13 +68,8 @@ func TestRootedBootstrapAcknowledgementMigrationFreshHistoricalReopenAndSchemaDr
 		t.Fatal(err)
 	}
 	driftRepair := NewClientAtPath(path, slog.Default())
-	driftDB, err := driftRepair.dbHandle()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer driftRepair.CloseDB() //nolint:errcheck
-	if !rootedBootstrapTableExists(t, driftDB) {
-		t.Fatal("schema drift repair did not recreate rooted bootstrap acknowledgement table")
+	if _, err := driftRepair.dbHandle(); err == nil || !strings.Contains(err.Error(), "managed thread identity column daemon_rooted_bootstrap_acknowledgements.tmux_pane_id is missing") {
+		t.Fatalf("applied migration drift error = %v, want fail-closed missing pinned column", err)
 	}
 }
 

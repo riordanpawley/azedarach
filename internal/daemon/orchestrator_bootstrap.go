@@ -15,6 +15,9 @@ import (
 )
 
 const rootedOrchestratorBootstrapNonceEnvironment = "AZEDARACH_ROOTED_ORCHESTRATOR_BOOT_NONCE"
+const rootedBootstrapPendingNoncePrefix = "pending:"
+
+var errRootedBootstrapQueued = errors.New("rooted bootstrap authoritative delivery pending")
 
 func (d *Daemon) rootedOrchestratorBootstrapPrompt(ctx context.Context, projectID string, scope domain.OrchestrationScope) (string, error) {
 	rootID := strings.TrimSpace(scope.RootIssueID.String())
@@ -54,6 +57,10 @@ func (d *Daemon) ensureRootedOrchestratorBootstrap(ctx context.Context, projectI
 	}
 	authority := daemonstate.NewRootedBootstrapAcknowledgementAuthority(store)
 	promptHash := rootedOrchestratorPromptHash(prompt)
+	managedIdentity, managedFound, managedErr := store.GetManagedAgentIdentity(ctx, d.canonicalProjectID(projectID), sessionID, "agent")
+	if managedErr != nil {
+		return "", fmt.Errorf("refresh rooted managed-agent identity: %w", managedErr)
+	}
 	if !launchedHere {
 		acknowledgement, acknowledged, projectionErr := authority.Get(ctx, identity)
 		if projectionErr != nil {
@@ -63,7 +70,7 @@ func (d *Daemon) ensureRootedOrchestratorBootstrap(ctx context.Context, projectI
 		if nonceErr != nil {
 			return "", fmt.Errorf("read rooted orchestrator runtime nonce: %w", nonceErr)
 		}
-		if found && acknowledged && acknowledgement.SessionID == sessionID && acknowledgement.PromptHash == promptHash && acknowledgement.RuntimeNonce == runtimeNonce {
+		if found && acknowledged && managedFound && acknowledgement.SessionID == sessionID && acknowledgement.PromptHash == promptHash && acknowledgement.RuntimeNonce == runtimeNonce && acknowledgement.TmuxPaneID == managedIdentity.TmuxPaneID && acknowledgement.PanePID == managedIdentity.PanePID && acknowledgement.AgentIncarnation == managedIdentity.AgentIncarnation && acknowledgement.AgentThreadID == managedIdentity.AgentThreadID {
 			return "verified", nil
 		}
 	}
@@ -74,24 +81,44 @@ func (d *Daemon) ensureRootedOrchestratorBootstrap(ctx context.Context, projectI
 	if err := d.tmux.SetEnvironment(ctx, sessionID, rootedOrchestratorBootstrapNonceEnvironment, runtimeNonce); err != nil {
 		return "", fmt.Errorf("set rooted orchestrator runtime nonce: %w", err)
 	}
-	if !launchedHere {
-		handoff, handoffErr := prepareSessionPromptHandoff(d.sessionLaunchArtifactDir(), prompt)
-		if handoffErr != nil {
-			return "", fmt.Errorf("prepare rooted orchestrator bootstrap repair: %w", handoffErr)
-		}
-		defer handoff.remove()
-		if err := d.tmux.PasteTextAndSubmit(ctx, sessionID, handoff.bootstrapPrompt()); err != nil {
-			return "", fmt.Errorf("deliver rooted orchestrator bootstrap repair: %w", err)
-		}
-		if err := waitForSessionPromptHandoffConsumed(ctx, handoff); err != nil {
-			return "", fmt.Errorf("confirm rooted orchestrator bootstrap repair: %w", err)
-		}
+	managedIdentity, managedFound, managedErr = store.GetManagedAgentIdentity(ctx, d.canonicalProjectID(projectID), sessionID, "agent")
+	if managedErr != nil {
+		return "", fmt.Errorf("refresh rooted managed-agent identity before acknowledgement: %w", managedErr)
 	}
 	now := time.Now().UTC()
 	acknowledgement := daemonstate.RootedBootstrapAcknowledgement{
 		Identity: identity, SessionID: sessionID, PromptHash: promptHash,
-		RuntimeNonce: runtimeNonce, AcknowledgedAt: now, UpdatedAt: now,
+		RuntimeNonce: runtimeNonce, TmuxPaneID: managedIdentity.TmuxPaneID, PanePID: managedIdentity.PanePID, AgentIncarnation: managedIdentity.AgentIncarnation, AgentThreadID: managedIdentity.AgentThreadID, AcknowledgedAt: now, UpdatedAt: now,
 	}
+	if !managedFound || strings.TrimSpace(managedIdentity.AgentIncarnation) == "" {
+		return "", errors.New("rooted bootstrap acknowledgement requires exact managed-agent identity")
+	}
+	if strings.EqualFold(strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool), "codex") && strings.TrimSpace(managedIdentity.AgentThreadID) == "" {
+		return "", errors.New("rooted Codex bootstrap acknowledgement requires exact durable thread id")
+	}
+	acknowledgement.RuntimeNonce = rootedBootstrapPendingNoncePrefix + runtimeNonce
+	if err := authority.Acknowledge(ctx, acknowledgement); err != nil {
+		return "", err
+	}
+	if d.agentInputService() == nil {
+		// The daemon may be reconstructing before its app-server authority is
+		// available. Keep the exact target unacknowledged; reconciliation will
+		// retry once the authoritative delivery capability is installed.
+		return "", errRootedBootstrapQueued
+	}
+	result, deliveryErr := d.agentInputService().Deliver(ctx, domain.AgentInputDeliveryRequest{
+		ProjectID: projectID, SessionID: sessionID,
+		Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: domain.ManagedAgentPaneID(managedIdentity.LogicalPaneID), TmuxPaneID: managedIdentity.TmuxPaneID, PanePID: managedIdentity.PanePID, AgentIncarnation: managedIdentity.AgentIncarnation, AgentThreadID: managedIdentity.AgentThreadID},
+		Tool:   d.runtimeConfigForProject(projectID).CLITool, Kind: domain.AgentInputMessageRootedBootstrap, Payload: prompt,
+		IntentKey: fmt.Sprintf("rooted-bootstrap:%s:%s:%s", identity.Scope.RootIssueID, runtimeNonce, managedIdentity.AgentIncarnation), ExpiresAt: time.Now().UTC().Add(5 * time.Minute),
+	})
+	if deliveryErr != nil {
+		return "", fmt.Errorf("deliver rooted bootstrap through authoritative path: %w", deliveryErr)
+	}
+	if result.Outcome != domain.AgentInputDelivered {
+		return "", fmt.Errorf("%w: %s", errRootedBootstrapQueued, result.Reason)
+	}
+	acknowledgement.RuntimeNonce = runtimeNonce
 	if err := authority.Acknowledge(ctx, acknowledgement); err != nil {
 		return "", fmt.Errorf("persist rooted bootstrap acknowledgement: %w", err)
 	}
@@ -101,12 +128,115 @@ func (d *Daemon) ensureRootedOrchestratorBootstrap(ctx context.Context, projectI
 	return "repaired", nil
 }
 
+func (d *Daemon) acknowledgeDeliveredRootedBootstrap(ctx context.Context, request domain.AgentInputDeliveryRequest) error {
+	if request.Kind != domain.AgentInputMessageRootedBootstrap {
+		return nil
+	}
+	parts := strings.Split(strings.TrimPrefix(request.IntentKey, "rooted-bootstrap:"), ":")
+	if len(parts) != 3 || strings.TrimSpace(parts[0]) == "" {
+		return errors.New("invalid rooted bootstrap delivery intent")
+	}
+	scope, err := domain.RootedOrchestrationScope(parts[0])
+	if err != nil {
+		return err
+	}
+	identity, err := domain.NewOrchestratorIdentity(d.canonicalProjectID(request.ProjectID), scope)
+	if err != nil {
+		return err
+	}
+	store := d.sessionRuntimeStateStoreIfConfigured(request.ProjectID)
+	if store == nil {
+		return errors.New("rooted bootstrap acknowledgement store unavailable")
+	}
+	current, found, err := store.GetManagedAgentIdentity(ctx, d.canonicalProjectID(request.ProjectID), request.SessionID, "agent")
+	if err != nil || !found || current.AgentIncarnation != request.Target.AgentIncarnation || current.AgentThreadID != request.Target.AgentThreadID {
+		return errors.New("rooted bootstrap delivery target changed before acknowledgement")
+	}
+	live, err := d.tmux.HasSession(ctx, request.SessionID)
+	if err != nil {
+		return fmt.Errorf("verify rooted bootstrap runtime before resume: %w", err)
+	}
+	if !live {
+		return errors.New("rooted bootstrap runtime disappeared before resume")
+	}
+	return store.WithOrchestratorScopeTransition(ctx, identity, func(transitionCtx context.Context) error {
+		authority := daemonstate.NewRootedBootstrapAcknowledgementAuthority(store)
+		pending, pendingFound, err := authority.Get(transitionCtx, identity)
+		if err != nil {
+			return err
+		}
+		if !pendingFound || pending.RuntimeNonce != rootedBootstrapPendingNoncePrefix+parts[1] {
+			return errors.New("rooted bootstrap pending fence changed before acknowledgement")
+		}
+		lease, found, err := store.GetOrchestratorScopeLease(transitionCtx, identity)
+		if err != nil {
+			return fmt.Errorf("refresh rooted bootstrap lease before resume: %w", err)
+		}
+		if !found || lease.SessionID != request.SessionID {
+			return errors.New("rooted bootstrap lease changed before resume")
+		}
+		resume := lease.Lifecycle == domain.OrchestratorPaused
+		if !resume && lease.Lifecycle != domain.OrchestratorWorking {
+			return errors.New("rooted bootstrap lease is not eligible for acknowledgement")
+		}
+		now := time.Now().UTC()
+		if err := authority.Acknowledge(transitionCtx, daemonstate.RootedBootstrapAcknowledgement{Identity: identity, SessionID: request.SessionID, PromptHash: rootedOrchestratorPromptHash(request.Payload), RuntimeNonce: parts[1], TmuxPaneID: current.TmuxPaneID, PanePID: current.PanePID, AgentIncarnation: current.AgentIncarnation, AgentThreadID: current.AgentThreadID, AcknowledgedAt: now, UpdatedAt: now}); err != nil {
+			return err
+		}
+		if !resume {
+			return nil
+		}
+		_, err = store.SetOrchestratorScopeLeaseLifecycle(transitionCtx, identity, request.SessionID, domain.OrchestratorWorking)
+		return err
+	})
+}
+
 func (d *Daemon) invalidateRootedBootstrapAcknowledgement(ctx context.Context, acknowledgement daemonstate.RootedBootstrapAcknowledgement) error {
 	store := d.sessionRuntimeStateStoreIfConfigured(acknowledgement.Identity.ProjectID)
 	if store == nil {
 		return errors.New("rooted bootstrap acknowledgement store unavailable")
 	}
 	return daemonstate.NewRootedBootstrapAcknowledgementAuthority(store).Invalidate(ctx, acknowledgement.Identity, acknowledgement.SessionID)
+}
+
+func (d *Daemon) clearRootedBootstrapPending(ctx context.Context, projectID string, identity domain.OrchestratorIdentity, sessionID string) error {
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return errors.New("rooted bootstrap acknowledgement store unavailable")
+	}
+	authority := daemonstate.NewRootedBootstrapAcknowledgementAuthority(store)
+	acknowledgement, found, err := authority.Get(ctx, identity)
+	if err != nil || !found || !strings.HasPrefix(acknowledgement.RuntimeNonce, rootedBootstrapPendingNoncePrefix) {
+		return err
+	}
+	return authority.Invalidate(ctx, identity, sessionID)
+}
+
+// pauseRootedOrchestratorAndClearBootstrapPending consumes the pending
+// bootstrap fence in the same exact-scope transition as a user-initiated
+// pause. A delivered-input callback therefore observes either the old working
+// lease or the already-cleared fence; it can never resume between those writes.
+func (d *Daemon) pauseRootedOrchestratorAndClearBootstrapPending(ctx context.Context, projectID string, identity domain.OrchestratorIdentity, sessionID string) (daemonstate.OrchestratorScopeLease, error) {
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return daemonstate.OrchestratorScopeLease{}, errors.New("rooted bootstrap acknowledgement store unavailable")
+	}
+	var paused daemonstate.OrchestratorScopeLease
+	err := store.WithOrchestratorScopeTransition(ctx, identity, func(transitionCtx context.Context) error {
+		lease, found, err := store.GetOrchestratorScopeLease(transitionCtx, identity)
+		if err != nil {
+			return err
+		}
+		if !found || lease.SessionID != sessionID {
+			return errors.New("rooted orchestrator lease changed before pause")
+		}
+		paused, err = store.SetOrchestratorScopeLeaseLifecycle(transitionCtx, identity, sessionID, domain.OrchestratorPaused)
+		if err != nil {
+			return err
+		}
+		return d.clearRootedBootstrapPending(transitionCtx, projectID, identity, sessionID)
+	})
+	return paused, err
 }
 
 func rootedOrchestratorPromptHash(prompt string) string {

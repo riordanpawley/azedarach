@@ -20,12 +20,12 @@
       {
         "id": "build",
         "command": "just build",
-        "resources": ["go-build-cache"]
+        "resources": ["go-build-cache", "go-toolchain"]
       },
       {
         "id": "cold-semantic-suite",
         "command": "just test",
-        "resources": ["go-test-cache"],
+        "resources": ["go-test-cache", "go-toolchain"],
         "artifactPaths": [".tmp/test-timing"]
       },
       {
@@ -41,7 +41,7 @@
       {
         "id": "static-boundary-contract",
         "command": "just check-boundaries",
-        "resources": ["go-build-cache"]
+        "resources": ["go-build-cache", "go-toolchain"]
       }
     ]
   },

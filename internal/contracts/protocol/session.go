@@ -58,6 +58,7 @@ type ManagedAgentIdentity struct {
 	TmuxPaneID       string `json:"tmux_pane_id" msgpack:"tmux_pane_id"`
 	PanePID          int    `json:"pane_pid" msgpack:"pane_pid"`
 	AgentIncarnation string `json:"agent_incarnation" msgpack:"agent_incarnation"`
+	AgentThreadID    string `json:"agent_thread_id,omitempty" msgpack:"agent_thread_id,omitempty"`
 }
 
 type SessionProjectionEventBody struct {
