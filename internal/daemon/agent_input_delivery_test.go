@@ -59,6 +59,11 @@ func (r *rejectedSubmissionReceiver) DeliverAgentInput(ctx context.Context, requ
 }
 
 func (r *recordingAuthoritativeReceiver) DeliverAgentInput(_ context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
+	if request.CompleteSessionTakeover != nil {
+		if _, err := request.CompleteSessionTakeover(context.Background()); err != nil {
+			return authoritativeAgentInputAcknowledgement{}, err
+		}
+	}
 	if request.BeginSubmission == nil {
 		return authoritativeAgentInputAcknowledgement{}, errors.New("missing submission boundary")
 	}

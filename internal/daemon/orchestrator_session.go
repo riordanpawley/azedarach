@@ -293,7 +293,7 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 					if _, pauseErr := authority.SetLifecycle(ctx, identity, acquired.Lease.SessionID, domain.OrchestratorPaused); pauseErr != nil {
 						return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("pause rooted bootstrap pending delivery: %v", pauseErr)), nil
 					}
-					return d.errorResponse(req, protocol.ErrorCodeUnavailable, "rooted bootstrap is queued pending authoritative managed-agent acknowledgement"), nil
+					return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("rooted bootstrap is queued pending authoritative managed-agent acknowledgement: %v", err)), nil
 				}
 				var leaseCleanupErr error
 				if launchedHere {
@@ -348,7 +348,11 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 			result.Disposition = "already-stopped"
 			break
 		}
-		lease, err = authority.SetLifecycle(ctx, identity, lease.SessionID, domain.OrchestratorPaused)
+		if body.Scope.Kind == domain.OrchestrationScopeRooted {
+			lease, err = d.pauseRootedOrchestratorAndClearBootstrapPending(ctx, projectID, identity, lease.SessionID)
+		} else {
+			lease, err = authority.SetLifecycle(ctx, identity, lease.SessionID, domain.OrchestratorPaused)
+		}
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("pause orchestrator session lease: %v", err)), nil
 		}
@@ -592,6 +596,11 @@ func (d *Daemon) pauseEndedOrchestratorSession(ctx context.Context, meta protoco
 		if lease.Lifecycle != domain.OrchestratorPaused {
 			if _, leaseErr = authority.SetLifecycle(scopeCtx, identity, sessionID, domain.OrchestratorPaused); leaseErr != nil {
 				return leaseErr
+			}
+		}
+		if scope.Kind == domain.OrchestrationScopeRooted {
+			if clearErr := d.clearRootedBootstrapPending(scopeCtx, projectID, identity, sessionID); clearErr != nil {
+				return fmt.Errorf("clear rooted bootstrap pending fence: %w", clearErr)
 			}
 		}
 		if persistErr := d.persistStoppedOrchestratorSessionProjection(scopeCtx, meta, projectID, scope, sessionID, daemonstate.SessionStatePaused); persistErr != nil {
