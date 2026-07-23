@@ -83,6 +83,8 @@ func TestRunConcurrentCommandsStartFailureKillsStartedDescendants(t *testing.T) 
 	require.NoError(t, configureProcessGroup(started))
 	notStarted := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestPackageProcessDescendantHelper$")
 	require.NoError(t, configureProcessGroup(notStarted))
+	skipped := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestPackageProcessDescendantHelper$")
+	require.NoError(t, configureProcessGroup(skipped))
 	var descendantPID int
 	startFailure := errors.New("deterministic second-command start failure")
 	lifecycleValue, configured := processGroupLifecycles.Load(started)
@@ -98,7 +100,7 @@ func TestRunConcurrentCommandsStartFailureKillsStartedDescendants(t *testing.T) 
 
 	done := make(chan error, 1)
 	go func() {
-		_, runErr := runConcurrentCommandsWithStarter(context.Background(), []*exec.Cmd{started, notStarted}, io.Discard, io.Discard, func(command *exec.Cmd) error {
+		_, runErr := runConcurrentCommandsWithStarter(context.Background(), []*exec.Cmd{started, notStarted, skipped}, io.Discard, io.Discard, func(command *exec.Cmd) error {
 			if command == started {
 				return command.Start()
 			}
@@ -128,7 +130,9 @@ func TestRunConcurrentCommandsStartFailureKillsStartedDescendants(t *testing.T) 
 	_, startedRetained := processGroupLifecycles.Load(started)
 	assert.False(t, startedRetained, "started command retained lifecycle state after rollback")
 	_, notStartedRetained := processGroupLifecycles.Load(notStarted)
-	assert.False(t, notStartedRetained, "never-started command retained lifecycle state after rollback")
+	assert.False(t, notStartedRetained, "failed-to-start command retained lifecycle state after rollback")
+	_, skippedRetained := processGroupLifecycles.Load(skipped)
+	assert.False(t, skippedRetained, "never-attempted command retained lifecycle state after rollback")
 }
 
 func TestRunProcessGroupSupervisesLeaderExitWithSurvivingDescendant(t *testing.T) {
