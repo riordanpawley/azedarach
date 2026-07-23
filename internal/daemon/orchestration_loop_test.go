@@ -12,6 +12,7 @@ import (
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -25,9 +26,6 @@ func TestProjectOrchestratorReviewWakeUsesDurableInputAndCoalescesEquivalentStat
 	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
-	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
-		t.Fatal(err)
-	}
 	const projectID, sessionID = "project", "project-orchestrator"
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
@@ -44,14 +42,25 @@ func TestProjectOrchestratorReviewWakeUsesDurableInputAndCoalescesEquivalentStat
 		t.Fatal(err)
 	}
 	seedReadyAgentInput(t, d, runner, projectID, sessionID)
-	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC()); err != nil {
+	body, err := json.Marshal(map[string]any{
+		"task_id": issueID, "event_type": string(domain.IssueEventEvidenceSubmitted),
+		"source": "test", "payload": mustWorkerEvidencePayload(t),
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC().Add(time.Second)); err != nil {
-		t.Fatal(err)
+	resp, err := d.command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "review-evidence-transition",
+		Command:         "task.event.append",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil || resp.Error != nil {
+		t.Fatalf("append evidence transition response=%+v err=%v", resp.Error, err)
 	}
 	if len(runner.inputPayloads) != 1 {
-		t.Fatalf("project review continuation payloads = %d, want exactly 1", len(runner.inputPayloads))
+		t.Fatalf("project review transition continuation payloads = %d, want exactly 1", len(runner.inputPayloads))
 	}
 	prompt := runner.inputPayloads[0]
 	if !strings.Contains(prompt, "scope=project") || !strings.Contains(prompt, "kind=review") || !strings.Contains(prompt, issueID) {
@@ -60,10 +69,196 @@ func TestProjectOrchestratorReviewWakeUsesDurableInputAndCoalescesEquivalentStat
 	if strings.Contains(prompt, "orchestrate watch") {
 		t.Fatalf("project review prompt retained model watch: %q", prompt)
 	}
+	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.inputPayloads) != 1 {
+		t.Fatalf("duplicate reconciliation delivered %d project review prompts, want exactly 1", len(runner.inputPayloads))
+	}
 	for _, required := range []string{"source=builtin:portable-v1", "digest=", "composition_mode=builtin", "review_epoch=" + issueID + ":", "coverage_contract=", "full diff", "analogous or sibling", "lifecycle ending", "trust and authority boundary", "every instance"} {
 		if !strings.Contains(prompt, required) {
 			t.Errorf("project review prompt missing %q: %q", required, prompt)
 		}
+	}
+}
+
+func TestTaskAppendNotesWakesProjectOrchestratorAndCoalescesEquivalentState(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const projectID, sessionID = "project", "project-orchestrator"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[sessionID] = true
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.runtimeStoresByProject = map[string]*daemonstate.RuntimeStateStore{projectID: store}
+	d.tmux = tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	identity, _ := domain.NewOrchestratorIdentity(projectID, domain.ProjectOrchestrationScope())
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).Acquire(ctx, identity, sessionID, d.tmux.HasSession); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, identity.Scope, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	seedReadyAgentInput(t, d, runner, projectID, sessionID)
+
+	body, err := json.Marshal(map[string]any{"task_id": issueID, "line": "review evidence is ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "append-notes-review-wake",
+		Command:         "task.append_notes",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil || resp.Error != nil {
+		t.Fatalf("append notes response=%+v err=%v", resp.Error, err)
+	}
+	if len(runner.inputPayloads) != 1 {
+		t.Fatalf("append notes continuation payloads = %d, want exactly 1", len(runner.inputPayloads))
+	}
+	prompt := runner.inputPayloads[0]
+	if !strings.Contains(prompt, "scope=project") || !strings.Contains(prompt, "kind=review") || !strings.Contains(prompt, issueID) {
+		t.Fatalf("append notes review prompt = %q", prompt)
+	}
+	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.inputPayloads) != 1 {
+		t.Fatalf("duplicate reconciliation delivered %d append-notes prompts, want exactly 1", len(runner.inputPayloads))
+	}
+}
+
+func TestInteractionAnswerWakesProjectOrchestratorAndCoalescesEquivalentState(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	interaction := domain.InteractionRequest{
+		ID: "answer-wakes-orchestrator", IssueID: issueID, DecisionKey: "review",
+		OrchestrationScope: "project", Question: "Continue review?", Why: "human decision",
+		Options:      []domain.InteractionOption{{Key: "yes", Label: "Yes"}},
+		Significance: domain.InteractionSignificanceRoutine, Respondent: "human",
+		DecisionPacket: domain.InteractionDecisionPacket{Summary: "Continue review"},
+		State:          domain.InteractionOpen, Revision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := client.CreateInteraction(ctx, interaction); err != nil {
+		t.Fatal(err)
+	}
+
+	const projectID, sessionID = "project", "project-orchestrator"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[sessionID] = true
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.router = daemonhandlers.NewDispatcher(nil, daemonhandlers.NewInteractionHandler(issueInteractionService{daemon: d}))
+	d.runtimeStoresByProject = map[string]*daemonstate.RuntimeStateStore{projectID: store}
+	d.tmux = tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	identity, _ := domain.NewOrchestratorIdentity(projectID, domain.ProjectOrchestrationScope())
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).Acquire(ctx, identity, sessionID, d.tmux.HasSession); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, identity.Scope, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	seedReadyAgentInput(t, d, runner, projectID, sessionID)
+
+	body, err := json.Marshal(protocol.InteractionMutationRequestBody{
+		ID: interaction.ID, ExpectedRevision: interaction.Revision, Actor: "human",
+		Answer: domain.InteractionAnswerPayload{
+			SelectedOption: "yes", Rationale: "review may continue",
+			SignificanceRecommendation: domain.InteractionSignificanceRoutine, Revision: interaction.Revision,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "interaction-answer-review-wake",
+		Command:         protocol.CommandInteractionAnswer,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil || resp.Error != nil {
+		t.Fatalf("interaction answer response=%+v err=%v", resp.Error, err)
+	}
+	if len(runner.inputPayloads) != 1 {
+		t.Fatalf("interaction answer continuation payloads = %d, want exactly 1", len(runner.inputPayloads))
+	}
+	prompt := runner.inputPayloads[0]
+	if !strings.Contains(prompt, "scope=project") || !strings.Contains(prompt, "kind=review") || !strings.Contains(prompt, issueID) {
+		t.Fatalf("interaction answer review prompt = %q", prompt)
+	}
+	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.inputPayloads) != 1 {
+		t.Fatalf("duplicate reconciliation delivered %d interaction-answer prompts, want exactly 1", len(runner.inputPayloads))
+	}
+}
+
+func TestCommandAdvancesOrchestrationClassifiesProjectionMutations(t *testing.T) {
+	for _, command := range []string{
+		protocol.CommandInteractionCreate,
+		protocol.CommandInteractionDiscuss,
+		protocol.CommandInteractionPropose,
+		protocol.CommandInteractionAnswer,
+		protocol.CommandInteractionResolve,
+		protocol.CommandInteractionWithdraw,
+		protocol.CommandInteractionSupersede,
+		protocol.CommandInteractionRecover,
+		protocol.CommandIssueFanout,
+		protocol.CommandMailSend,
+		protocol.CommandOrchestrationIntent,
+		protocol.CommandTaskBulkApply,
+		protocol.CommandTaskBulkCleanup,
+		"task.event.append",
+		"task.create",
+		"task.close",
+		"task.ownership.claim",
+		"task.ownership.release",
+		"task.review_lease.recover",
+		"task.update_status",
+		"task.update_details",
+		"task.append_notes",
+		"task.delete",
+		"task.archive",
+		"task.unarchive",
+		"task.dependency.add",
+		"task.dependency.remove",
+	} {
+		t.Run(command, func(t *testing.T) {
+			if !commandAdvancesOrchestration(command) {
+				t.Fatalf("commandAdvancesOrchestration(%q) = false, want true", command)
+			}
+		})
+	}
+	for _, command := range []string{"", "task.get", "task.list", protocol.CommandOrchestrationSnapshot} {
+		t.Run("read-only/"+command, func(t *testing.T) {
+			if commandAdvancesOrchestration(command) {
+				t.Fatalf("commandAdvancesOrchestration(%q) = true, want false", command)
+			}
+		})
 	}
 }
 
