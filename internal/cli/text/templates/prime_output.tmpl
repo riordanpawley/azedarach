@@ -69,6 +69,7 @@ Parent And Child Scope
 - Graph membership comes from parent-child edges, never `--impl`. Verify returned `parent_id` before launching a worker.
 - If work starts under the wrong parent, stop that worker and create a fresh correctly parented child; session and worktree identity make an active worker unsafe to reparent in place.
 - Parent-child edges express hierarchy, not readiness. Pause/supersede work by changing lifecycle intent and adding a blocker; do not orphan active work by removing its parent edge.
+- Do not create implementation follow-ups as children of an investigation ticket. Create them as standalone tickets with `az ticket create --deferred "Implementation task"`.
 - Before using `--deferred`, ask whether the parent can land correctly without the work. Required work belongs in the parent's merge unit; only independently landable later work is deferred.
 - Child integration targets the closest active ancestor worktree. Materialize a missing ancestor with `az worktree create <ancestor-ticket>`; do not route normal child completion directly to the base branch. Low-level repair merges require both endpoints: `az branch merge --source <child> --target <ancestor>`.
 - Ancestor-to-descendant materialization is a distinct explicit flow: `az branch merge --source <ancestor> --target <descendant>`. In non-origin workflow modes, root-to-base uses `--target base` and is refused until the root has durable, ticket-specific human acceptance. Origin mode never permits this local base integration path; use the PR-only workflow named above.

@@ -13088,7 +13088,14 @@ func TestPrimeCommandWithoutIssueContext(t *testing.T) {
 	if strings.Contains(output, "Active ticket ID:") || strings.Contains(output, "Active ticket context (ticket=") {
 		t.Fatalf("prime without issue rendered active issue context: %q", output)
 	}
-	for _, want := range []string{"Ticket Types", "`investigation` for research", "az ticket update --type <type>", "explicit, ticket-specific human acceptance"} {
+	for _, want := range []string{
+		"Ticket Types",
+		"`investigation` for research",
+		"az ticket update --type <type>",
+		"explicit, ticket-specific human acceptance",
+		"Do not create implementation follow-ups as children of an investigation ticket",
+		`az ticket create --deferred "Implementation task"`,
+	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("prime output missing investigation guidance %q: %q", want, output)
 		}
