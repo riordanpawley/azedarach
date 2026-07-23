@@ -2093,6 +2093,7 @@ type sessionStartTmuxRunner struct {
 	onNewSession                func(string)
 	onNewSessionCommand         func(context.Context, string) error
 	onNewWindow                 func(string, string)
+	onSetEnvironment            func(string, string, string)
 	newWindowErr                error
 	createBeforeNewWindowError  bool
 	respawnWindowErr            error
@@ -2557,6 +2558,9 @@ func (r *sessionStartTmuxRunner) Run(ctx context.Context, args ...string) (strin
 			r.env[session] = map[string]string{}
 		}
 		r.env[session][key] = value
+		if r.onSetEnvironment != nil {
+			r.onSetEnvironment(session, key, value)
+		}
 		return "", nil
 	case "show-environment":
 		if len(args) < 3 {
@@ -8134,8 +8138,22 @@ func TestReconcileRecoversRootedOrchestratorThroughOrchestratorAuthority(t *test
 			runner := newSessionStartTmuxRunner()
 			store := daemonstate.NewStore()
 			manager := git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/root"}, repoDir, slog.Default())
-			d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: "codex", CodexAppServer: true, Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), session: daemonhandlers.NewSessionHandler(store), sessionStore: store, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore}, worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager}}
+			d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: "codex", CodexAppServer: true, Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), session: daemonhandlers.NewSessionHandler(store), sessionStore: store, issues: issueClient, issueClientsByProject: map[string]*issues.Client{projectID: issueClient}, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore}, worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager}}
+			d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, &recordingAuthoritativeReceiver{accepted: map[string]string{}}, "rooted-reconcile-test")
+			d.agentInput.deliveryEligible = d.agentInputDeliveryEligible
 			acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
+			runner.onSetEnvironment = func(sessionID, key, _ string) {
+				if key != rootedOrchestratorBootstrapNonceEnvironment {
+					return
+				}
+				now := time.Now().UTC()
+				if _, _, err := runtimeStore.ApplyPhysicalSessionObservation(context.Background(), daemonstate.PhysicalSessionObservation{
+					ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning,
+					Activity: "idle", ActivitySource: "hooks", UpdatedAt: now, ObservedVersion: now.UnixNano(),
+				}); err != nil {
+					t.Errorf("record post-launch hook readiness: %v", err)
+				}
+			}
 			targetIssue := issueID
 			if target == "full" {
 				targetIssue = ""
