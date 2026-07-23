@@ -22,6 +22,7 @@ const (
 	defaultRuntimeReconcileInterval  = 30 * time.Second
 	defaultRuntimeReconcileTimeout   = 5 * time.Second
 	scopedRuntimeReconcileTimeout    = 20 * time.Second
+	durableAgentInputRetryTimeout    = time.Minute
 	runtimeReconcileIssueRepairLimit = 64
 )
 
@@ -108,9 +109,11 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 		}
 	}
 	if d.agentInputService() != nil {
-		if err := d.agentInputService().RetryPending(ctx, result.ProjectID.String(), 100); err != nil {
+		retryCtx, cancelRetry := context.WithTimeout(context.WithoutCancel(ctx), durableAgentInputRetryTimeout)
+		if err := d.agentInputService().RetryPending(retryCtx, result.ProjectID.String(), 100); err != nil {
 			errs = append(errs, fmt.Errorf("reconcile agent input delivery: %w", err))
 		}
+		cancelRetry()
 	}
 	if !hasSessionRuntime {
 		return result, errors.Join(errs...)

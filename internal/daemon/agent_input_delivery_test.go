@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -209,6 +210,33 @@ func TestAgentInputRetryContinuesAfterUnrelatedEligibilityFailure(t *testing.T) 
 	}
 	if receiver.calls != 1 || len(receiver.payloads) != 1 || receiver.payloads[0] != second.Payload {
 		t.Fatalf("receiver calls=%d payloads=%v, want unrelated second intent delivered", receiver.calls, receiver.payloads)
+	}
+}
+
+func TestRuntimeReconcileRetriesDurableAgentInputAfterRefreshContextDeadline(t *testing.T) {
+	runtimeStore, client, request := agentInputFixture(t)
+	ctx := context.Background()
+	if _, err := client.EnsureAgentInputDeliveryIntent(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}}
+	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "retry")
+	service.deliveryEligible = func(retryCtx context.Context, _ domain.AgentInputDeliveryRequest, _ time.Time) (bool, error) {
+		if err := retryCtx.Err(); err != nil {
+			return false, fmt.Errorf("durable retry inherited refresh deadline: %w", err)
+		}
+		return true, nil
+	}
+	d := &Daemon{agentInput: service}
+	expiredRefreshCtx, expireRefresh := context.WithCancel(ctx)
+	expireRefresh()
+
+	_, err := newRuntimeReconcileService(d).Reconcile(expiredRefreshCtx, request.ProjectID)
+	if err != nil {
+		t.Fatalf("reconcile after refresh deadline: %v", err)
+	}
+	if receiver.calls != 1 || len(receiver.payloads) != 1 || receiver.payloads[0] != request.Payload {
+		t.Fatalf("receiver calls=%d payloads=%v, want durable retry delivered after refresh deadline", receiver.calls, receiver.payloads)
 	}
 }
 
