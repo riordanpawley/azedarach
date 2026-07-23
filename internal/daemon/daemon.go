@@ -316,6 +316,7 @@ type Daemon struct {
 
 	syncBootstrapState              syncBootstrapState
 	syncBootstrapFn                 func(context.Context) error
+	startProjectReadMaterializersFn func(context.Context) error
 	reconcileInteractionStalenessFn func(context.Context, string) error
 }
 
@@ -768,7 +769,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("bind IPC listener before materializer bootstrap: %w", err)
 	}
 	defer func() { _ = d.serve.Close() }()
-	if err := d.startProjectReadMaterializers(serveCtx); err != nil {
+	startProjectReadMaterializers := d.startProjectReadMaterializers
+	if d.startProjectReadMaterializersFn != nil {
+		startProjectReadMaterializers = d.startProjectReadMaterializersFn
+	}
+	if err := startProjectReadMaterializers(serveCtx); err != nil {
 		return fmt.Errorf("start project read materializers before IPC serve: %w", err)
 	}
 	d.cfg.Logger.Info("daemon startup phase", "phase", "projection_delta_stores_open", "duration_ms", time.Since(projectionStartedAt).Milliseconds())
