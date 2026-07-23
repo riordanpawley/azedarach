@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"testing"
@@ -54,6 +55,20 @@ func TestRuntimeSignalIngestProjectsTerminalAgentError(t *testing.T) {
 	}
 	if !resp.OK {
 		t.Fatalf("runtime.signal.ingest response not ok: %+v", resp.Error)
+	}
+	var result protocol.RuntimeSignalIngestResponseBody
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal runtime signal response: %v", err)
+	}
+	foundContinuation := false
+	for _, stage := range result.Stages {
+		if stage.Name == "orchestrator_continuation" && stage.OK {
+			foundContinuation = true
+			break
+		}
+	}
+	if !foundContinuation {
+		t.Fatalf("runtime signal stages = %+v, want successful orchestrator continuation reconciliation", result.Stages)
 	}
 
 	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, parentSessionID)
@@ -121,6 +136,9 @@ func TestRuntimeSignalAgentLifecycleProjectsExplicitError(t *testing.T) {
 	})
 	if !ok || command != "session.pause" || activity != "error" {
 		t.Fatalf("lifecycle = %q/%q/%t, want session.pause/error/true", command, activity, ok)
+	}
+	if !orchestratorActivityWakeRequired(activity) {
+		t.Fatal("terminal error activity did not trigger orchestrator continuation reconciliation")
 	}
 }
 

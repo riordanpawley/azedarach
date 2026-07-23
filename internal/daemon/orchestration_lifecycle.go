@@ -257,7 +257,7 @@ func checkpointRootedOrchestratorAction(ctx context.Context, store *daemonstate.
 
 func orchestratorActivityWakeRequired(activity string) bool {
 	switch strings.ToLower(strings.TrimSpace(activity)) {
-	case "idle", "done", "paused":
+	case "idle", "done", "paused", "error":
 		return true
 	default:
 		return false
