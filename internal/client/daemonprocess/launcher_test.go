@@ -3982,6 +3982,17 @@ func TestLauncherStartHonorsCallerCancellationForReadyWait(t *testing.T) {
 	}
 }
 
+func TestDaemonReplacementReadinessBudgetsCoverValidatedColdStartup(t *testing.T) {
+	const observedValidatedStartup = 15900 * time.Millisecond
+
+	if daemonStartupReadinessTimeout <= observedValidatedStartup {
+		t.Fatalf("startup readiness timeout = %s, want greater than validated cold startup %s", daemonStartupReadinessTimeout, observedValidatedStartup)
+	}
+	if daemonReplacementRollbackTimeout <= daemonStartupReadinessTimeout {
+		t.Fatalf("rollback timeout = %s, want room beyond readiness timeout %s for lifecycle lock and verification", daemonReplacementRollbackTimeout, daemonStartupReadinessTimeout)
+	}
+}
+
 func TestLauncherStartReportsSpawnCleanupFailure(t *testing.T) {
 	repoDir := t.TempDir()
 	launcher := NewLauncher(repoDir, filepath.Join(t.TempDir(), "daemon.sock"))
