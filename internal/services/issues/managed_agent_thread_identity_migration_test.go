@@ -3,6 +3,8 @@ package issues
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -35,6 +37,56 @@ func TestManagedAgentThreadIdentitySchemaValidatesEveryPinnedColumn(t *testing.T
 				}
 			})
 		}
+	}
+}
+
+func TestManagedAgentThreadIdentityMigrationRollsBackArtifactAndLedger(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	seed := NewClientAtPath(dbPath, nil)
+	seed.migrationCeiling = taskCreationIntentsMigrationID
+	if _, err := seed.dbHandle(); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.CloseDB(); err != nil {
+		t.Fatal(err)
+	}
+
+	failed := NewClientAtPath(dbPath, nil)
+	failed.managedThreadMigrationFailureHook = func(stage string) error {
+		if stage != "after_schema" {
+			t.Fatalf("unexpected failure stage %q", stage)
+		}
+		return errors.New("injected")
+	}
+	if _, err := failed.dbHandle(); err == nil || !strings.Contains(err.Error(), "rolled back") {
+		t.Fatalf("migration error = %v, want rollback failure", err)
+	}
+	_ = failed.CloseDB()
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, column := range []struct{ table, name string }{
+		{"daemon_managed_agent_incarnations", "agent_thread_id"},
+		{"agent_input_delivery_intents", "agent_thread_id"},
+		{"daemon_rooted_bootstrap_acknowledgements", "tmux_pane_id"},
+	} {
+		exists, err := columnExistsDB(context.Background(), db, column.table, column.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exists {
+			t.Fatalf("rolled-back column still exists: %s.%s", column.table, column.name)
+		}
+	}
+	var markers int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, managedAgentThreadIdentityMigrationID).Scan(&markers); err != nil {
+		t.Fatal(err)
+	}
+	if markers != 0 {
+		t.Fatalf("rolled-back migration markers = %d, want 0", markers)
 	}
 }
 

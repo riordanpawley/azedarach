@@ -290,18 +290,25 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 			err = bootstrapErr
 			if err != nil {
 				if errors.Is(err, errRootedBootstrapQueued) {
-					if _, pauseErr := authority.SetLifecycle(ctx, identity, acquired.Lease.SessionID, domain.OrchestratorPaused); pauseErr != nil {
+					queued, pauseErr := d.pauseRootedOrchestratorIfBootstrapStillPending(ctx, projectID, identity, acquired.Lease.SessionID)
+					if pauseErr != nil {
 						return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("pause rooted bootstrap pending delivery: %v", pauseErr)), nil
 					}
-					return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("rooted bootstrap is queued pending authoritative managed-agent acknowledgement: %v", err)), nil
+					if queued {
+						return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("rooted bootstrap is queued pending authoritative managed-agent acknowledgement: %v", err)), nil
+					}
+					bootstrapDisposition = "delivered"
+					err = nil
 				}
-				var leaseCleanupErr error
-				if launchedHere {
-					leaseCleanupErr = errors.Join(killStartedSession(), pauseOrReleaseLease())
-				} else {
-					leaseCleanupErr = restoreLeaseAfterProbeFailure()
+				if err != nil {
+					var leaseCleanupErr error
+					if launchedHere {
+						leaseCleanupErr = errors.Join(killStartedSession(), pauseOrReleaseLease())
+					} else {
+						leaseCleanupErr = restoreLeaseAfterProbeFailure()
+					}
+					return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote(leaseCleanupErr)), nil
 				}
-				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote(leaseCleanupErr)), nil
 			}
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Info("rooted orchestrator bootstrap confirmed", "project_id", projectID, "root_id", body.Scope.RootIssueID, "session_id", acquired.Lease.SessionID, "disposition", bootstrapDisposition)

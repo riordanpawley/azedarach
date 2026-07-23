@@ -1644,6 +1644,42 @@ func TestRootedBootstrapDeliveryCannotReviveClearedPendingFence(t *testing.T) {
 	}
 }
 
+func TestQueuedRootedBootstrapDoesNotPauseAfterDeliveryWinsFence(t *testing.T) {
+	ctx := context.Background()
+	projectID := "rooted-bootstrap-delivery-won"
+	rootID := "root-bootstrap"
+	sessionID := "az-root-bootstrap"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}}
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).Acquire(ctx, identity, sessionID, func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).SetLifecycle(ctx, identity, sessionID, domain.OrchestratorWorking); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := daemonstate.NewRootedBootstrapAcknowledgementAuthority(store).Acknowledge(ctx, daemonstate.RootedBootstrapAcknowledgement{Identity: identity, SessionID: sessionID, PromptHash: rootedOrchestratorPromptHash("bootstrap"), RuntimeNonce: "nonce-delivered", TmuxPaneID: "1", PanePID: 101, AgentIncarnation: "incarnation-1", AgentThreadID: "thread-1", AcknowledgedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := d.pauseRootedOrchestratorIfBootstrapStillPending(ctx, projectID, identity, sessionID)
+	if err != nil || queued {
+		t.Fatalf("settle delivered bootstrap queued=%t err=%v", queued, err)
+	}
+	lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity)
+	if err != nil || !found || lease.Lifecycle != domain.OrchestratorWorking {
+		t.Fatalf("lease after delivered bootstrap = %+v found=%t err=%v", lease, found, err)
+	}
+}
+
 func TestRootedRestartAfterCallerCancellationSerializesAndAcknowledgesReplacement(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

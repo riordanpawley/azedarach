@@ -2638,29 +2638,45 @@ func (c *Client) applyAgentInputDeliveryMigration(ctx context.Context, db *sql.D
 }
 
 func (c *Client) applyManagedAgentThreadIdentityMigration(ctx context.Context, db *sql.DB, id string) error {
+	sqlText, err := loadMigrationSQL("migrations/0060_managed_agent_thread_identity.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin migration %s: %w", id, err)
 	}
 	defer tx.Rollback()
-	columns := []struct{ table, name, definition string }{
-		{"daemon_managed_agent_incarnations", "agent_thread_id", "TEXT CHECK (agent_thread_id IS NULL OR trim(agent_thread_id) <> '')"},
-		{"agent_input_delivery_intents", "agent_thread_id", "TEXT CHECK (agent_thread_id IS NULL OR trim(agent_thread_id) <> '')"},
-		{"daemon_rooted_bootstrap_acknowledgements", "tmux_pane_id", "TEXT"},
-		{"daemon_rooted_bootstrap_acknowledgements", "pane_pid", "INTEGER"},
-		{"daemon_rooted_bootstrap_acknowledgements", "agent_incarnation", "TEXT"},
-		{"daemon_rooted_bootstrap_acknowledgements", "agent_thread_id", "TEXT"},
+	var executableLines []string
+	for _, line := range strings.Split(sqlText, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "--") {
+			executableLines = append(executableLines, line)
+		}
 	}
-	for _, column := range columns {
-		exists, err := columnExistsDB(ctx, tx, column.table, column.name)
+	for _, statement := range strings.Split(strings.Join(executableLines, "\n"), ";") {
+		statement = strings.TrimSpace(statement)
+		if statement == "" {
+			continue
+		}
+		fields := strings.Fields(statement)
+		if len(fields) < 6 || !strings.EqualFold(fields[0], "ALTER") || !strings.EqualFold(fields[1], "TABLE") ||
+			!strings.EqualFold(fields[3], "ADD") || !strings.EqualFold(fields[4], "COLUMN") {
+			return fmt.Errorf("apply migration %s artifact: unsupported statement %q", id, statement)
+		}
+		exists, err := columnExistsDB(ctx, tx, fields[2], fields[5])
 		if err != nil {
-			return fmt.Errorf("inspect migration %s column %s.%s: %w", id, column.table, column.name, err)
+			return fmt.Errorf("inspect migration %s artifact column %s.%s: %w", id, fields[2], fields[5], err)
 		}
 		if exists {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `ALTER TABLE `+column.table+` ADD COLUMN `+column.name+` `+column.definition); err != nil {
-			return fmt.Errorf("apply migration %s column %s.%s: %w", id, column.table, column.name, err)
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("apply migration %s artifact statement: %w", id, err)
+		}
+	}
+	if c.managedThreadMigrationFailureHook != nil {
+		if err := c.managedThreadMigrationFailureHook("after_schema"); err != nil {
+			return fmt.Errorf("migration %s rolled back: %w", id, err)
 		}
 	}
 	if err := validateManagedAgentThreadIdentitySchema(ctx, tx); err != nil {

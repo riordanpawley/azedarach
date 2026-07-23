@@ -114,6 +114,49 @@ func TestRuntimeStateStoreManagedAgentIdentityRejectsStaleAcrossStores(t *testin
 	}
 }
 
+func TestRuntimeStateStoreManagedAgentIdentityBindsMissingThreadForExactLiveIncarnation(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	observedAt := time.Unix(100, 0)
+	identity := ManagedAgentIdentity{
+		ProjectID: "p", SessionID: "az-1", LogicalPaneID: "agent",
+		TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "same", ObservedAt: observedAt,
+	}
+	if err := store.UpsertManagedAgentIdentity(ctx, identity); err != nil {
+		t.Fatalf("seed identity without thread: %v", err)
+	}
+	bound := identity
+	bound.AgentThreadID = "thread-exact"
+	bound.ObservedAt = observedAt.Add(time.Second)
+	if err := store.UpsertManagedAgentIdentity(ctx, bound); err != nil {
+		t.Fatalf("bind exact live incarnation thread: %v", err)
+	}
+	got, found, err := store.GetManagedAgentIdentity(ctx, "p", "az-1", "agent")
+	if err != nil || !found || got.AgentThreadID != bound.AgentThreadID {
+		t.Fatalf("bound identity = %+v found=%t err=%v", got, found, err)
+	}
+	for _, stale := range []ManagedAgentIdentity{
+		func() ManagedAgentIdentity {
+			value := bound
+			value.AgentThreadID = "thread-other"
+			value.ObservedAt = bound.ObservedAt.Add(time.Second)
+			return value
+		}(),
+		func() ManagedAgentIdentity {
+			value := identity
+			value.PanePID++
+			value.AgentThreadID = "thread-other"
+			value.ObservedAt = bound.ObservedAt.Add(time.Second)
+			return value
+		}(),
+	} {
+		if err := store.UpsertManagedAgentIdentity(ctx, stale); !errors.Is(err, ErrStaleManagedAgentIdentity) {
+			t.Fatalf("unsafe thread replacement error = %v, want ErrStaleManagedAgentIdentity", err)
+		}
+	}
+}
+
 func TestRuntimeStateStoreManagedAgentIdentityAcknowledgementIsExactAndDurable(t *testing.T) {
 	ctx := context.Background()
 	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -533,6 +534,39 @@ func TestManagedAgentSignalIdentityRejectsStaleAndReusedIncarnations(t *testing.
 	}
 	if accepted || !strings.Contains(message, "stale or reused") {
 		t.Fatalf("stale identity accepted=%v message=%q", accepted, message)
+	}
+}
+
+func TestManagedAgentSessionStartBindsThreadToMigratedLiveIncarnation(t *testing.T) {
+	repoDir := initRuntimeSignalGitRepo(t)
+	runner := &managedIdentityTmuxRunner{session: "az-1", pane: "%12", pid: 100}
+	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	d.tmux = tmux.NewClient(runner, slog.Default())
+	t.Cleanup(d.closeRuntimeStateStores)
+	ctx := context.Background()
+	store := d.sessionRuntimeStateStore("p")
+	if err := store.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{
+		ProjectID: "p", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12",
+		PanePID: 100, AgentIncarnation: "migrated-live", ObservedAt: time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	start := protocol.RuntimeSignalIngestCommandBody{
+		TmuxPane: "%12", LogicalPaneID: "agent", PanePID: 100,
+		AgentIncarnation: "migrated-live", AgentThreadID: "thread-from-hook", Event: "session_start",
+	}
+	accepted, message, err := d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", start)
+	if err != nil || !accepted {
+		t.Fatalf("same-incarnation thread bind accepted=%v message=%q err=%v", accepted, message, err)
+	}
+	identity, found, err := store.GetManagedAgentIdentity(ctx, "p", "az-1", "agent")
+	if err != nil || !found || identity.AgentThreadID != start.AgentThreadID {
+		t.Fatalf("bound migrated identity = %+v found=%t err=%v", identity, found, err)
+	}
+	start.AgentThreadID = "thread-conflict"
+	accepted, message, err = d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", start)
+	if err == nil || accepted || !errors.Is(err, daemonstate.ErrStaleManagedAgentIdentity) {
+		t.Fatalf("conflicting thread accepted=%v message=%q err=%v", accepted, message, err)
 	}
 }
 

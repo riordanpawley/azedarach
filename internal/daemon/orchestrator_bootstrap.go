@@ -212,6 +212,44 @@ func (d *Daemon) clearRootedBootstrapPending(ctx context.Context, projectID stri
 	return authority.Invalidate(ctx, identity, sessionID)
 }
 
+// pauseRootedOrchestratorIfBootstrapStillPending resolves the race between a
+// queued Deliver result and its asynchronous delivered callback. Both inspect
+// the acknowledgement fence and mutate the lease under the same scope lock:
+// either the pending fence is paused here, or the callback's final
+// acknowledgement wins and the already-working lease is preserved.
+func (d *Daemon) pauseRootedOrchestratorIfBootstrapStillPending(ctx context.Context, projectID string, identity domain.OrchestratorIdentity, sessionID string) (bool, error) {
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return false, errors.New("rooted bootstrap acknowledgement store unavailable")
+	}
+	queued := false
+	err := store.WithOrchestratorScopeTransition(ctx, identity, func(transitionCtx context.Context) error {
+		acknowledgement, found, err := daemonstate.NewRootedBootstrapAcknowledgementAuthority(store).Get(transitionCtx, identity)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errors.New("rooted bootstrap acknowledgement disappeared while delivery was queued")
+		}
+		if !strings.HasPrefix(acknowledgement.RuntimeNonce, rootedBootstrapPendingNoncePrefix) {
+			return nil
+		}
+		lease, found, err := store.GetOrchestratorScopeLease(transitionCtx, identity)
+		if err != nil {
+			return err
+		}
+		if !found || lease.SessionID != sessionID {
+			return errors.New("rooted orchestrator lease changed while bootstrap delivery was queued")
+		}
+		if _, err := store.SetOrchestratorScopeLeaseLifecycle(transitionCtx, identity, sessionID, domain.OrchestratorPaused); err != nil {
+			return err
+		}
+		queued = true
+		return nil
+	})
+	return queued, err
+}
+
 // pauseRootedOrchestratorAndClearBootstrapPending consumes the pending
 // bootstrap fence in the same exact-scope transition as a user-initiated
 // pause. A delivered-input callback therefore observes either the old working
