@@ -1059,6 +1059,9 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	}
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "command.begin", beginStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	defer d.endCommand()
+	defer func() {
+		d.reconcileOrchestratorContinuationsAfterCommand(ctx, projectID, req.Command, resp, err)
+	}()
 	if daemonhandlers.DaemonRoutesThroughDispatcher(req.Command) {
 		if d.router == nil {
 			return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil

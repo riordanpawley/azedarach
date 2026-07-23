@@ -2319,8 +2319,20 @@ func (d *Daemon) reconcileOrchestrationStartOperation(ctx context.Context, recor
 	if strings.TrimSpace(record.ErrorMessage) == "" {
 		cause = fmt.Errorf("session start operation ended in %s", record.State)
 	}
-	if _, err := issueClient.CompensateOrchestrationStartOperation(ctx, d.canonicalProjectID(record.ProjectID), record.DedupeKey, record.ID, cause); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Warn("compensate terminal orchestration start failed", "project_id", record.ProjectID, "issue_id", record.IssueID, "operation_id", record.ID, "state", record.State, "error", err)
+	if _, err := issueClient.CompensateOrchestrationStartOperation(ctx, d.canonicalProjectID(record.ProjectID), record.DedupeKey, record.ID, cause); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("compensate terminal orchestration start failed", "project_id", record.ProjectID, "issue_id", record.IssueID, "operation_id", record.ID, "state", record.State, "error", err)
+		}
+		return
+	}
+	if err := d.reconcileOrchestratorLifecycles(ctx, record.ProjectID, timeNow().UTC()); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("reconcile orchestrator continuation after terminal start failed",
+			"project_id", record.ProjectID,
+			"issue_id", record.IssueID,
+			"operation_id", record.ID,
+			"state", record.State,
+			"error", err,
+		)
 	}
 }
 

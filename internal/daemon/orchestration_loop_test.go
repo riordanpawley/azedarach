@@ -25,9 +25,6 @@ func TestProjectOrchestratorReviewWakeUsesDurableInputAndCoalescesEquivalentStat
 	client := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
-	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
-		t.Fatal(err)
-	}
 	const projectID, sessionID = "project", "project-orchestrator"
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
@@ -44,14 +41,25 @@ func TestProjectOrchestratorReviewWakeUsesDurableInputAndCoalescesEquivalentStat
 		t.Fatal(err)
 	}
 	seedReadyAgentInput(t, d, runner, projectID, sessionID)
-	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC()); err != nil {
+	body, err := json.Marshal(map[string]any{
+		"task_id": issueID, "event_type": string(domain.IssueEventEvidenceSubmitted),
+		"source": "test", "payload": mustWorkerEvidencePayload(t),
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC().Add(time.Second)); err != nil {
-		t.Fatal(err)
+	resp, err := d.command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "review-evidence-transition",
+		Command:         "task.event.append",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil || resp.Error != nil {
+		t.Fatalf("append evidence transition response=%+v err=%v", resp.Error, err)
 	}
 	if len(runner.inputPayloads) != 1 {
-		t.Fatalf("project review continuation payloads = %d, want exactly 1", len(runner.inputPayloads))
+		t.Fatalf("project review transition continuation payloads = %d, want exactly 1", len(runner.inputPayloads))
 	}
 	prompt := runner.inputPayloads[0]
 	if !strings.Contains(prompt, "scope=project") || !strings.Contains(prompt, "kind=review") || !strings.Contains(prompt, issueID) {
@@ -59,6 +67,12 @@ func TestProjectOrchestratorReviewWakeUsesDurableInputAndCoalescesEquivalentStat
 	}
 	if strings.Contains(prompt, "orchestrate watch") {
 		t.Fatalf("project review prompt retained model watch: %q", prompt)
+	}
+	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.inputPayloads) != 1 {
+		t.Fatalf("duplicate reconciliation delivered %d project review prompts, want exactly 1", len(runner.inputPayloads))
 	}
 	for _, required := range []string{"source=builtin:portable-v1", "digest=", "composition_mode=builtin", "review_epoch=" + issueID + ":", "coverage_contract=", "full diff", "analogous or sibling", "lifecycle ending", "trust and authority boundary", "every instance"} {
 		if !strings.Contains(prompt, required) {

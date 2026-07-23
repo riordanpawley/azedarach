@@ -42,6 +42,44 @@ func (d *Daemon) reconcileOrchestratorLifecycles(ctx context.Context, projectID 
 	return nil
 }
 
+// commandAdvancesOrchestration reports whether a successful daemon command can
+// change the actionable project/root orchestration projection. These command
+// boundaries must run wake enforcement even when the orchestrator was already
+// idle before the transition and therefore emits no later activity hook.
+func commandAdvancesOrchestration(command string) bool {
+	switch strings.TrimSpace(command) {
+	case protocol.CommandIssueFanout,
+		protocol.CommandMailSend,
+		protocol.CommandOrchestrationIntent,
+		"task.event.append",
+		"task.create",
+		"task.close",
+		"task.update_status",
+		"task.update_details",
+		"task.delete",
+		"task.archive",
+		"task.unarchive",
+		"task.dependency.add",
+		"task.dependency.remove":
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *Daemon) reconcileOrchestratorContinuationsAfterCommand(ctx context.Context, projectID, command string, resp protocol.ResponseEnvelope, commandErr error) {
+	if d == nil || commandErr != nil || resp.Error != nil || !commandAdvancesOrchestration(command) {
+		return
+	}
+	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, timeNow().UTC()); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("reconcile orchestrator continuation after actionable command failed",
+			"project_id", projectID,
+			"command", command,
+			"error", err,
+		)
+	}
+}
+
 func (d *Daemon) reconcileOrchestratorLifecycleScope(ctx context.Context, authority *daemonstate.OrchestratorLeaseAuthority, store *daemonstate.RuntimeStateStore, identity domain.OrchestratorIdentity, projectID string, now time.Time, policy domain.OrchestratorLifecyclePolicy) error {
 	lease, found, err := authority.Get(ctx, identity)
 	if err != nil || !found {
