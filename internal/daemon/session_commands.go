@@ -5213,7 +5213,11 @@ func prepareSessionLaunchScript(artifactDir, shell, launchPayload string) (strin
 		_ = file.Close()
 		_ = os.Remove(path)
 	}
-	script := "#!/bin/sh\nrm -f -- \"$0\"\n" + launchPayload + "\n"
+	// Do not remove the script before the interpreter has consumed it. Some
+	// shells stream script input from the path, so an eager rm can turn a valid
+	// launch payload into an unexpected EOF. EXIT also runs when the payload
+	// replaces this shell with the configured interactive shell.
+	script := "#!/bin/sh\ntrap 'rm -f -- \"$0\"' EXIT\n" + launchPayload + "\n"
 	if _, err := file.WriteString(script); err != nil {
 		cleanup()
 		return "", "", err
@@ -5252,7 +5256,7 @@ func (d *Daemon) buildCodexResumeCommand(projectID, issueID, threadID string, yo
 	if threadID = strings.TrimSpace(threadID); threadID != "" {
 		parts = append(parts, singleQuoteForShell(threadID))
 	} else {
-		return "false # managed Codex resume refused: missing exact durable thread id"
+		return ": 'managed Codex resume refused: missing exact durable thread id'; exit 1"
 	}
 	command := strings.Join(parts, " ")
 	command = codexFloopFailOpenProbe(tool) + "; " + command
@@ -6217,7 +6221,7 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 		}
 		command := promptAssignment + "; " + strings.Join(parts, " ")
 		if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
-			return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, "false # initial Codex recovery is daemon-owned after exact hook thread binding")
+			return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, "false || { : 'initial Codex recovery is daemon-owned after exact hook thread binding'; false; }")
 		}
 		if strings.EqualFold(tool, "codex") {
 			return codexFloopFailOpenProbe(tool) + "; " + command
@@ -6227,7 +6231,7 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 
 	command := strings.Join(parts, " ")
 	if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
-		return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, "false # initial Codex recovery is daemon-owned after exact hook thread binding")
+		return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, "false || { : 'initial Codex recovery is daemon-owned after exact hook thread binding'; false; }")
 	}
 	if strings.EqualFold(tool, "codex") {
 		return codexFloopFailOpenProbe(tool) + "; " + command
@@ -6251,7 +6255,7 @@ func (d *Daemon) codexAppServerResumeCommandForThread(projectID, issueID, thread
 	if threadID = strings.TrimSpace(threadID); threadID != "" {
 		parts = append(parts, singleQuoteForShell(threadID))
 	} else {
-		return "false # managed Codex resume refused: missing exact durable thread id"
+		return ": 'managed Codex resume refused: missing exact durable thread id'; exit 1"
 	}
 	return strings.Join(parts, " ")
 }
