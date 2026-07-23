@@ -176,3 +176,15 @@ func TestWorkerMailWakeRejectsMismatchedIssueTarget(t *testing.T) {
 		t.Fatalf("mismatched target diagnostics=%v err=%v, want no intent", counts, err)
 	}
 }
+
+func TestWorkerMailWakeFinalFenceRejectsRepurposedSession(t *testing.T) {
+	for _, session := range []daemonstate.Session{
+		{IssueID: "az-1", Role: daemonstate.SessionRoleAdvisor, ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: "az-1"},
+		{IssueID: "az-2", Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: "az-1"},
+		{IssueID: "az-1", Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: "az-2"},
+	} {
+		if workerMailSessionMatchesIssue(session, "az-1") {
+			t.Fatalf("non-worker issue session passed final fence: %+v", session)
+		}
+	}
+}

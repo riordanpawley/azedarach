@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
@@ -47,7 +48,7 @@ func (d *Daemon) reconcileWorkerMailWake(ctx context.Context, projectID string, 
 	if err != nil {
 		return fmt.Errorf("refresh worker mail session: %w", err)
 	}
-	if !found || !naming.IssueIDsEqual(session.IssueID, issueID.String()) {
+	if !found || !workerMailSessionMatchesIssue(session, issueID.String()) {
 		return fmt.Errorf("active worker session unavailable for issue %s", issueID)
 	}
 	target, found, err := d.currentAgentInputTarget(ctx, projectID, sessionID)
@@ -140,7 +141,25 @@ func (d *Daemon) workerMailWakeDeliveryEligible(ctx context.Context, request dom
 		return false, nil
 	}
 	expectedSession := naming.CanonicalSessionIDForIssue(d.sessionNamingScope(request.ProjectID), issueID).String()
-	return request.SessionID == expectedSession &&
-		request.Payload == formatWorkerMailWake(event) &&
-		(strings.TrimSpace(event.To) == "" || naming.IssueIDsEqual(event.To, issueID.String())), nil
+	if request.SessionID != expectedSession ||
+		request.Payload != formatWorkerMailWake(event) ||
+		(strings.TrimSpace(event.To) != "" && !naming.IssueIDsEqual(event.To, issueID.String())) {
+		return false, nil
+	}
+	store := d.sessionRuntimeStateStoreIfConfigured(request.ProjectID)
+	if store == nil {
+		return false, nil
+	}
+	session, found, err := store.GetSessionState(ctx, request.ProjectID, request.SessionID)
+	if err != nil || !found {
+		return false, err
+	}
+	return workerMailSessionMatchesIssue(session, issueID.String()), nil
+}
+
+func workerMailSessionMatchesIssue(session daemonstate.Session, issueID string) bool {
+	return session.Role == daemonstate.SessionRoleWorker &&
+		session.ScopeKind == daemonstate.SessionScopeIssue &&
+		naming.IssueIDsEqual(session.ScopeID, issueID) &&
+		naming.IssueIDsEqual(session.IssueID, issueID)
 }
