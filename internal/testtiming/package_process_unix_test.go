@@ -39,6 +39,21 @@ func (reader *barrierLifecycleReader) Read([]byte) (int, error) {
 	return 0, io.EOF
 }
 
+type gatedLifecycleReadCloser struct {
+	io.ReadCloser
+	exited  chan struct{}
+	release chan struct{}
+}
+
+func (reader *gatedLifecycleReadCloser) Read(p []byte) (int, error) {
+	count, err := reader.ReadCloser.Read(p)
+	if errors.Is(err, io.EOF) {
+		close(reader.exited)
+		<-reader.release
+	}
+	return count, err
+}
+
 func TestWaitForProcessGroupLifetimeBlocksOnOSLifecycleBarrier(t *testing.T) {
 	reader := &barrierLifecycleReader{entered: make(chan struct{}), release: make(chan struct{})}
 	done := make(chan error, 1)
@@ -70,24 +85,50 @@ func TestRunConcurrentCommandsStartFailureKillsStartedDescendants(t *testing.T) 
 	require.NoError(t, configureProcessGroup(notStarted))
 	var descendantPID int
 	startFailure := errors.New("deterministic second-command start failure")
+	lifecycleValue, configured := processGroupLifecycles.Load(started)
+	require.True(t, configured)
+	lifecycle := lifecycleValue.(*processGroupLifecycle)
+	exited := make(chan struct{})
+	releaseExit := make(chan struct{})
+	lifecycle.reader = &gatedLifecycleReadCloser{
+		ReadCloser: lifecycle.reader,
+		exited:     exited,
+		release:    releaseExit,
+	}
 
-	_, runErr := runConcurrentCommandsWithStarter(context.Background(), []*exec.Cmd{started, notStarted}, io.Discard, io.Discard, func(command *exec.Cmd) error {
-		if command == started {
-			return command.Start()
-		}
-		pidText, readErr := bufio.NewReader(readyRead).ReadString('\n')
-		if readErr != nil {
-			return readErr
-		}
-		descendantPID, readErr = strconv.Atoi(strings.TrimSpace(pidText))
-		if readErr != nil {
-			return readErr
-		}
-		return startFailure
-	})
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := runConcurrentCommandsWithStarter(context.Background(), []*exec.Cmd{started, notStarted}, io.Discard, io.Discard, func(command *exec.Cmd) error {
+			if command == started {
+				return command.Start()
+			}
+			pidText, readErr := bufio.NewReader(readyRead).ReadString('\n')
+			if readErr != nil {
+				return readErr
+			}
+			descendantPID, readErr = strconv.Atoi(strings.TrimSpace(pidText))
+			if readErr != nil {
+				return readErr
+			}
+			return startFailure
+		})
+		done <- runErr
+	}()
+
+	<-exited
+	select {
+	case runErr := <-done:
+		require.Fail(t, "partial-start rollback returned before descendant-exit barrier", "%v", runErr)
+	default:
+	}
+	close(releaseExit)
+	runErr := <-done
 	require.ErrorContains(t, runErr, startFailure.Error())
 	require.Positive(t, descendantPID)
-	assert.False(t, processExists(descendantPID), "descendant survived partial-start rollback")
+	_, startedRetained := processGroupLifecycles.Load(started)
+	assert.False(t, startedRetained, "started command retained lifecycle state after rollback")
+	_, notStartedRetained := processGroupLifecycles.Load(notStarted)
+	assert.False(t, notStartedRetained, "never-started command retained lifecycle state after rollback")
 }
 
 func TestRunProcessGroupSupervisesLeaderExitWithSurvivingDescendant(t *testing.T) {

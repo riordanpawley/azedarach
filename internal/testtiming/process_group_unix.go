@@ -22,7 +22,7 @@ type processOutputDrain struct {
 }
 
 type processGroupLifecycle struct {
-	reader        *os.File
+	reader        io.ReadCloser
 	writer        *os.File
 	anchor        *exec.Cmd
 	anchorControl *os.File
