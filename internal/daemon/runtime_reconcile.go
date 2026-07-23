@@ -15,6 +15,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
@@ -110,8 +111,19 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 	}
 	if d.agentInputService() != nil {
 		retryCtx, cancelRetry := context.WithTimeout(context.WithoutCancel(ctx), durableAgentInputRetryTimeout)
+		if err := d.reconcilePendingWorkerMailWakes(ctx, result.ProjectID.String()); err != nil {
+			errs = append(errs, fmt.Errorf("materialize worker mail wakes: %w", err))
+		}
 		if err := d.agentInputService().RetryPending(retryCtx, result.ProjectID.String(), 100); err != nil {
 			errs = append(errs, fmt.Errorf("reconcile agent input delivery: %w", err))
+		}
+		if client := d.issueClientForProject(result.ProjectID.String()); client != nil {
+			counts, err := client.CountAgentInputDeliveryIntentsByKind(ctx, result.ProjectID.String(), domain.AgentInputMessageWorkerMailWake)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("diagnose worker mail wakes: %w", err))
+			} else {
+				result.AgentInputDeliveryStates = counts
+			}
 		}
 		cancelRetry()
 	}

@@ -5,6 +5,15 @@ the exact managed agent thread while excluding human submission at the attached
 terminal boundary. Terminal output, prompt glyphs, tmux capture, `send-keys`,
 and paste buffers are not delivery acknowledgement.
 
+Actionable worker mail (`orchestrator-message`, `worker-guidance`, and
+`review-finding`) uses this same authority. The daemon first commits the event
+to the project observation stream, then materializes an input intent keyed by
+that monotonic event ID and fenced to the canonical issue session and managed
+agent incarnation. Idle workers may accept it immediately; busy workers retain
+it queued until hook-backed readiness, and runtime reconciliation recovers it
+after daemon restart. Runtime diagnostics report worker-mail intent counts by
+durable state without exposing message content.
+
 ## Runtime contract
 
 For each leased intent, the daemon must:

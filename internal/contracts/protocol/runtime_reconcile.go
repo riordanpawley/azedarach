@@ -30,6 +30,7 @@ type RuntimeReconcileResponseBody struct {
 	IssueLifecycleDivergences []RuntimeLifecycleDivergence `json:"issue_lifecycle_divergences,omitempty" msgpack:"issue_lifecycle_divergences,omitempty"`
 	AdvisorSessionsRecovered  int                          `json:"advisor_sessions_recovered" msgpack:"advisor_sessions_recovered"`
 	AdvisorSessionsCleaned    int                          `json:"advisor_sessions_cleaned" msgpack:"advisor_sessions_cleaned"`
+	AgentInputDeliveryStates  map[string]int               `json:"agent_input_delivery_states,omitempty" msgpack:"agent_input_delivery_states,omitempty"`
 	InvariantSources          map[string]string            `json:"invariant_sources,omitempty" msgpack:"invariant_sources,omitempty"`
 	CrossProjectProjection    *GlobalProjectSnapshot       `json:"cross_project_projection,omitempty" msgpack:"cross_project_projection,omitempty"`
 }

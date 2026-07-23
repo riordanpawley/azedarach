@@ -9,6 +9,7 @@ type AgentInputMessageKind string
 const (
 	AgentInputMessageSessionMessage   AgentInputMessageKind = "session_message"
 	AgentInputMessageOrchestratorWake AgentInputMessageKind = "orchestrator_wake"
+	AgentInputMessageWorkerMailWake   AgentInputMessageKind = "worker_mail_wake"
 	AgentInputMessageDecisionChange   AgentInputMessageKind = "decision_change"
 	AgentInputMessageRootedBootstrap  AgentInputMessageKind = "rooted_bootstrap"
 )

@@ -22,15 +22,16 @@ import (
 )
 
 type daemonMailEvent struct {
-	Seq         int64                  `json:"seq"`
-	ParentIssue string                 `json:"parent_issue"`
-	IssueID     string                 `json:"issue_id,omitempty"`
-	Type        string                 `json:"type"`
-	From        string                 `json:"from,omitempty"`
-	To          string                 `json:"to,omitempty"`
-	Body        string                 `json:"body"`
-	CreatedAt   time.Time              `json:"created_at"`
-	Payload     map[string]interface{} `json:"payload,omitempty"`
+	ObservationID int64                  `json:"-"`
+	Seq           int64                  `json:"seq"`
+	ParentIssue   string                 `json:"parent_issue"`
+	IssueID       string                 `json:"issue_id,omitempty"`
+	Type          string                 `json:"type"`
+	From          string                 `json:"from,omitempty"`
+	To            string                 `json:"to,omitempty"`
+	Body          string                 `json:"body"`
+	CreatedAt     time.Time              `json:"created_at"`
+	Payload       map[string]interface{} `json:"payload,omitempty"`
 }
 
 const (
@@ -109,6 +110,19 @@ func (d *Daemon) handleMailSend(ctx context.Context, req protocol.RequestEnvelop
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 	}
+	if err := d.reconcileWorkerMailWake(ctx, d.projectID(req.Meta), event); err != nil && d.cfg.Logger != nil {
+		// The append-only mail observation remains recovery authority. Do not
+		// turn an already-recorded command into an unsafe client retry merely
+		// because the worker is busy or its managed identity is not ready yet.
+		d.cfg.Logger.Warn("worker mail wake remains pending",
+			"project_id", d.projectID(req.Meta),
+			"parent_issue", event.ParentIssue,
+			"issue_id", event.IssueID,
+			"type", event.Type,
+			"seq", event.Seq,
+			"error", err,
+		)
+	}
 
 	out, err := json.Marshal(mailEventToProtocol(event))
 	if err != nil {
@@ -148,8 +162,8 @@ func (d *Daemon) projectMailEvent(ctx context.Context, projectID, repoDir, deliv
 	if strings.TrimSpace(event.IssueID) == "" {
 		return event, false, nil
 	}
-	projectedType, stewardship := projectStewardshipEventType(domain.IssueObservationEventType(event.Type))
-	if !stewardship {
+	projectedType, durableMailbox := projectedMailboxEventType(domain.IssueObservationEventType(event.Type))
+	if !durableMailbox {
 		return event, false, nil
 	}
 	issueClient := d.issueClientForProject(projectID)
@@ -258,8 +272,8 @@ func validateCanonicalMailOutboxObservation(observation domain.IssueObservationE
 	if !naming.IssueIDsEqual(observation.IssueID.String(), event.IssueID) {
 		return fmt.Errorf("mail_event issue %s does not match observation issue %s", event.IssueID, observation.IssueID)
 	}
-	observationType, observationOK := projectStewardshipEventType(observation.Type)
-	eventType, eventOK := projectStewardshipEventType(domain.IssueObservationEventType(event.Type))
+	observationType, observationOK := projectedMailboxEventType(observation.Type)
+	eventType, eventOK := projectedMailboxEventType(domain.IssueObservationEventType(event.Type))
 	if !observationOK || !eventOK || observationType != eventType {
 		return fmt.Errorf("mail_event type %q does not match canonical observation type %q", event.Type, observation.Type)
 	}
@@ -290,7 +304,8 @@ func daemonMailEventFromObservation(observation domain.IssueObservationEvent) (d
 		return daemonMailEvent{}, fmt.Errorf("decode mail_event created_at: %w", err)
 	}
 	return daemonMailEvent{
-		Seq: projected.Seq, ParentIssue: projected.ParentIssue, IssueID: projected.IssueID.String(), Type: projected.Type,
+		ObservationID: observation.ID,
+		Seq:           projected.Seq, ParentIssue: projected.ParentIssue, IssueID: projected.IssueID.String(), Type: projected.Type,
 		From: projected.From, To: projected.To, Body: projected.Body, CreatedAt: createdAt, Payload: projected.Payload,
 	}, nil
 }
