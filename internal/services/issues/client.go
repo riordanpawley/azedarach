@@ -928,6 +928,7 @@ type Client struct {
 	projectionNotifierWG                 sync.WaitGroup
 	decisionOutboxMigrationFailureHook   func(stage string) error
 	agentInputMigrationFailureHook       func(stage string) error
+	managedThreadMigrationFailureHook    func(stage string) error
 	migrationCeiling                     string // test-only historical startup seam; empty in production
 	decisionIdempotencyFailureHook       func(stage string) error
 	eventSearchMigrationFailureHook      func(stage string) error
