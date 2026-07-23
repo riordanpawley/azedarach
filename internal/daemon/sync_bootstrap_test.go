@@ -37,12 +37,22 @@ func (r *bootstrapRecorder) snapshot() []string {
 }
 
 type bootstrapRecordingServer struct {
-	recorder *bootstrapRecorder
-	started  chan struct{}
+	recorder  *bootstrapRecorder
+	started   chan struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
-func (*bootstrapRecordingServer) Bind() error  { return nil }
-func (*bootstrapRecordingServer) Close() error { return nil }
+func (s *bootstrapRecordingServer) Bind() error {
+	s.recorder.add("bind")
+	return nil
+}
+func (s *bootstrapRecordingServer) Close() error {
+	if s.closed != nil {
+		s.closeOnce.Do(func() { close(s.closed) })
+	}
+	return nil
+}
 
 func (s *bootstrapRecordingServer) Serve(ctx context.Context) error {
 	s.recorder.add("serve")
@@ -61,6 +71,153 @@ func (bootstrapRecordingLock) Acquire() (*lifecycle.Lease, error) {
 
 func (bootstrapRecordingLock) Release() error {
 	return nil
+}
+
+func TestRunBindsBeforeProjectReadMaterializersAndDefersServe(t *testing.T) {
+	recorder := &bootstrapRecorder{}
+	materializerStarted := make(chan struct{})
+	releaseMaterializer := make(chan struct{})
+	serveStarted := make(chan struct{})
+	d := &Daemon{
+		cfg: Config{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		lock:  bootstrapRecordingLock{},
+		serve: &bootstrapRecordingServer{recorder: recorder, started: serveStarted},
+	}
+	d.startProjectReadMaterializersFn = func(context.Context) error {
+		recorder.add("materializer-start")
+		close(materializerStarted)
+		<-releaseMaterializer
+		recorder.add("materializer-finish")
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- d.Run(ctx)
+	}()
+
+	<-materializerStarted
+	if got := recorder.snapshot(); len(got) != 2 || got[0] != "bind" || got[1] != "materializer-start" {
+		t.Fatalf("startup order while materializer blocked = %v, want [bind materializer-start]", got)
+	}
+	select {
+	case <-serveStarted:
+		t.Fatal("daemon served requests before project read materializer initialization completed")
+	default:
+	}
+
+	close(releaseMaterializer)
+	<-serveStarted
+	if got := recorder.snapshot(); len(got) != 4 || got[2] != "materializer-finish" || got[3] != "serve" {
+		t.Fatalf("completed startup order = %v, want [bind materializer-start materializer-finish serve]", got)
+	}
+
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestRunCancellationClosesListenerWhileProjectReadMaterializersAreBlocked(t *testing.T) {
+	recorder := &bootstrapRecorder{}
+	materializerStarted := make(chan struct{})
+	releaseMaterializer := make(chan struct{})
+	listenerClosed := make(chan struct{})
+	serveStarted := make(chan struct{})
+	d := &Daemon{
+		cfg: Config{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		lock: bootstrapRecordingLock{},
+		serve: &bootstrapRecordingServer{
+			recorder: recorder,
+			started:  serveStarted,
+			closed:   listenerClosed,
+		},
+	}
+	d.startProjectReadMaterializersFn = func(context.Context) error {
+		close(materializerStarted)
+		<-releaseMaterializer
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- d.Run(ctx)
+	}()
+
+	<-materializerStarted
+	cancel()
+	<-listenerClosed
+	select {
+	case <-serveStarted:
+		t.Fatal("daemon transferred listener ownership to Serve after cancellation")
+	default:
+	}
+	select {
+	case err := <-errCh:
+		t.Fatalf("Run() returned before blocked materializer exited: %v", err)
+	default:
+	}
+
+	close(releaseMaterializer)
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	select {
+	case <-serveStarted:
+		t.Fatal("daemon started Serve after cancellation during materializer initialization")
+	default:
+	}
+}
+
+func TestRunCancellationBeforeListenerHandoffNeverStartsServe(t *testing.T) {
+	recorder := &bootstrapRecorder{}
+	beforeHandoff := make(chan struct{})
+	releaseHandoff := make(chan struct{})
+	listenerClosed := make(chan struct{})
+	serveStarted := make(chan struct{})
+	d := &Daemon{
+		cfg: Config{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		lock: bootstrapRecordingLock{},
+		serve: &bootstrapRecordingServer{
+			recorder: recorder,
+			started:  serveStarted,
+			closed:   listenerClosed,
+		},
+	}
+	d.startProjectReadMaterializersFn = func(context.Context) error {
+		return nil
+	}
+	d.beforeServeListenerHandoffFn = func() {
+		close(beforeHandoff)
+		<-releaseHandoff
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- d.Run(ctx)
+	}()
+
+	<-beforeHandoff
+	cancel()
+	<-listenerClosed
+	close(releaseHandoff)
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	select {
+	case <-serveStarted:
+		t.Fatal("daemon started Serve after cancellation won listener handoff")
+	default:
+	}
 }
 
 func TestRunStartsServingBeforeSyncBootstrapCompletes(t *testing.T) {

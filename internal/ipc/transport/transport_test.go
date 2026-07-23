@@ -95,8 +95,10 @@ func TestServerBindSignalsReadinessBeforeServingRequests(t *testing.T) {
 	defer cancel()
 
 	socket := tempSocketPath(t)
+	handled := make(chan struct{}, 1)
 	srv := NewServer(socket, Handlers{
 		Handshake: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+			handled <- struct{}{}
 			return protocol.HelloAck{Accepted: true}, nil
 		},
 		Command: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -123,12 +125,36 @@ func TestServerBindSignalsReadinessBeforeServingRequests(t *testing.T) {
 	if !socketDialReady(socket) {
 		t.Fatal("bound listener was not dialable before Serve")
 	}
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatalf("dial bound listener before Serve: %v", err)
+	}
+	defer conn.Close()
+	if err := writeFrame(conn, srv.codec, rpcFrame{
+		Type:  frameTypeHello,
+		Hello: &protocol.Hello{ProtocolVersion: protocol.CurrentVersion},
+	}); err != nil {
+		t.Fatalf("write handshake before Serve: %v", err)
+	}
+	select {
+	case <-handled:
+		t.Fatal("handshake dispatched before Serve")
+	default:
+	}
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()
-	client := NewClient(socket)
-	if _, err := client.Handshake(ctx, protocol.Hello{ProtocolVersion: protocol.CurrentVersion}); err != nil {
-		t.Fatalf("handshake after Serve: %v", err)
+	response, err := readFrame(conn, srv.codec)
+	if err != nil {
+		t.Fatalf("read handshake after Serve: %v", err)
+	}
+	if response.Type != frameTypeHelloAck || response.HelloAck == nil || !response.HelloAck.Accepted {
+		t.Fatalf("handshake response after Serve = %+v, want accepted hello ack", response)
+	}
+	select {
+	case <-handled:
+	default:
+		t.Fatal("handshake was not dispatched after Serve")
 	}
 	cancel()
 	if err := <-errCh; err != nil {
