@@ -566,9 +566,10 @@ func (m *Manager) persistTerminal(params daemonops.UpdateParams) (daemonops.Reco
 		if attempt == terminalPersistenceMaxAttempts {
 			break
 		}
-		if err := m.lifecycleRetryWait(m.base); err != nil {
-			break
-		}
+		// Waiting only spaces the bounded attempts. Terminal persistence uses a
+		// detached write context so manager shutdown or a wait-hook failure
+		// cannot suppress the final recovery attempt.
+		_ = m.lifecycleRetryWait(m.base)
 	}
 	return daemonops.Record{}, &terminalPersistenceError{
 		operationID: params.ID,

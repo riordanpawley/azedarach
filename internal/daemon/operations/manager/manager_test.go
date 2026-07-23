@@ -332,6 +332,57 @@ func TestTerminalPersistenceSQLiteOpenFailureIsBoundedAndCoalesced(t *testing.T)
 	}
 }
 
+func TestTerminalPersistenceStillMakesFinalAttemptWhenRetryWaitEnds(t *testing.T) {
+	tests := []struct {
+		name      string
+		base      func() context.Context
+		retryWait func(context.Context) error
+	}{
+		{
+			name: "wait error",
+			base: context.Background,
+			retryWait: func(context.Context) error {
+				return errors.New("retry wait failed")
+			},
+		},
+		{
+			name: "cancelled manager",
+			base: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			retryWait: func(ctx context.Context) error {
+				return ctx.Err()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sqliteOpenErr := errors.New("unable to open database file: out of memory (14)")
+			store := &controlledTerminalStore{memoryStore: newMemoryStore(), terminalErr: sqliteOpenErr}
+			mgr := New(store, Config{
+				BaseContext:        tt.base(),
+				NewID:              func() string { return "op-terminal-final-attempt" },
+				LifecycleRetryWait: tt.retryWait,
+			})
+
+			if _, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{Kind: "terminal-final-attempt"}, func(context.Context) ([]byte, error) {
+				return []byte("result"), nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := mgr.Drain(context.Background()); !errors.Is(err, sqliteOpenErr) {
+				t.Fatalf("drain error=%v, want SQLite open failure", err)
+			}
+			if got := store.attempts(); got != terminalPersistenceMaxAttempts {
+				t.Fatalf("terminal persistence attempts = %d, want %d", got, terminalPersistenceMaxAttempts)
+			}
+		})
+	}
+}
+
 func cloneRecord(record daemonops.Record) daemonops.Record {
 	record.ResourceKeys = append([]string(nil), record.ResourceKeys...)
 	record.ResultPayload = append([]byte(nil), record.ResultPayload...)
