@@ -20,16 +20,19 @@ type Config struct {
 	Logger                 *slog.Logger
 	LifecycleWriteTimeout  time.Duration
 	LifecycleRetryInterval time.Duration
+	LifecycleRetryWait     func(context.Context) error
 }
 
+const terminalPersistenceMaxAttempts = 2
+
 type Manager struct {
-	store                  daemonops.Store
-	now                    func() time.Time
-	newID                  func() string
-	base                   context.Context
-	log                    *slog.Logger
-	lifecycleWriteTimeout  time.Duration
-	lifecycleRetryInterval time.Duration
+	store                 daemonops.Store
+	now                   func() time.Time
+	newID                 func() string
+	base                  context.Context
+	log                   *slog.Logger
+	lifecycleWriteTimeout time.Duration
+	lifecycleRetryWait    func(context.Context) error
 
 	mu           sync.Mutex
 	intakeClosed bool
@@ -72,18 +75,31 @@ func New(store daemonops.Store, cfg Config) *Manager {
 	if cfg.LifecycleRetryInterval <= 0 {
 		cfg.LifecycleRetryInterval = 100 * time.Millisecond
 	}
+	if cfg.LifecycleRetryWait == nil {
+		retryInterval := cfg.LifecycleRetryInterval
+		cfg.LifecycleRetryWait = func(ctx context.Context) error {
+			timer := time.NewTimer(retryInterval)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			}
+		}
+	}
 	return &Manager{
-		store:                  store,
-		now:                    cfg.Now,
-		newID:                  cfg.NewID,
-		base:                   cfg.BaseContext,
-		log:                    cfg.Logger,
-		lifecycleWriteTimeout:  cfg.LifecycleWriteTimeout,
-		lifecycleRetryInterval: cfg.LifecycleRetryInterval,
-		running:                make(map[string]*managedOp),
-		resourceBusy:           make(map[string]string),
-		activeDedupe:           make(map[string]string),
-		recentDedupe:           make(map[string]recentEntry),
+		store:                 store,
+		now:                   cfg.Now,
+		newID:                 cfg.NewID,
+		base:                  cfg.BaseContext,
+		log:                   cfg.Logger,
+		lifecycleWriteTimeout: cfg.LifecycleWriteTimeout,
+		lifecycleRetryWait:    cfg.LifecycleRetryWait,
+		running:               make(map[string]*managedOp),
+		resourceBusy:          make(map[string]string),
+		activeDedupe:          make(map[string]string),
+		recentDedupe:          make(map[string]recentEntry),
 	}
 }
 
@@ -536,29 +552,62 @@ func (m *Manager) update(ctx context.Context, params daemonops.UpdateParams) (da
 }
 
 func (m *Manager) persistTerminal(params daemonops.UpdateParams) (daemonops.Record, error) {
-	var lastErr error
-	for {
+	var (
+		lastErr  error
+		attempts int
+	)
+	for attempt := 1; attempt <= terminalPersistenceMaxAttempts; attempt++ {
+		attempts = attempt
 		updated, err := m.update(context.WithoutCancel(m.base), params)
 		if err == nil {
 			return updated, nil
 		}
 		lastErr = err
-		if m.log != nil {
-			m.log.Warn("daemon operation terminal persistence retry", "operation_id", params.ID, "state", params.ToState, "error", err)
+		if attempt == terminalPersistenceMaxAttempts {
+			break
 		}
-		timer := time.NewTimer(m.lifecycleRetryInterval)
-		select {
-		case <-m.base.Done():
-			timer.Stop()
-			return daemonops.Record{}, lastErr
-		case <-timer.C:
-		}
+		// Waiting only spaces the bounded attempts. Terminal persistence uses a
+		// detached write context so manager shutdown or a wait-hook failure
+		// cannot suppress the final recovery attempt.
+		_ = m.lifecycleRetryWait(m.base)
 	}
+	return daemonops.Record{}, &terminalPersistenceError{
+		operationID: params.ID,
+		state:       params.ToState,
+		attempts:    attempts,
+		err:         lastErr,
+	}
+}
+
+type terminalPersistenceError struct {
+	operationID string
+	state       daemonops.State
+	attempts    int
+	err         error
+}
+
+func (e *terminalPersistenceError) Error() string {
+	return fmt.Sprintf("persist terminal operation %s as %s after %d attempts: %v", e.operationID, e.state, e.attempts, e.err)
+}
+
+func (e *terminalPersistenceError) Unwrap() error {
+	return e.err
 }
 
 func (m *Manager) logLifecyclePersistenceFailure(operationID string, state daemonops.State, err error) {
 	if m.log != nil {
-		m.log.Error("daemon operation lifecycle persistence failed; authority retained", "operation_id", operationID, "state", state, "error", err)
+		attempts := terminalPersistenceMaxAttempts
+		var persistenceErr *terminalPersistenceError
+		if errors.As(err, &persistenceErr) {
+			attempts = persistenceErr.attempts
+		}
+		m.log.Error("daemon operation lifecycle persistence failed; authority retained",
+			"operation_id", operationID,
+			"state", state,
+			"attempts", attempts,
+			"retry_disposition", "retained_for_interrupted_recovery",
+			"error", err,
+		)
 	}
 }
 
