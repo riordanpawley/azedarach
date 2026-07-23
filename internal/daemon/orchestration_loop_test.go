@@ -81,6 +81,42 @@ func TestProjectOrchestratorReviewWakeUsesDurableInputAndCoalescesEquivalentStat
 	}
 }
 
+func TestCommandAdvancesOrchestrationClassifiesProjectionMutations(t *testing.T) {
+	for _, command := range []string{
+		protocol.CommandIssueFanout,
+		protocol.CommandMailSend,
+		protocol.CommandOrchestrationIntent,
+		protocol.CommandTaskBulkApply,
+		protocol.CommandTaskBulkCleanup,
+		"task.event.append",
+		"task.create",
+		"task.close",
+		"task.ownership.claim",
+		"task.ownership.release",
+		"task.review_lease.recover",
+		"task.update_status",
+		"task.update_details",
+		"task.delete",
+		"task.archive",
+		"task.unarchive",
+		"task.dependency.add",
+		"task.dependency.remove",
+	} {
+		t.Run(command, func(t *testing.T) {
+			if !commandAdvancesOrchestration(command) {
+				t.Fatalf("commandAdvancesOrchestration(%q) = false, want true", command)
+			}
+		})
+	}
+	for _, command := range []string{"", "task.get", "task.list", protocol.CommandOrchestrationSnapshot} {
+		t.Run("read-only/"+command, func(t *testing.T) {
+			if commandAdvancesOrchestration(command) {
+				t.Fatalf("commandAdvancesOrchestration(%q) = true, want false", command)
+			}
+		})
+	}
+}
+
 func TestReviewPromptDigestChangesSemanticWakeRevision(t *testing.T) {
 	action := orchestratorActionableState{Kind: "review", Revision: "snapshot-revision"}
 	first := bindReviewActionPrompt(action, appconfig.ResolvedReviewPrompt{Digest: strings.Repeat("a", 64)})
