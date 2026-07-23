@@ -99,12 +99,30 @@ func TestWorkerMailWakeDeliversIdleExactlyOnce(t *testing.T) {
 	}
 }
 
-func TestWorkerMailWakeDefersBusyAndRecoversAfterRestart(t *testing.T) {
+func TestWorkerMailWakeDefersBusyUntilAgentActivitySafeBoundary(t *testing.T) {
 	f := newWorkerMailWakeFixture(t, "busy", true)
 	f.send(t, "busy-wake")
 	if f.receiver.calls != 0 {
 		t.Fatalf("busy receiver calls=%d, want zero", f.receiver.calls)
 	}
+	later := f.now.Add(time.Second)
+	if _, _, err := f.store.ApplyPhysicalSessionObservation(context.Background(), daemonstate.PhysicalSessionObservation{ProjectID: f.projectID, SessionID: f.sessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: later, ObservedVersion: later.UnixNano()}); err != nil {
+		t.Fatal(err)
+	}
+	if !workerMailActivityWakeRequired("idle") || !workerMailActivityWakeRequired("waiting") || workerMailActivityWakeRequired("busy") {
+		t.Fatal("worker mail safe-boundary activity classification is incorrect")
+	}
+	if err := f.daemon.retryPendingWorkerMailWakes(context.Background(), f.projectID); err != nil {
+		t.Fatal(err)
+	}
+	if f.receiver.calls != 1 {
+		t.Fatalf("safe-boundary receiver calls=%d, want one", f.receiver.calls)
+	}
+}
+
+func TestWorkerMailWakeDefersBusyAndRecoversAfterRestart(t *testing.T) {
+	f := newWorkerMailWakeFixture(t, "busy", true)
+	f.send(t, "busy-restart-wake")
 	later := f.now.Add(time.Second)
 	if _, _, err := f.store.ApplyPhysicalSessionObservation(context.Background(), daemonstate.PhysicalSessionObservation{ProjectID: f.projectID, SessionID: f.sessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: later, ObservedVersion: later.UnixNano()}); err != nil {
 		t.Fatal(err)

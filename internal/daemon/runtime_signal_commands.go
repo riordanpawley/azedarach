@@ -277,6 +277,13 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 	}
 	rev := lastRevision(revisions)
 	out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: true, Revision: rev})
+	if workerMailActivityWakeRequired(activity) {
+		if err := d.retryPendingWorkerMailWakes(ctx, projectID); err != nil {
+			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "worker_mail_wake", OK: false, Message: err.Error()})
+		} else {
+			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "worker_mail_wake", OK: true})
+		}
+	}
 	orchestratorEnded := false
 	if parentSessionID, _, ok := agentScopedSessionParentAndPane(sessionID); ok {
 		canonicalRev, err := d.recordAgentHookActivityEvidenceAndMaterialize(ctx, req.Meta, projectID, parentSessionID, sessionID, cmd.IssueID, activity, cmd)

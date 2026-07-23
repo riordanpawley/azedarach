@@ -27,6 +27,22 @@ func actionableWorkerMailType(eventType string) bool {
 	}
 }
 
+func workerMailActivityWakeRequired(activity string) bool {
+	switch strings.ToLower(strings.TrimSpace(activity)) {
+	case "idle", "waiting":
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *Daemon) retryPendingWorkerMailWakes(ctx context.Context, projectID string) error {
+	if d.agentInputService() == nil {
+		return nil
+	}
+	return d.agentInputService().RetryPending(ctx, projectID, 100)
+}
+
 func (d *Daemon) reconcileWorkerMailWake(ctx context.Context, projectID string, event daemonMailEvent) error {
 	if !actionableWorkerMailType(event.Type) {
 		return nil
