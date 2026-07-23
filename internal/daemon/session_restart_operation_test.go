@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -691,6 +692,68 @@ func TestRestartManagedAgentPanePartialFailureAndBoundedTimeout(t *testing.T) {
 	})
 }
 
+func TestSessionRestartAllCancellationAfterRespawnReconcilesCurrentAndCancelsRemaining(t *testing.T) {
+	d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+	if err := d.runtimeProjectionStateWriter().PersistSessionProjection(context.Background(), target.ProjectID, daemonstate.Session{
+		ID: target.SessionID, IssueID: target.IssueID, Role: daemonstate.SessionRoleWorker,
+		ScopeKind: daemonstate.SessionScopeIssue, ScopeID: target.IssueID, State: daemonstate.SessionStateRunning,
+	}); err != nil {
+		t.Fatalf("seed worker session authority: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var batchCheckpoints []sessionRestartBatchPlan
+	ctx = daemonops.WithProgressReporter(ctx, func(writeCtx context.Context, progress daemonops.Progress) error {
+		if err := writeCtx.Err(); err != nil {
+			return err
+		}
+		if !strings.HasPrefix(progress.Phase, "session.restart_all.batch.") {
+			return nil
+		}
+		var checkpoint sessionRestartBatchPlan
+		if err := json.Unmarshal([]byte(progress.Message), &checkpoint); err != nil {
+			t.Fatalf("decode batch checkpoint: %v", err)
+		}
+		batchCheckpoints = append(batchCheckpoints, checkpoint)
+		return nil
+	})
+	d.sessionRestartRespawn = func(_ context.Context, paneTarget, worktree, command string) (error, bool) {
+		cancel()
+		// Model tmux accepting the destructive command at the same instant the
+		// caller is cancelled. Reconciliation must use its detached context to
+		// observe the exact replacement identity and finish the current target.
+		_, err := runner.Run(context.Background(), "respawn-pane", "-k", "-t", paneTarget, "-c", worktree, command)
+		if err != nil {
+			t.Fatalf("model accepted respawn: %v", err)
+		}
+		return context.Canceled, true
+	}
+
+	remaining := sessionRestartAllTarget{ProjectID: "project", SessionID: "az-2", IssueID: "two", Activity: "idle", TmuxReady: true}
+	result := protocol.SessionRestartAllResponseBody{ProjectID: "project", ProjectIDs: []naming.ProjectID{"project"}}
+	resp, err := d.executeSessionRestartBatch(ctx, protocol.RequestEnvelope{}, "project", []string{"project"}, protocol.SessionRestartAllRequestBody{ProjectID: "project"}, []sessionRestartAllTarget{target, remaining}, result)
+	if err != nil || !resp.OK {
+		t.Fatalf("response=%+v err=%v", resp, err)
+	}
+	var got protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(resp.Body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Sessions) != 2 || !got.Sessions[0].Restarted || got.Sessions[1].Outcome != "cancelled" {
+		t.Fatalf("result = %+v, want reconciled current restart plus remaining cancellation", got)
+	}
+	if got.Sessions[1].Reason != "batch_cancelled_before_dispatch" {
+		t.Fatalf("remaining target = %+v", got.Sessions[1])
+	}
+	respawns, _, _ := runner.snapshot()
+	if respawns != 1 {
+		t.Fatalf("respawns = %d, want only current target dispatched", respawns)
+	}
+	last := batchCheckpoints[len(batchCheckpoints)-1]
+	if last.Cursor != 2 || last.Stage != sessionRestartLifecycleCompleted || !reflect.DeepEqual(last.Results, got.Sessions) {
+		t.Fatalf("final checkpoint = %+v, want combined terminal result %+v", last, got.Sessions)
+	}
+}
+
 func TestRecoverInterruptedSessionRestartConvergesWithoutRespawn(t *testing.T) {
 	d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
 	plan := sessionRestartRecoveryPlan{ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity, Old: daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old", AgentThreadID: exactRestartAgentThreadID}, PlannedIncarnation: "planned", PromptHandoffType: sessionRestartPromptHandoffTypeNone, Stage: "observe"}
@@ -1187,6 +1250,8 @@ func TestDecodeSessionRestartBatchPlanRejectsTargetAuthorityMismatch(t *testing.
 		mutate func(*sessionRestartBatchPlan)
 	}{
 		{name: "current session", mutate: func(plan *sessionRestartBatchPlan) { plan.Current.SessionID = "az-other" }},
+		{name: "cross project target", mutate: func(plan *sessionRestartBatchPlan) { plan.Targets[0].ProjectID = "other-project" }},
+		{name: "cross project scope list", mutate: func(plan *sessionRestartBatchPlan) { plan.ProjectIDs = append(plan.ProjectIDs, "other-project") }},
 		{name: "duplicate target", mutate: func(plan *sessionRestartBatchPlan) { plan.Targets = append(plan.Targets, plan.Targets[0]) }},
 		{name: "completed result", mutate: func(plan *sessionRestartBatchPlan) {
 			plan.Cursor, plan.Current = 1, nil
@@ -1211,6 +1276,23 @@ func TestDecodeSessionRestartBatchPlanRejectsTargetAuthorityMismatch(t *testing.
 				t.Fatalf("mismatched plan decoded: %+v", plan)
 			}
 		})
+	}
+}
+
+func TestDecodeSessionRestartBatchPlanUpgradesLegacyMissingProjectScopeList(t *testing.T) {
+	target := sessionRestartAllTarget{ProjectID: "project", SessionID: "az-1", IssueID: "one", Activity: "idle", TmuxReady: true}
+	legacy := sessionRestartBatchPlan{
+		Version: sessionRestartBatchPlanVersion, ProjectID: "project",
+		Request: protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID("project")},
+		Targets: []sessionRestartAllTarget{target}, Stage: sessionRestartLifecycleRequested,
+	}
+
+	decoded, ok := decodeSessionRestartBatchPlan(restartRecoveryBatchRecord(t, legacy))
+	if !ok {
+		t.Fatal("legacy plan without project_ids was rejected")
+	}
+	if got, want := decoded.ProjectIDs, []string{"project"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("decoded project_ids = %v, want recovered singular scope %v", got, want)
 	}
 }
 
