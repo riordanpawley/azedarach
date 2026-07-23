@@ -48,7 +48,15 @@ func (d *Daemon) reconcileOrchestratorLifecycles(ctx context.Context, projectID 
 // idle before the transition and therefore emits no later activity hook.
 func commandAdvancesOrchestration(command string) bool {
 	switch strings.TrimSpace(command) {
-	case protocol.CommandIssueFanout,
+	case protocol.CommandInteractionCreate,
+		protocol.CommandInteractionDiscuss,
+		protocol.CommandInteractionPropose,
+		protocol.CommandInteractionAnswer,
+		protocol.CommandInteractionResolve,
+		protocol.CommandInteractionWithdraw,
+		protocol.CommandInteractionSupersede,
+		protocol.CommandInteractionRecover,
+		protocol.CommandIssueFanout,
 		protocol.CommandMailSend,
 		protocol.CommandOrchestrationIntent,
 		protocol.CommandTaskBulkApply,
