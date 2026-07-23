@@ -5,12 +5,17 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
 func TestRuntimeSignalIngestProjectsTerminalAgentError(t *testing.T) {
@@ -82,6 +87,110 @@ func TestRuntimeSignalIngestProjectsTerminalAgentError(t *testing.T) {
 	if len(events) != 1 || events[0].Level != "error" || events[0].Blocking == nil || !*events[0].Blocking ||
 		events[0].Message != "codex hook: idle_prompt (terminal agent failure: model_capacity)" {
 		t.Fatalf("hook log events = %+v, want canonical terminal-failure metadata", events)
+	}
+}
+
+func TestRuntimeSignalTerminalAgentErrorQueuesRetriesAndDeduplicatesOrchestratorWake(t *testing.T) {
+	ctx := context.Background()
+	repoDir := initRuntimeSignalGitRepo(t)
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const projectID, orchestratorSessionID = "project", "project-orchestrator"
+	workerSessionID := "az-" + issueID
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[orchestratorSessionID] = true
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.runtimeStoresByProject = map[string]*daemonstate.RuntimeStateStore{projectID: store}
+	d.tmux = tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	identity, err := domain.NewOrchestratorIdentity(projectID, domain.ProjectOrchestrationScope())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).Acquire(ctx, identity, orchestratorSessionID, d.tmux.HasSession); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, identity.Scope, orchestratorSessionID); err != nil {
+		t.Fatal(err)
+	}
+	seedReadyAgentInput(t, d, runner, projectID, orchestratorSessionID)
+	if err := store.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID: workerSessionID, IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, refusingAuthoritativeReceiver{outcome: "not_ready"}, "terminal-wake-unavailable")
+	d.agentInput.deliveryEligible = d.agentInputDeliveryEligible
+	ingest := func(requestID string) {
+		t.Helper()
+		resp, err := d.command(ctx, protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       naming.RequestID(requestID),
+			Kind:            protocol.EnvelopeKindCommand,
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Command:         protocol.CommandRuntimeSignalIngest,
+			Body: mustMarshal(t, protocol.RuntimeSignalIngestCommandBody{
+				Source:    protocol.RuntimeSignalSourceAgentHook,
+				Kind:      protocol.RuntimeSignalKindAgentActivityChanged,
+				IssueID:   issueID,
+				SessionID: workerSessionID + ".pane-42",
+				Agent:     "codex",
+				Hook:      "idle_prompt",
+				Event:     "idle_prompt",
+				Payload: map[string]any{
+					"notification": map[string]any{
+						"message": "Selected model is at capacity. Please try a different model.",
+					},
+				},
+			}),
+		})
+		if err != nil || !resp.OK {
+			t.Fatalf("runtime.signal.ingest response=%+v err=%v", resp.Error, err)
+		}
+	}
+
+	ingest("terminal-wake-unavailable")
+	pending, err := client.ListPendingAgentInputDeliveryIntents(ctx, projectID, time.Now().UTC(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].State != "queued" || pending[0].Request.SessionID != orchestratorSessionID {
+		t.Fatalf("pending terminal wake intents = %+v, want one queued exact-orchestrator intent", pending)
+	}
+	if len(runner.inputPayloads) != 0 {
+		t.Fatalf("unavailable terminal wake delivered payloads = %+v, want queued only", runner.inputPayloads)
+	}
+
+	receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}, sink: func(payload string) {
+		runner.inputPayloads = append(runner.inputPayloads, payload)
+	}}
+	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, receiver, "terminal-wake-retry")
+	d.agentInput.deliveryEligible = d.agentInputDeliveryEligible
+	if err := d.agentInput.RetryPending(ctx, projectID, 10); err != nil {
+		t.Fatal(err)
+	}
+	if receiver.calls != 1 || len(runner.inputPayloads) != 1 || !strings.Contains(runner.inputPayloads[0], issueID) {
+		t.Fatalf("retried terminal wake calls=%d payloads=%+v, want one issue-bound native delivery", receiver.calls, runner.inputPayloads)
+	}
+
+	ingest("terminal-wake-duplicate")
+	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.agentInput.RetryPending(ctx, projectID, 10); err != nil {
+		t.Fatal(err)
+	}
+	if receiver.calls != 1 || len(runner.inputPayloads) != 1 {
+		t.Fatalf("equivalent terminal wake calls=%d payloads=%+v, want exactly one delivery", receiver.calls, runner.inputPayloads)
 	}
 }
 
