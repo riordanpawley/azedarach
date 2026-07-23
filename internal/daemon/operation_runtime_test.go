@@ -1149,6 +1149,7 @@ func TestOperationRuntimeStartupFailsInterruptedOperations(t *testing.T) {
 func TestOperationRuntimeStartupRecoversInterruptedSessionStartWhenCompleted(t *testing.T) {
 	repoDir := t.TempDir()
 	first := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, nextRevision: sequentialRevision()})
+	recoveryCalls := 0
 
 	if _, err := first.store.Create(context.Background(), opstore.CreateParams{
 		OperationID:  "op-start",
@@ -1174,6 +1175,7 @@ func TestOperationRuntimeStartupRecoversInterruptedSessionStartWhenCompleted(t *
 		repoDir:      repoDir,
 		nextRevision: sequentialRevision(),
 		recoverInterrupted: func(_ context.Context, record daemonops.Record) (interruptedOperationRecovery, bool) {
+			recoveryCalls++
 			if record.Kind != "session.start" || record.IssueID != "AZ-2" {
 				return interruptedOperationRecovery{}, false
 			}
@@ -1183,7 +1185,6 @@ func TestOperationRuntimeStartupRecoversInterruptedSessionStartWhenCompleted(t *
 			}, true
 		},
 	})
-	t.Cleanup(func() { _ = restarted.Close() })
 
 	record := waitForRuntimeState(t, restarted, "op-start", daemonops.StateDone)
 	if record.FinishedAt == nil {
@@ -1194,6 +1195,27 @@ func TestOperationRuntimeStartupRecoversInterruptedSessionStartWhenCompleted(t *
 	}
 	if string(record.ResultPayload) == "" {
 		t.Fatal("recovered operation result payload was not preserved")
+	}
+	if recoveryCalls != 1 {
+		t.Fatalf("recovery calls = %d, want exactly one", recoveryCalls)
+	}
+	if err := restarted.Close(); err != nil {
+		t.Fatalf("close recovered runtime: %v", err)
+	}
+	restartedAgain := newOperationRuntime(operationRuntimeConfig{
+		repoDir:      repoDir,
+		nextRevision: sequentialRevision(),
+		recoverInterrupted: func(context.Context, daemonops.Record) (interruptedOperationRecovery, bool) {
+			recoveryCalls++
+			return interruptedOperationRecovery{State: daemonops.StateDone}, true
+		},
+	})
+	t.Cleanup(func() { _ = restartedAgain.Close() })
+	if got := waitForRuntimeState(t, restartedAgain, "op-start", daemonops.StateDone); got.State != daemonops.StateDone {
+		t.Fatalf("second restart state = %s, want done", got.State)
+	}
+	if recoveryCalls != 1 {
+		t.Fatalf("recovery calls after second startup = %d, want exactly one total", recoveryCalls)
 	}
 }
 

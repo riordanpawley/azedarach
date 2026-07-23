@@ -30,24 +30,34 @@ type blockingProgressStore struct {
 
 type controlledTerminalStore struct {
 	*memoryStore
-	attempted chan struct{}
-	allow     chan struct{}
+	mu               sync.Mutex
+	terminalAttempts int
+	terminalErr      error
 }
 
 func (s *controlledTerminalStore) Update(ctx context.Context, params daemonops.UpdateParams) (daemonops.Record, error) {
 	if params.FinishedAt != nil {
-		select {
-		case s.attempted <- struct{}{}:
-		default:
-		}
-		select {
-		case <-s.allow:
-			return s.memoryStore.Update(ctx, params)
-		case <-ctx.Done():
-			return daemonops.Record{}, ctx.Err()
+		s.mu.Lock()
+		s.terminalAttempts++
+		err := s.terminalErr
+		s.mu.Unlock()
+		if err != nil {
+			return daemonops.Record{}, err
 		}
 	}
 	return s.memoryStore.Update(ctx, params)
+}
+
+func (s *controlledTerminalStore) setTerminalError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.terminalErr = err
+}
+
+func (s *controlledTerminalStore) attempts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.terminalAttempts
 }
 
 type blockingStartStore struct {
@@ -216,9 +226,12 @@ func TestLifecycleStartWriteIsBounded(t *testing.T) {
 }
 
 func TestTerminalPersistenceFailureRetainsAuthorityUntilRetrySucceeds(t *testing.T) {
-	store := &controlledTerminalStore{memoryStore: newMemoryStore(), attempted: make(chan struct{}, 1), allow: make(chan struct{})}
+	sqliteOpenErr := errors.New("unable to open database file: out of memory (14)")
+	store := &controlledTerminalStore{memoryStore: newMemoryStore(), terminalErr: sqliteOpenErr}
 	ids := []string{"op-first", "op-second"}
 	var idMu sync.Mutex
+	retryEntered := make(chan struct{})
+	retryAllowed := make(chan struct{})
 	mgr := New(store, Config{
 		NewID: func() string {
 			idMu.Lock()
@@ -227,19 +240,18 @@ func TestTerminalPersistenceFailureRetainsAuthorityUntilRetrySucceeds(t *testing
 			ids = ids[1:]
 			return id
 		},
-		LifecycleWriteTimeout:  25 * time.Millisecond,
-		LifecycleRetryInterval: 10 * time.Millisecond,
+		LifecycleRetryWait: func(context.Context) error {
+			close(retryEntered)
+			<-retryAllowed
+			return nil
+		},
 	})
 	if _, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{Kind: "first", ResourceKeys: []string{"session:one"}}, func(context.Context) ([]byte, error) {
 		return []byte("first"), nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-store.attempted:
-	case <-time.After(time.Second):
-		t.Fatal("terminal persistence was not attempted")
-	}
+	<-retryEntered
 	secondStarted := make(chan struct{})
 	if _, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{Kind: "second", ResourceKeys: []string{"session:one"}}, func(context.Context) ([]byte, error) {
 		close(secondStarted)
@@ -256,40 +268,67 @@ func TestTerminalPersistenceFailureRetainsAuthorityUntilRetrySucceeds(t *testing
 		t.Fatal("resource authority released while first operation remained durably running")
 	default:
 	}
-	close(store.allow)
-	select {
-	case <-secondStarted:
-	case <-time.After(time.Second):
-		t.Fatal("queued operation did not start after terminal persistence retry succeeded")
-	}
+	store.setTerminalError(nil)
+	close(retryAllowed)
+	<-secondStarted
 	if err := mgr.Drain(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if got := store.attempts(); got != 3 {
+		t.Fatalf("terminal persistence attempts = %d, want first failure, exact retry, and second operation success", got)
+	}
 }
 
-func TestTerminalPersistenceFailurePropagatesAndRetainsAuthorityOnShutdown(t *testing.T) {
-	base, stop := context.WithCancel(context.Background())
-	store := &controlledTerminalStore{memoryStore: newMemoryStore(), attempted: make(chan struct{}, 1), allow: make(chan struct{})}
-	mgr := New(store, Config{BaseContext: base, NewID: func() string { return "op-terminal-failure" }, LifecycleWriteTimeout: 25 * time.Millisecond, LifecycleRetryInterval: 10 * time.Millisecond})
+func TestTerminalPersistenceSQLiteOpenFailureIsBoundedAndCoalesced(t *testing.T) {
+	sqliteOpenErr := errors.New("unable to open database file: out of memory (14)")
+	store := &controlledTerminalStore{memoryStore: newMemoryStore(), terminalErr: sqliteOpenErr}
+	logs := &captureHandler{}
+	mgr := New(store, Config{
+		NewID:              func() string { return "op-terminal-failure" },
+		Logger:             slog.New(logs),
+		LifecycleRetryWait: func(context.Context) error { return nil },
+	})
 	if _, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{Kind: "terminal-failure", ResourceKeys: []string{"session:held"}, DedupeKey: "held"}, func(context.Context) ([]byte, error) {
 		return []byte("result"), nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-store.attempted:
-	case <-time.After(time.Second):
-		t.Fatal("terminal persistence was not attempted")
+	if err := mgr.Drain(context.Background()); !errors.Is(err, sqliteOpenErr) {
+		t.Fatalf("drain error=%v, want SQLite open failure", err)
 	}
-	stop()
-	drainCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := mgr.Drain(drainCtx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("drain error=%v, want propagated terminal deadline", err)
+	if got := store.attempts(); got != 2 {
+		t.Fatalf("terminal persistence attempts = %d, want bounded fence of 2", got)
 	}
 	queue := mgr.Queue(daemonops.Query{})
 	if len(queue.Running) != 1 || queue.Running[0].Record.ID != "op-terminal-failure" {
 		t.Fatalf("running authority=%+v, want failed terminal operation retained", queue.Running)
+	}
+	diagnostic, ok := logs.find("daemon operation lifecycle persistence failed; authority retained")
+	if !ok {
+		t.Fatal("missing coalesced terminal persistence diagnostic")
+	}
+	if got := diagnostic.attrs["operation_id"]; got != "op-terminal-failure" {
+		t.Fatalf("operation_id = %v", got)
+	}
+	if got := diagnostic.attrs["attempts"]; got != int64(2) && got != 2 {
+		t.Fatalf("attempts = %v", got)
+	}
+	if got := diagnostic.attrs["retry_disposition"]; got != "retained_for_interrupted_recovery" {
+		t.Fatalf("retry_disposition = %v", got)
+	}
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	diagnostics := 0
+	for _, record := range logs.records {
+		if record.message == "daemon operation lifecycle persistence failed; authority retained" {
+			diagnostics++
+		}
+		if record.message == "daemon operation terminal persistence retry" {
+			t.Fatalf("found per-attempt warning: %+v", record)
+		}
+	}
+	if diagnostics != 1 {
+		t.Fatalf("terminal diagnostics = %d, want one", diagnostics)
 	}
 }
 
