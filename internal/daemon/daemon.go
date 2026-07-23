@@ -769,6 +769,32 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("bind IPC listener before materializer bootstrap: %w", err)
 	}
 	defer func() { _ = d.serve.Close() }()
+	serveOwnsListener := make(chan struct{})
+	preServeCloseDone := make(chan struct{})
+	var handoffListenerOnce sync.Once
+	handoffListener := func() {
+		handoffListenerOnce.Do(func() { close(serveOwnsListener) })
+	}
+	go func() {
+		defer close(preServeCloseDone)
+		select {
+		case <-serveCtx.Done():
+			// Prefer a completed ownership handoff when cancellation races the
+			// transition to Serve; Serve and Run's deferred cleanup own closure
+			// from that point onward.
+			select {
+			case <-serveOwnsListener:
+				return
+			default:
+				_ = d.serve.Close()
+			}
+		case <-serveOwnsListener:
+		}
+	}()
+	defer func() {
+		handoffListener()
+		<-preServeCloseDone
+	}()
 	startProjectReadMaterializers := d.startProjectReadMaterializers
 	if d.startProjectReadMaterializersFn != nil {
 		startProjectReadMaterializers = d.startProjectReadMaterializersFn
@@ -776,6 +802,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := startProjectReadMaterializers(serveCtx); err != nil {
 		return fmt.Errorf("start project read materializers before IPC serve: %w", err)
 	}
+	if serveCtx.Err() != nil {
+		<-preServeCloseDone
+		return nil
+	}
+	handoffListener()
+	<-preServeCloseDone
 	d.cfg.Logger.Info("daemon startup phase", "phase", "projection_delta_stores_open", "duration_ms", time.Since(projectionStartedAt).Milliseconds())
 
 	serveErrCh := make(chan error, 1)

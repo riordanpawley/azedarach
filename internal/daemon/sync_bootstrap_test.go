@@ -37,15 +37,22 @@ func (r *bootstrapRecorder) snapshot() []string {
 }
 
 type bootstrapRecordingServer struct {
-	recorder *bootstrapRecorder
-	started  chan struct{}
+	recorder  *bootstrapRecorder
+	started   chan struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 func (s *bootstrapRecordingServer) Bind() error {
 	s.recorder.add("bind")
 	return nil
 }
-func (*bootstrapRecordingServer) Close() error { return nil }
+func (s *bootstrapRecordingServer) Close() error {
+	if s.closed != nil {
+		s.closeOnce.Do(func() { close(s.closed) })
+	}
+	return nil
+}
 
 func (s *bootstrapRecordingServer) Serve(ctx context.Context) error {
 	s.recorder.add("serve")
@@ -111,6 +118,60 @@ func TestRunBindsBeforeProjectReadMaterializersAndDefersServe(t *testing.T) {
 	cancel()
 	if err := <-errCh; err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestRunCancellationClosesListenerWhileProjectReadMaterializersAreBlocked(t *testing.T) {
+	recorder := &bootstrapRecorder{}
+	materializerStarted := make(chan struct{})
+	releaseMaterializer := make(chan struct{})
+	listenerClosed := make(chan struct{})
+	serveStarted := make(chan struct{})
+	d := &Daemon{
+		cfg: Config{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		lock: bootstrapRecordingLock{},
+		serve: &bootstrapRecordingServer{
+			recorder: recorder,
+			started:  serveStarted,
+			closed:   listenerClosed,
+		},
+	}
+	d.startProjectReadMaterializersFn = func(context.Context) error {
+		close(materializerStarted)
+		<-releaseMaterializer
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- d.Run(ctx)
+	}()
+
+	<-materializerStarted
+	cancel()
+	<-listenerClosed
+	select {
+	case <-serveStarted:
+		t.Fatal("daemon transferred listener ownership to Serve after cancellation")
+	default:
+	}
+	select {
+	case err := <-errCh:
+		t.Fatalf("Run() returned before blocked materializer exited: %v", err)
+	default:
+	}
+
+	close(releaseMaterializer)
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	select {
+	case <-serveStarted:
+		t.Fatal("daemon started Serve after cancellation during materializer initialization")
+	default:
 	}
 }
 
