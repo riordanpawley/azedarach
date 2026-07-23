@@ -81,6 +81,64 @@ func TestProjectOrchestratorReviewWakeUsesDurableInputAndCoalescesEquivalentStat
 	}
 }
 
+func TestTaskAppendNotesWakesProjectOrchestratorAndCoalescesEquivalentState(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const projectID, sessionID = "project", "project-orchestrator"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[sessionID] = true
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.runtimeStoresByProject = map[string]*daemonstate.RuntimeStateStore{projectID: store}
+	d.tmux = tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	identity, _ := domain.NewOrchestratorIdentity(projectID, domain.ProjectOrchestrationScope())
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).Acquire(ctx, identity, sessionID, d.tmux.HasSession); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, identity.Scope, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	seedReadyAgentInput(t, d, runner, projectID, sessionID)
+
+	body, err := json.Marshal(map[string]any{"task_id": issueID, "line": "review evidence is ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "append-notes-review-wake",
+		Command:         "task.append_notes",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil || resp.Error != nil {
+		t.Fatalf("append notes response=%+v err=%v", resp.Error, err)
+	}
+	if len(runner.inputPayloads) != 1 {
+		t.Fatalf("append notes continuation payloads = %d, want exactly 1", len(runner.inputPayloads))
+	}
+	prompt := runner.inputPayloads[0]
+	if !strings.Contains(prompt, "scope=project") || !strings.Contains(prompt, "kind=review") || !strings.Contains(prompt, issueID) {
+		t.Fatalf("append notes review prompt = %q", prompt)
+	}
+	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.inputPayloads) != 1 {
+		t.Fatalf("duplicate reconciliation delivered %d append-notes prompts, want exactly 1", len(runner.inputPayloads))
+	}
+}
+
 func TestCommandAdvancesOrchestrationClassifiesProjectionMutations(t *testing.T) {
 	for _, command := range []string{
 		protocol.CommandIssueFanout,
@@ -96,6 +154,7 @@ func TestCommandAdvancesOrchestrationClassifiesProjectionMutations(t *testing.T)
 		"task.review_lease.recover",
 		"task.update_status",
 		"task.update_details",
+		"task.append_notes",
 		"task.delete",
 		"task.archive",
 		"task.unarchive",

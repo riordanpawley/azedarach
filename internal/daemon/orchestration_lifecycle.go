@@ -61,6 +61,7 @@ func commandAdvancesOrchestration(command string) bool {
 		"task.review_lease.recover",
 		"task.update_status",
 		"task.update_details",
+		"task.append_notes",
 		"task.delete",
 		"task.archive",
 		"task.unarchive",
