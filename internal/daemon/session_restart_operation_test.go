@@ -1279,6 +1279,23 @@ func TestDecodeSessionRestartBatchPlanRejectsTargetAuthorityMismatch(t *testing.
 	}
 }
 
+func TestDecodeSessionRestartBatchPlanUpgradesLegacyMissingProjectScopeList(t *testing.T) {
+	target := sessionRestartAllTarget{ProjectID: "project", SessionID: "az-1", IssueID: "one", Activity: "idle", TmuxReady: true}
+	legacy := sessionRestartBatchPlan{
+		Version: sessionRestartBatchPlanVersion, ProjectID: "project",
+		Request: protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID("project")},
+		Targets: []sessionRestartAllTarget{target}, Stage: sessionRestartLifecycleRequested,
+	}
+
+	decoded, ok := decodeSessionRestartBatchPlan(restartRecoveryBatchRecord(t, legacy))
+	if !ok {
+		t.Fatal("legacy plan without project_ids was rejected")
+	}
+	if got, want := decoded.ProjectIDs, []string{"project"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("decoded project_ids = %v, want recovered singular scope %v", got, want)
+	}
+}
+
 func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
 	t.Run("replacement with unconsumed handoff remains partial", func(t *testing.T) {
 		d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")

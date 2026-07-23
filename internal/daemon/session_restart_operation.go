@@ -684,6 +684,13 @@ func decodeSessionRestartBatchPlan(record daemonops.Record) (sessionRestartBatch
 		return sessionRestartBatchPlan{}, false
 	}
 	canonicalProjectID := protocol.NormalizeProjectID(plan.ProjectID)
+	// ProjectIDs was added to batch checkpoints when restart-all became
+	// explicitly project-scoped. Older version-1 checkpoints did not persist
+	// the redundant scope list, so recover it only from the already-validated
+	// singular ProjectID authority. A populated list must still match exactly.
+	if len(plan.ProjectIDs) == 0 {
+		plan.ProjectIDs = []string{canonicalProjectID}
+	}
 	if len(plan.ProjectIDs) != 1 || protocol.NormalizeProjectID(plan.ProjectIDs[0]) != canonicalProjectID {
 		return sessionRestartBatchPlan{}, false
 	}
