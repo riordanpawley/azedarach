@@ -37,6 +37,28 @@ type AgentInputDeliverySessionLease struct {
 	TakeoverPending          bool
 }
 
+func (c *Client) CountAgentInputDeliveryIntentsByKind(ctx context.Context, projectID string, kind domain.AgentInputMessageKind) (map[string]int, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT state, COUNT(*) FROM agent_input_delivery_intents WHERE project_id=? AND message_kind=? GROUP BY state ORDER BY state`, strings.TrimSpace(projectID), string(kind))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var state string
+		var count int
+		if err := rows.Scan(&state, &count); err != nil {
+			return nil, err
+		}
+		counts[state] = count
+	}
+	return counts, rows.Err()
+}
+
 // ClaimAgentInputDeliverySessionLease excludes every automated delivery to the
 // same durable session. Incarnation is a fenced value, not part of the key, so
 // an old and new incarnation can never own overlapping session-global gates.

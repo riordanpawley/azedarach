@@ -2861,20 +2861,17 @@ func TestOrchestrateMessageCommandRecordsMailboxThenDeliversToSession(t *testing
 		})
 	})
 
-	if len(commands) != 2 || commands[0] != protocol.CommandMailSend || commands[1] != daemonclient.CommandSessionMessage {
-		t.Fatalf("commands = %+v, want mail send then session message", commands)
+	if len(commands) != 1 || commands[0] != protocol.CommandMailSend {
+		t.Fatalf("commands = %+v, want one durable mail send", commands)
 	}
 	if mailBody.ParentIssue != "az-1" || mailBody.IssueID != "az-2" || mailBody.Type != "orchestrator-message" || mailBody.From != "orchestrator" || mailBody.To != "az-2" || mailBody.Body != "Proceed now" {
 		t.Fatalf("mail body = %+v", mailBody)
-	}
-	if sessionBody.SessionID != "az-2" || !strings.Contains(sessionBody.Message, "Orchestrator message for issue az-2 under root az-1") || !strings.Contains(sessionBody.Message, "Proceed now") {
-		t.Fatalf("session body = %+v", sessionBody)
 	}
 	var result orchestrateMessageResult
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("decode result: %v\n%s", err, output)
 	}
-	if !result.Delivered || result.Mailbox.Seq != 7 {
+	if result.Delivered || !result.Queued || result.Mailbox.Seq != 7 {
 		t.Fatalf("result = %+v", result)
 	}
 }
@@ -2945,14 +2942,14 @@ func TestOrchestrateMessageCommandForceSelfDelivery(t *testing.T) {
 		})
 	})
 
-	if len(commands) != 2 || commands[0] != protocol.CommandMailSend || commands[1] != daemonclient.CommandSessionMessage {
-		t.Fatalf("commands = %+v, want mail send then session message", commands)
+	if len(commands) != 1 || commands[0] != protocol.CommandMailSend {
+		t.Fatalf("commands = %+v, want one durable mail send", commands)
 	}
 	var result orchestrateMessageResult
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("decode result: %v\n%s", err, output)
 	}
-	if !result.Delivered || result.Mailbox.Seq != 8 {
+	if result.Delivered || !result.Queued || result.Mailbox.Seq != 8 {
 		t.Fatalf("result = %+v", result)
 	}
 }

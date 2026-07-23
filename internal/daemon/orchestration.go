@@ -1305,6 +1305,23 @@ func projectStewardshipEventType(eventType domain.IssueObservationEventType) (st
 	}
 }
 
+func projectedMailboxEventType(eventType domain.IssueObservationEventType) (string, bool) {
+	if projected, ok := projectStewardshipEventType(eventType); ok {
+		return projected, true
+	}
+	normalized := strings.NewReplacer("_", ".", "-", ".").Replace(strings.ToLower(strings.TrimSpace(string(eventType))))
+	switch normalized {
+	case "orchestrator.message":
+		return "orchestrator-message", true
+	case "worker.guidance":
+		return "worker-guidance", true
+	case "review.finding":
+		return "review-finding", true
+	default:
+		return "", false
+	}
+}
+
 func observationEventMailBody(event domain.IssueObservationEvent) string {
 	if body, ok := event.Payload["body"].(string); ok && strings.TrimSpace(body) != "" {
 		return body

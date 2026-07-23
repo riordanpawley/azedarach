@@ -555,6 +555,49 @@ func (c *Client) ListProjectIssueObservationEvents(ctx context.Context, afterID 
 	return events, nil
 }
 
+// ListUnmaterializedWorkerMailWakeEvents returns the bounded actionable mail
+// outbox rows that do not yet have a corresponding durable delivery intent.
+// The observation ID is the monotonic recovery cursor and intent identity.
+func (c *Client) ListUnmaterializedWorkerMailWakeEvents(ctx context.Context, projectID string, limit int) ([]domain.IssueObservationEvent, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 5000 {
+		limit = 5000
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT e.id, e.issue_id, e.event_type, e.observed_at, e.source, e.source_command, e.operation_id, e.session_id, e.worktree_path, e.payload_json
+		FROM issue_observation_events e
+		WHERE e.source_command = 'mail.send'
+		  AND LOWER(REPLACE(REPLACE(TRIM(e.event_type), '_', '-'), '.', '-')) IN (
+			'orchestrator-message', 'worker-guidance', 'review-finding'
+		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM agent_input_delivery_intents i
+			WHERE i.project_id = ? AND i.intent_key = 'worker-mail-wake:' || CAST(e.id AS TEXT)
+		  )
+		ORDER BY e.id ASC
+		LIMIT ?
+	`, strings.TrimSpace(projectID), limit)
+	if err != nil {
+		return nil, c.wrapError("list-unmaterialized-worker-mail-wakes", "", err)
+	}
+	defer rows.Close()
+	events := make([]domain.IssueObservationEvent, 0, min(limit, 64))
+	for rows.Next() {
+		event, scanErr := scanIssueObservationEvent(rows)
+		if scanErr != nil {
+			return nil, c.wrapError("list-unmaterialized-worker-mail-wakes", "", scanErr)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-unmaterialized-worker-mail-wakes", "", err)
+	}
+	return events, nil
+}
+
 // GetProjectIssueObservationEventsByIDs resolves exact durable source
 // positions without scanning the history between sparse positions.
 func (c *Client) GetProjectIssueObservationEventsByIDs(ctx context.Context, ids []int64) ([]domain.IssueObservationEvent, error) {
@@ -1489,7 +1532,8 @@ func (c *Client) ListIssueObservationMailEvents(ctx context.Context, parentIssue
 			OR source_command = 'mailbox.cutover'
 		  )
 		  AND LOWER(REPLACE(REPLACE(TRIM(event_type), '_', '-'), '.', '-')) IN (
-			'worker-progress', 'worker-blocked', 'worker-integration-ready', 'worker-ready', 'worker-complete'
+			'worker-progress', 'worker-blocked', 'worker-integration-ready', 'worker-ready', 'worker-complete',
+			'orchestrator-message', 'worker-guidance', 'review-finding'
 		  )
 		  AND json_extract(payload_json, '$.mail_event.parent_issue') = ?
 		  AND CAST(json_extract(payload_json, '$.mail_event.seq') AS INTEGER) > 0

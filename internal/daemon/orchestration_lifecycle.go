@@ -274,6 +274,9 @@ func orchestratorActivityWakeRequired(activity string) bool {
 }
 
 func (d *Daemon) agentInputDeliveryEligible(ctx context.Context, request domain.AgentInputDeliveryRequest, now time.Time) (bool, error) {
+	if request.Kind == domain.AgentInputMessageWorkerMailWake {
+		return d.workerMailWakeDeliveryEligible(ctx, request)
+	}
 	if request.Kind != domain.AgentInputMessageOrchestratorWake {
 		return true, nil
 	}
