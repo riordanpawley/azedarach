@@ -29,6 +29,14 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
+const (
+	// Daemon startup includes durable projection bootstrap before socket
+	// readiness is published. A validated replacement can therefore take
+	// longer than the historical 15-second launcher budget on a cold store.
+	daemonStartupReadinessTimeout    = 30 * time.Second
+	daemonReplacementRollbackTimeout = daemonStartupReadinessTimeout + 15*time.Second
+)
+
 // Launcher starts/replaces the singleton daemon process for a user-global socket.
 type Launcher struct {
 	RepoDir                      string
@@ -659,7 +667,7 @@ func (l *Launcher) startWithLifecycleLockModeRetained(ctx context.Context, daemo
 		return nil, fmt.Errorf("start daemon %s: %w", daemonCmd.displayName(), spanErr)
 	}
 	if l.waitForReady != nil {
-		readyCtx, cancel := context.WithTimeout(launchCtx, 15*time.Second)
+		readyCtx, cancel := context.WithTimeout(launchCtx, daemonStartupReadinessTimeout)
 		readyResult := make(chan error, 1)
 		go func() {
 			readyResult <- l.waitForReady(readyCtx, l.SocketPath)
@@ -1667,7 +1675,7 @@ func (l *Launcher) startReplacementWithRollback(ctx context.Context, daemonCmd, 
 	if !predecessorPresent {
 		return fmt.Errorf("start replacement daemon: %w; no predecessor was present to restore", startErr)
 	}
-	rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), daemonReplacementRollbackTimeout)
 	defer rollbackCancel()
 	if rollbackErr := l.startReplacementWithLifecycleLock(rollbackCtx, predecessorCmd); rollbackErr != nil {
 		return fmt.Errorf("start replacement daemon: %w; restore predecessor %s: %v", startErr, predecessorCmd.displayName(), rollbackErr)
