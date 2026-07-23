@@ -175,6 +175,51 @@ func TestRunCancellationClosesListenerWhileProjectReadMaterializersAreBlocked(t 
 	}
 }
 
+func TestRunCancellationBeforeListenerHandoffNeverStartsServe(t *testing.T) {
+	recorder := &bootstrapRecorder{}
+	beforeHandoff := make(chan struct{})
+	releaseHandoff := make(chan struct{})
+	listenerClosed := make(chan struct{})
+	serveStarted := make(chan struct{})
+	d := &Daemon{
+		cfg: Config{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		lock: bootstrapRecordingLock{},
+		serve: &bootstrapRecordingServer{
+			recorder: recorder,
+			started:  serveStarted,
+			closed:   listenerClosed,
+		},
+	}
+	d.startProjectReadMaterializersFn = func(context.Context) error {
+		return nil
+	}
+	d.beforeServeListenerHandoffFn = func() {
+		close(beforeHandoff)
+		<-releaseHandoff
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- d.Run(ctx)
+	}()
+
+	<-beforeHandoff
+	cancel()
+	<-listenerClosed
+	close(releaseHandoff)
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	select {
+	case <-serveStarted:
+		t.Fatal("daemon started Serve after cancellation won listener handoff")
+	default:
+	}
+}
+
 func TestRunStartsServingBeforeSyncBootstrapCompletes(t *testing.T) {
 	recorder := &bootstrapRecorder{}
 	serveStarted := make(chan struct{})

@@ -317,6 +317,7 @@ type Daemon struct {
 	syncBootstrapState              syncBootstrapState
 	syncBootstrapFn                 func(context.Context) error
 	startProjectReadMaterializersFn func(context.Context) error
+	beforeServeListenerHandoffFn    func()
 	reconcileInteractionStalenessFn func(context.Context, string) error
 }
 
@@ -769,30 +770,36 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("bind IPC listener before materializer bootstrap: %w", err)
 	}
 	defer func() { _ = d.serve.Close() }()
-	serveOwnsListener := make(chan struct{})
 	preServeCloseDone := make(chan struct{})
-	var handoffListenerOnce sync.Once
+	listenerOwnershipDecided := make(chan struct{})
+	var listenerOwnership struct {
+		sync.Mutex
+		serveOwns bool
+		cancelled bool
+	}
+	var decideListenerOwnershipOnce sync.Once
 	handoffListener := func() {
-		handoffListenerOnce.Do(func() { close(serveOwnsListener) })
+		listenerOwnership.serveOwns = true
+		decideListenerOwnershipOnce.Do(func() { close(listenerOwnershipDecided) })
 	}
 	go func() {
 		defer close(preServeCloseDone)
 		select {
 		case <-serveCtx.Done():
-			// Prefer a completed ownership handoff when cancellation races the
-			// transition to Serve; Serve and Run's deferred cleanup own closure
-			// from that point onward.
-			select {
-			case <-serveOwnsListener:
-				return
-			default:
-				_ = d.serve.Close()
-			}
-		case <-serveOwnsListener:
+		case <-listenerOwnershipDecided:
+			return
 		}
+		listenerOwnership.Lock()
+		listenerOwnership.cancelled = true
+		if !listenerOwnership.serveOwns {
+			_ = d.serve.Close()
+		}
+		listenerOwnership.Unlock()
 	}()
 	defer func() {
+		listenerOwnership.Lock()
 		handoffListener()
+		listenerOwnership.Unlock()
 		<-preServeCloseDone
 	}()
 	startProjectReadMaterializers := d.startProjectReadMaterializers
@@ -802,12 +809,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := startProjectReadMaterializers(serveCtx); err != nil {
 		return fmt.Errorf("start project read materializers before IPC serve: %w", err)
 	}
-	if serveCtx.Err() != nil {
+	if d.beforeServeListenerHandoffFn != nil {
+		d.beforeServeListenerHandoffFn()
+	}
+	listenerOwnership.Lock()
+	if listenerOwnership.cancelled || serveCtx.Err() != nil {
+		listenerOwnership.Unlock()
 		<-preServeCloseDone
 		return nil
 	}
 	handoffListener()
-	<-preServeCloseDone
+	listenerOwnership.Unlock()
 	d.cfg.Logger.Info("daemon startup phase", "phase", "projection_delta_stores_open", "duration_ms", time.Since(projectionStartedAt).Milliseconds())
 
 	serveErrCh := make(chan error, 1)
