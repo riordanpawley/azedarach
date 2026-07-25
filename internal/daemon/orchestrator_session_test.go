@@ -1525,7 +1525,8 @@ func TestAncestorRootBlockerPropagatesThroughSharedAuthorityAndActiveStartPaths(
 		t.Fatalf("settled ancestor-blocked readiness = %+v", settled)
 	}
 	nestedWorkerResp, err = dReader.handleSessionStartDirect(ctx, protocol.RequestEnvelope{Command: daemonhandlers.CommandSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: nestedWorkerBody})
-	if err != nil || nestedWorkerResp.Error != nil {
+	if err != nil || nestedWorkerResp.Error == nil || nestedWorkerResp.Error.Code != protocol.ErrorCodeUnavailable ||
+		!nestedWorkerResp.Error.Retryable || !strings.Contains(nestedWorkerResp.Error.Message, "authoritative managed-agent acknowledgement") {
 		t.Fatalf("settled nested start response=%+v err=%v", nestedWorkerResp.Error, err)
 	}
 	if lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(runtimeStore).Get(ctx, nestedIdentity); err != nil || !found || lease.SessionID == "" {

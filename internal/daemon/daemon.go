@@ -816,6 +816,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		startProjectReadMaterializers = d.startProjectReadMaterializersFn
 	}
 	if err := startProjectReadMaterializers(serveCtx); err != nil {
+		if serveCtx.Err() != nil {
+			return nil
+		}
 		return fmt.Errorf("start project read materializers before IPC serve: %w", err)
 	}
 	if d.beforeServeListenerHandoffFn != nil {

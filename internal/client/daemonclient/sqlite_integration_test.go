@@ -261,7 +261,7 @@ func startDaemonForTest(t *testing.T, repoDir, socketPath, lockPath string) func
 		cancel()
 		select {
 		case err := <-errCh:
-			if err != nil {
+			if err != nil && !errors.Is(err, context.Canceled) {
 				t.Fatalf("daemon shutdown error: %v", err)
 			}
 		}

@@ -11237,7 +11237,7 @@ func TestBuildSessionLaunchCommandAddsCodexDangerousBypassFlagInYoloMode(t *test
 	}
 }
 
-func TestBuildSessionResumeCommandUsesCodexResumeLastWithOptionsBeforeSelector(t *testing.T) {
+func TestBuildSessionResumeCommandRefusesCodexWithoutExactDurableThread(t *testing.T) {
 	d := &Daemon{
 		cfg: Config{
 			CLITool:                    "codex",
@@ -11247,17 +11247,9 @@ func TestBuildSessionResumeCommandUsesCodexResumeLastWithOptionsBeforeSelector(t
 	}
 
 	command := d.buildSessionResumeCommand(protocol.DefaultProjectID, "axt-123", "codex-axt-123", false, []string{"/tmp/screen.png"})
-	wantOrder := []string{"codex", "resume", `--image "/tmp/screen.png"`, "--dangerously-bypass-approvals-and-sandbox", "--last"}
-	last := -1
-	for _, part := range wantOrder {
-		idx := strings.Index(command, part)
-		if idx <= last {
-			t.Fatalf("command = %q, want %q after index %d", command, part, last)
-		}
-		last = idx
-	}
-	if strings.Contains(command, "Continue your prior task") {
-		t.Fatalf("command = %q, want continuation prompt delivered after launch for codex", command)
+	if !strings.Contains(command, "managed Codex resume refused: missing exact durable thread id") ||
+		!strings.Contains(command, "exit 1") || strings.Contains(command, "--last") {
+		t.Fatalf("command = %q, want fail-closed exact-thread refusal", command)
 	}
 }
 
@@ -11317,7 +11309,7 @@ func TestSessionLaunchArtifactAdaptersCoverConfiguredTools(t *testing.T) {
 		{tool: "claude", mode: sessionLaunchInitial, want: []string{"claude", "--dangerously-skip-permissions"}},
 		{tool: "claude", mode: sessionLaunchResume, want: []string{"claude", "--continue"}},
 		{tool: "codex", mode: sessionLaunchInitial, want: []string{"codex", "--dangerously-bypass-approvals-and-sandbox"}},
-		{tool: "codex", mode: sessionLaunchResume, want: []string{"codex", "resume", "--last"}},
+		{tool: "codex", mode: sessionLaunchResume, want: []string{"codex", "resume", "thread-dky"}},
 		{tool: "opencode", mode: sessionLaunchInitial, want: []string{"opencode", "--prompt"}},
 		{tool: "opencode", mode: sessionLaunchResume, want: []string{"opencode", "--continue", "--prompt"}},
 		{tool: "my-agent", mode: sessionLaunchInitial, want: []string{"my-agent"}},
@@ -11326,7 +11318,11 @@ func TestSessionLaunchArtifactAdaptersCoverConfiguredTools(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.tool+"/"+string(tt.mode), func(t *testing.T) {
 			d := &Daemon{cfg: Config{RepoDir: t.TempDir(), CLITool: tt.tool, SessionShell: "/bin/sh", DangerouslySkipPermissions: true}}
-			artifact, err := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: tt.mode, ProjectID: protocol.DefaultProjectID, IssueID: "dky", SessionID: "az-dky", Prompt: "continue", Yolo: true})
+			spec := sessionLaunchSpec{Mode: tt.mode, ProjectID: protocol.DefaultProjectID, IssueID: "dky", SessionID: "az-dky", Prompt: "continue", Yolo: true}
+			if tt.tool == "codex" && tt.mode == sessionLaunchResume {
+				spec.AgentThreadID = "thread-dky"
+			}
+			artifact, err := d.prepareSessionLaunchArtifact(spec)
 			if err != nil {
 				t.Fatal(err)
 			}
