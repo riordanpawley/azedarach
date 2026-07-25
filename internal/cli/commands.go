@@ -10551,10 +10551,11 @@ func ensureDaemon(ctx context.Context, deps *Dependencies, clientName string) er
 		orch.WithRetryPolicy(*deps.AutostartRetryPolicy)
 	}
 	ack, err := orch.EnsureAttached(ctx, protocol.Hello{
-		ProtocolVersion: protocol.CurrentVersion,
-		ClientName:      clientName,
-		ClientVersion:   buildinfo.VersionString(),
-		Capabilities:    []string{"snapshot", "subscribe"},
+		ProtocolVersion:  protocol.CurrentVersion,
+		ClientName:       clientName,
+		ClientVersion:    buildinfo.VersionString(),
+		Capabilities:     []string{"snapshot", "subscribe"},
+		RequiredCommands: protocol.RequiredCLICommands(),
 	})
 	if err != nil {
 		latencytrace.LogPhaseContext(ctx, deps.Logger, "cli", "daemon_attach", startedAt, "client_name", clientName, "error", err)
@@ -10583,10 +10584,11 @@ func ensureDaemonStableAttach(ctx context.Context, deps *Dependencies, clientNam
 	}
 
 	ack, err := autoclient.NewDaemonHandshaker(deps.DaemonClient).Handshake(ctx, protocol.Hello{
-		ProtocolVersion: protocol.CurrentVersion,
-		ClientName:      clientName,
-		ClientVersion:   buildinfo.VersionString(),
-		Capabilities:    []string{"snapshot", "subscribe"},
+		ProtocolVersion:  protocol.CurrentVersion,
+		ClientName:       clientName,
+		ClientVersion:    buildinfo.VersionString(),
+		Capabilities:     []string{"snapshot", "subscribe"},
+		RequiredCommands: protocol.RequiredCLICommands(),
 	})
 	if err != nil {
 		return fmt.Errorf("stable daemon attach failed: %w", err)

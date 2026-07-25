@@ -56,3 +56,19 @@ func TestNegotiateHelloCompatibilityMatrix(t *testing.T) {
 		})
 	}
 }
+
+func TestNegotiateHelloRequiresExplicitCommandSupport(t *testing.T) {
+	hello := Hello{
+		ProtocolVersion:  CurrentVersion,
+		RequiredCommands: []string{CommandDecisionAcknowledge},
+	}
+	ack := NegotiateHelloWithCommands(hello, "old-daemon", nil)
+	if ack.Accepted || ack.ErrorCode != ErrorCodeIncompatible || !ack.RetryAfterRestart {
+		t.Fatalf("missing command ack = %+v, want replaceable incompatibility", ack)
+	}
+
+	ack = NegotiateHelloWithCommands(hello, "current-daemon", []string{CommandDecisionAcknowledge})
+	if !ack.Accepted || len(ack.NegotiatedCommands) != 1 || ack.NegotiatedCommands[0] != CommandDecisionAcknowledge {
+		t.Fatalf("supported command ack = %+v, want explicit negotiation", ack)
+	}
+}

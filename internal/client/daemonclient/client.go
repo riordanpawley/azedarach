@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/client/compatibility"
@@ -119,6 +120,23 @@ func (c *Client) Handshake(ctx context.Context, hello protocol.Hello) (protocol.
 	if diag := compatibility.ClassifyHandshake(ack); diag != nil {
 		endSpan(fmt.Errorf("handshake diagnostic: %s", diag.Code))
 		return ack, diag
+	}
+	// Real daemon acknowledgements always identify their build. A zero-value
+	// version is retained for in-process test transports that predate command
+	// negotiation and do not model a daemon process.
+	for _, required := range hello.RequiredCommands {
+		if ack.DaemonVersion == "" {
+			break
+		}
+		if !slices.Contains(ack.NegotiatedCommands, required) {
+			ack.Accepted = false
+			ack.ErrorCode = protocol.ErrorCodeIncompatible
+			ack.RetryAfterRestart = true
+			ack.Reason = fmt.Sprintf("daemon did not negotiate required command %q", required)
+			diag := compatibility.ClassifyHandshake(ack)
+			endSpan(fmt.Errorf("handshake diagnostic: %s", diag.Code))
+			return ack, diag
+		}
 	}
 	endSpan(nil)
 	return ack, nil

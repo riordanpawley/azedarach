@@ -631,7 +631,11 @@ func (l *Launcher) startWithLifecycleLockModeRetained(ctx context.Context, daemo
 	}()
 	// Do not bind daemon lifetime to the caller context. Attach contexts are short-lived.
 	args := append([]string{}, daemonCmd.args...)
-	args = append(args, "--repo", l.RepoDir, "--socket", l.SocketPath, "--lock", l.LockPath)
+	if filepath.Clean(l.SocketPath) == filepath.Clean(config.GlobalDaemonSocketPath()) {
+		args = append(args, "--socket", l.SocketPath, "--lock", l.LockPath)
+	} else {
+		args = append(args, "--repo", l.RepoDir, "--socket", l.SocketPath, "--lock", l.LockPath)
+	}
 	launchCtx, endSpan := latencytrace.StartSpan(ctx, "dependency", "daemon_process",
 		"dependency.name", filepath.Base(daemonCmd.executable),
 		"dependency.operation", "start",
@@ -1619,7 +1623,18 @@ func (l *Launcher) verifyCanonicalDaemonArguments(identity processIdentity, labe
 	if l.verifyDaemonArguments != nil {
 		return l.verifyDaemonArguments(identity, label)
 	}
-	want := map[string]string{"repo": l.RepoDir, "socket": l.SocketPath, "lock": l.LockPath}
+	want := map[string]string{"socket": l.SocketPath, "lock": l.LockPath}
+	globalRuntime := filepath.Clean(l.SocketPath) == filepath.Clean(config.GlobalDaemonSocketPath())
+	if !globalRuntime {
+		want["repo"] = l.RepoDir
+	}
+	// A predecessor from the immediately previous launcher contract may carry
+	// --repo even though it owns the user-global socket. Its repository value
+	// is historical launch metadata, not process authority: accept the flag
+	// without comparing it to this caller's repository. New successors remain
+	// strictly project-neutral and must not carry the legacy flag.
+	allowLegacyPredecessorRepo := globalRuntime &&
+		(label == "predecessor" || label == "forced predecessor termination")
 	parsed := make(map[string]string, len(want))
 	arguments := identity.arguments
 	for i := 1; i < len(arguments); i++ {
@@ -1631,6 +1646,9 @@ func (l *Launcher) verifyCanonicalDaemonArguments(identity processIdentity, labe
 		nameValue = strings.TrimPrefix(nameValue, "-")
 		name, value, hasValue := strings.Cut(nameValue, "=")
 		_, known := want[name]
+		if name == "repo" && allowLegacyPredecessorRepo {
+			known = true
+		}
 		if !known {
 			return fmt.Errorf("%s executable arguments contain unexpected flag %q", label, argument)
 		}

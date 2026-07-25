@@ -3451,6 +3451,24 @@ func TestLauncherVerifyCanonicalDaemonArgumentsModelsEffectiveFlagSemantics(t *t
 	}
 }
 
+func TestLauncherVerifyCanonicalGlobalDaemonArgumentsTreatsLegacyRepositoryAsNonAuthority(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher("/consumer-a", config.GlobalDaemonSocketPath())
+
+	valid := processIdentity{arguments: []string{"azd", "--socket", launcher.SocketPath, "--lock", launcher.LockPath}}
+	if err := launcher.verifyCanonicalDaemonArguments(valid, "predecessor"); err != nil {
+		t.Fatalf("project-neutral global arguments rejected: %v", err)
+	}
+	withRepo := processIdentity{arguments: []string{"azd", "--repo", "/consumer-b", "--socket", launcher.SocketPath, "--lock", launcher.LockPath}}
+	if err := launcher.verifyCanonicalDaemonArguments(withRepo, "predecessor"); err != nil {
+		t.Fatalf("legacy predecessor repository metadata became authority: %v", err)
+	}
+	if err := launcher.verifyCanonicalDaemonArguments(withRepo, "replacement socket lock owner"); err == nil || !strings.Contains(err.Error(), "unexpected flag") {
+		t.Fatalf("repository-bearing successor error = %v, want project-neutral rejection", err)
+	}
+}
+
 func TestRealProcessProfileLauncherVerifyReplacementSuccessorRequiresExactInstalledOwner(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
