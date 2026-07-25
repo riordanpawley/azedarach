@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -80,6 +81,15 @@ func cleanupRuntimeSignalTestDaemon(d *Daemon) {
 	d.closeRuntimeStateStores()
 }
 
+func exactRuntimeSignalProjectID(t *testing.T, repoDir string) string {
+	t.Helper()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	return projectID
+}
+
 type runtimeSignalContextInspectingWriter struct {
 	*recordingRuntimeProjectionWriter
 	foreground chan string
@@ -127,7 +137,7 @@ func TestRuntimeSignalIngestGitHookQueuesWriteThroughProjection(t *testing.T) {
 	})
 	useDeterministicRuntimeSignalGitClient(d)
 	t.Cleanup(func() { cleanupRuntimeSignalTestDaemon(d) })
-	projectID := "proj-signals"
+	projectID := exactRuntimeSignalProjectID(t, repoDir)
 	seedRuntimeSignalHookWorktree(t, d, projectID, repoDir)
 
 	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
@@ -687,7 +697,7 @@ func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {
 		RepoDir: repoDir,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	projectID := "proj-signals"
+	projectID := exactRuntimeSignalProjectID(t, repoDir)
 	issueID, err := d.issueClientForProject(projectID).Create(context.Background(), issues.CreateTaskParams{Title: "runtime signal", Type: domain.TypeTask})
 	if err != nil {
 		t.Fatal(err)
@@ -755,7 +765,9 @@ func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {
 	if err != nil || !found || paneObservation.ObservedState != daemonstate.SessionStatePaused || paneObservation.Activity != "waiting" {
 		t.Fatalf("pane physical observation=%+v found=%v err=%v", paneObservation, found, err)
 	}
-	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, parentSessionID)
+	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionIntent(
+		context.Background(), projectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, issueID,
+	)
 	if err != nil {
 		t.Fatalf("GetSessionState canonical: %v", err)
 	}
@@ -819,11 +831,13 @@ func TestRuntimeSignalIngestKeepsCanonicalBusyWhenAnotherPaneWaits(t *testing.T)
 		RepoDir: repoDir,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	projectID := "proj-signals"
+	projectID := exactRuntimeSignalProjectID(t, repoDir)
 	issueID := "az-42"
-	parentSessionID := "pr-az-42"
+	parentSessionID := naming.CanonicalSessionID(repoDir, issueID)
 	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-		ID: parentSessionID, IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+		ID: parentSessionID, IssueID: issueID, Role: daemonstate.SessionRoleWorker,
+		ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID,
+		State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -879,7 +893,7 @@ func TestRuntimeSignalIngestKeepsCanonicalBusyWhenAnotherPaneWaits(t *testing.T)
 		}
 	}
 
-	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, parentSessionID)
+	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetPhysicalSessionObservation(context.Background(), projectID, parentSessionID)
 	if err != nil {
 		t.Fatalf("GetSessionState canonical: %v", err)
 	}
@@ -897,14 +911,16 @@ func TestRuntimeSignalIngestCanonicalStopClearsStalePaneBusyForDisplay(t *testin
 		RepoDir: repoDir,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	projectID := "proj-signals"
+	projectID := exactRuntimeSignalProjectID(t, repoDir)
 	issueID := "az-42"
+	parentSessionID := naming.CanonicalSessionID(repoDir, issueID)
 	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-		ID: "pr-az-42", IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+		ID: parentSessionID, IssueID: issueID, Role: daemonstate.SessionRoleWorker,
+		ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID,
+		State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	parentSessionID := "pr-az-42"
 
 	signals := []protocol.RuntimeSignalIngestCommandBody{
 		{
@@ -949,15 +965,21 @@ func TestRuntimeSignalIngestCanonicalStopClearsStalePaneBusyForDisplay(t *testin
 	}
 
 	tasks := d.enrichTasksWithSessionState(context.Background(), projectID, []domain.Task{{
-		ID:    naming.IssueID(issueID),
-		Title: "Codex worker",
-		Type:  domain.TypeTask,
+		ID:     naming.IssueID(issueID),
+		Title:  "Codex worker",
+		Type:   domain.TypeTask,
+		Status: domain.StatusInProgress,
 	}})
-	if len(tasks) != 1 || tasks[0].Session == nil {
-		t.Fatalf("missing session projection: %+v", tasks)
+	if len(tasks) != 1 || tasks[0].Session != nil {
+		t.Fatalf("stopped canonical session remained visible because of stale pane activity: %+v", tasks)
 	}
-	if tasks[0].Session.Activity != "idle" || tasks[0].Session.ActivitySource != "hooks" {
-		t.Fatalf("display activity = %s/%s, want idle/hooks", tasks[0].Session.Activity, tasks[0].Session.ActivitySource)
+	observation, found, err := d.sessionRuntimeStateStore(projectID).GetPhysicalSessionObservation(context.Background(), projectID, parentSessionID)
+	if err != nil {
+		t.Fatalf("GetPhysicalSessionObservation: %v", err)
+	}
+	if !found || observation.ObservedState != daemonstate.SessionStatePaused ||
+		observation.Activity != "idle" || observation.ActivitySource != "hooks" {
+		t.Fatalf("canonical physical observation = %+v found=%t, want paused idle/hooks", observation, found)
 	}
 }
 
@@ -967,7 +989,7 @@ func TestRuntimeSignalIngestAgentHookStoresObservationWithoutCreatingIntent(t *t
 		RepoDir: repoDir,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	projectID := "proj-signals"
+	projectID := exactRuntimeSignalProjectID(t, repoDir)
 	issueID := "az-42"
 
 	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
@@ -1101,10 +1123,13 @@ func TestRuntimeSignalIngestAgentIdlePromptPersistsWaitingActivity(t *testing.T)
 		RepoDir: repoDir,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	projectID := "proj-signals"
+	projectID := exactRuntimeSignalProjectID(t, repoDir)
 	issueID := "az-42"
+	parentSessionID := naming.CanonicalSessionID(repoDir, issueID)
 	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-		ID: "pr-az-42", IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+		ID: parentSessionID, IssueID: issueID, Role: daemonstate.SessionRoleWorker,
+		ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID,
+		State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1119,7 +1144,7 @@ func TestRuntimeSignalIngestAgentIdlePromptPersistsWaitingActivity(t *testing.T)
 			Source:    protocol.RuntimeSignalSourceAgentHook,
 			Kind:      protocol.RuntimeSignalKindAgentActivityChanged,
 			IssueID:   issueID,
-			SessionID: "pr-az-42.pane-12",
+			SessionID: parentSessionID + ".pane-12",
 			Worktree:  repoDir,
 			Agent:     "codex",
 			Hook:      "idle_prompt",
@@ -1134,15 +1159,14 @@ func TestRuntimeSignalIngestAgentIdlePromptPersistsWaitingActivity(t *testing.T)
 		t.Fatalf("runtime.signal.ingest response not ok: %+v", resp.Error)
 	}
 
-	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, "pr-az-42")
+	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetPhysicalSessionObservation(context.Background(), projectID, parentSessionID)
 	if err != nil {
 		t.Fatalf("GetSessionState canonical: %v", err)
 	}
 	if !found {
 		t.Fatal("expected canonical session projection")
 	}
-	if canonical.IssueID != issueID ||
-		canonical.State != daemonstate.SessionStateRunning ||
+	if canonical.ObservedState != daemonstate.SessionStateRunning ||
 		canonical.Activity != "waiting" ||
 		canonical.ActivitySource != "hooks" {
 		t.Fatalf("canonical session projection = %+v", canonical)
@@ -1155,7 +1179,7 @@ func TestRuntimeSignalMaterializesStoredActivityEvidenceToCanonical(t *testing.T
 		RepoDir: repoDir,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	projectID := "proj-signals"
+	projectID := exactRuntimeSignalProjectID(t, repoDir)
 	issueID := "az-42"
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	store := d.sessionRuntimeStateStore(projectID)
@@ -1209,7 +1233,7 @@ func TestRuntimeSignalMaterializesBusyWhenAnyPaneEvidenceBusy(t *testing.T) {
 		RepoDir: repoDir,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	projectID := "proj-signals"
+	projectID := exactRuntimeSignalProjectID(t, repoDir)
 	issueID := "az-42"
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	store := d.sessionRuntimeStateStore(projectID)
@@ -1272,7 +1296,7 @@ func TestRuntimeSignalActivityEvidencePreservesStoppedDesiredLiveObservedDiverge
 		RepoDir: repoDir,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	projectID := "proj-signals"
+	projectID := exactRuntimeSignalProjectID(t, repoDir)
 	issueID := "az-42"
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	store := d.sessionRuntimeStateStore(projectID)
@@ -1326,7 +1350,7 @@ func TestRuntimeSignalMaterializesActivityEvidenceForRequestedIssuesOnly(t *test
 		RepoDir: repoDir,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	projectID := "proj-signals"
+	projectID := exactRuntimeSignalProjectID(t, repoDir)
 	startedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	store := d.sessionRuntimeStateStore(projectID)
 	for _, issueID := range []string{"az-42", "az-43"} {

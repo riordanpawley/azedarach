@@ -971,6 +971,7 @@ func TestMergeGateFailsClosedOnCandidateMismatch(t *testing.T) {
 }
 
 func TestMergeGateFailureSurfacesPublishedArtifactReference(t *testing.T) {
+	t.Setenv("AZEDARACH_VALIDATION_REQUEST_ID", "")
 	timeoutPath, err := exec.LookPath("timeout")
 	if err != nil {
 		timeoutPath, err = exec.LookPath("gtimeout")

@@ -9439,7 +9439,7 @@ func TestSessionStatusReportsUnknownActivityWithoutHookRows(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &payload); err != nil {
 		t.Fatalf("unmarshal status response: %v", err)
 	}
-	if !strings.Contains(payload.Output, issueID+"\tin_progress\tunknown\tWorker without hooks") {
+	if !strings.Contains(payload.Output, issueID+"\tin_progress\trunning\tunknown\tWorker without hooks") {
 		t.Fatalf("status output = %q, want unknown activity without hook-scoped rows", payload.Output)
 	}
 }
@@ -9515,7 +9515,7 @@ func TestSessionStatusReportsNoAgentActivity(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &payload); err != nil {
 		t.Fatalf("unmarshal status response: %v", err)
 	}
-	if !strings.Contains(payload.Output, issueID+"\tin_progress\tno-agent\tShell only session") {
+	if !strings.Contains(payload.Output, issueID+"\tin_progress\trunning\tno-agent\tShell only session") {
 		t.Fatalf("status output = %q, want no-agent activity", payload.Output)
 	}
 }
@@ -9830,7 +9830,7 @@ func TestRefreshExistingSessionRuntimeStateKeepsLivePaneRowsBusy(t *testing.T) {
 	}
 }
 
-func TestEnrichTasksWithSessionStateTreatsLegacyPaneRowsWithoutActivityAsIdle(t *testing.T) {
+func TestEnrichTasksWithSessionStateKeepsLegacyPaneActivitySeparateFromParentLiveness(t *testing.T) {
 	const (
 		projectID = "proj-legacy-pane-activity"
 		issueID   = "az-1"
@@ -9868,8 +9868,8 @@ func TestEnrichTasksWithSessionStateTreatsLegacyPaneRowsWithoutActivityAsIdle(t 
 	}
 
 	counts := d.sessionProjectionCountsForIssue(ctx, projectID, issueID)
-	if counts.Total != 1 || counts.Active != 0 || counts.Paused != 1 {
-		t.Fatalf("counts = %+v, want one idle legacy pane row", counts)
+	if counts.Total != 1 || counts.Active != 1 || counts.Paused != 0 {
+		t.Fatalf("counts = %+v, want the authoritative busy parent projection", counts)
 	}
 
 	tasks := []domain.Task{{ID: issueID, Title: "legacy pane row", Type: domain.TypeTask}}
@@ -9877,8 +9877,8 @@ func TestEnrichTasksWithSessionStateTreatsLegacyPaneRowsWithoutActivityAsIdle(t 
 	if len(enriched) != 1 || enriched[0].Session == nil {
 		t.Fatalf("missing session in enriched task: %+v", enriched)
 	}
-	if enriched[0].Session.State != domain.SessionPaused {
-		t.Fatalf("enriched session state = %s, want %s", enriched[0].Session.State, domain.SessionPaused)
+	if enriched[0].Session.State != domain.SessionBusy {
+		t.Fatalf("enriched session state = %s, want %s", enriched[0].Session.State, domain.SessionBusy)
 	}
 	if enriched[0].Session.Activity != "idle" || enriched[0].Session.ActivitySource != "hooks" {
 		t.Fatalf("activity = %s/%s, want idle/hooks", enriched[0].Session.Activity, enriched[0].Session.ActivitySource)

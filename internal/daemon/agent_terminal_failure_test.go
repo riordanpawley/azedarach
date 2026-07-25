@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -24,11 +25,16 @@ func TestRuntimeSignalIngestProjectsTerminalAgentError(t *testing.T) {
 		RepoDir: repoDir,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	projectID := "proj-signals"
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
 	issueID := "dae"
-	parentSessionID := "az-dae"
+	parentSessionID := naming.CanonicalSessionID(repoDir, issueID)
 	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-		ID: parentSessionID, IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+		ID: parentSessionID, IssueID: issueID, Role: daemonstate.SessionRoleWorker,
+		ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID,
+		State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +82,7 @@ func TestRuntimeSignalIngestProjectsTerminalAgentError(t *testing.T) {
 		t.Fatalf("runtime signal stages = %+v, want successful orchestrator continuation reconciliation", result.Stages)
 	}
 
-	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, parentSessionID)
+	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetPhysicalSessionObservation(context.Background(), projectID, parentSessionID)
 	if err != nil {
 		t.Fatalf("GetSessionState canonical: %v", err)
 	}
@@ -197,10 +203,15 @@ func TestRuntimeSignalTerminalAgentErrorQueuesRetriesAndDeduplicatesOrchestrator
 func TestRuntimeSignalIngestKeepsOrdinaryIdlePromptWaiting(t *testing.T) {
 	repoDir := initRuntimeSignalGitRepo(t)
 	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
-	projectID := "proj-signals-idle"
-	parentSessionID := "az-dae-idle"
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("ProjectIDForRoot: %v", err)
+	}
+	parentSessionID := naming.CanonicalSessionID(repoDir, "dae")
 	if err := d.sessionRuntimeStateStore(projectID).UpsertSessionState(context.Background(), projectID, daemonstate.Session{
-		ID: parentSessionID, IssueID: "dae", State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+		ID: parentSessionID, IssueID: "dae", Role: daemonstate.SessionRoleWorker,
+		ScopeKind: daemonstate.SessionScopeIssue, ScopeID: "dae",
+		State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -229,12 +240,12 @@ func TestRuntimeSignalIngestKeepsOrdinaryIdlePromptWaiting(t *testing.T) {
 		t.Fatalf("runtime.signal.ingest response not ok: %+v", resp.Error)
 	}
 
-	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetSessionState(context.Background(), projectID, parentSessionID)
+	canonical, found, err := d.sessionRuntimeStateStore(projectID).GetPhysicalSessionObservation(context.Background(), projectID, parentSessionID)
 	if err != nil {
 		t.Fatalf("GetSessionState canonical: %v", err)
 	}
 	if !found || canonical.Activity != "waiting" || canonical.ActivitySource != "hooks" {
-		t.Fatalf("canonical session projection = %+v found=%t, want waiting/hooks", canonical, found)
+		t.Fatalf("canonical session observation = %+v found=%t, want waiting/hooks", canonical, found)
 	}
 }
 
