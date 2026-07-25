@@ -132,6 +132,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandDecisionLinkRemove:      {Command: protocol.CommandDecisionLinkRemove, DispatchTarget: CommandDispatchDecision},
 	protocol.CommandDecisionSyncMD:          {Command: protocol.CommandDecisionSyncMD, DispatchTarget: CommandDispatchDecision},
 	protocol.CommandDecisionImportMD:        {Command: protocol.CommandDecisionImportMD, DispatchTarget: CommandDispatchDecision},
+	protocol.CommandDecisionAcknowledge:     {Command: protocol.CommandDecisionAcknowledge, DispatchTarget: CommandDispatchDecision},
 	protocol.CommandInteractionCreate:       {Command: protocol.CommandInteractionCreate, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
 	protocol.CommandInteractionList:         {Command: protocol.CommandInteractionList, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
 	protocol.CommandInteractionGet:          {Command: protocol.CommandInteractionGet, DispatchTarget: CommandDispatchInteraction, RequiresProjectID: true},
