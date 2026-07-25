@@ -57,6 +57,23 @@ func TestClientHandshakeDiagnostics(t *testing.T) {
 	}
 }
 
+func TestClientHandshakeTreatsLegacyAcceptedAckAsReplaceableWhenCommandRequired(t *testing.T) {
+	c := New(&fakeTransport{
+		handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {
+			// Models an older same-protocol daemon that ignores the additive
+			// required_commands field and returns its legacy accepted ack.
+			return protocol.HelloAck{Accepted: true, DaemonVersion: "old-daemon"}, nil
+		},
+	})
+	ack, diag := c.Handshake(context.Background(), protocol.Hello{
+		ProtocolVersion:  protocol.CurrentVersion,
+		RequiredCommands: []string{protocol.CommandDecisionAcknowledge},
+	})
+	if ack.Accepted || diag == nil || !diag.Retryable || !errors.Is(diag.Err, compatibility.ErrIncompatible) {
+		t.Fatalf("legacy ack = %+v diagnostic = %+v, want replaceable command incompatibility", ack, diag)
+	}
+}
+
 func TestClientCommandPassThrough(t *testing.T) {
 	c := New(&fakeTransport{
 		handshakeFn: func(context.Context, protocol.Hello) (protocol.HelloAck, error) {

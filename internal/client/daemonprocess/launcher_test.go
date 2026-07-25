@@ -1456,7 +1456,7 @@ func TestLauncherStartClosesDaemonLog(t *testing.T) {
 		t.Fatalf("daemon starts = %d, want 1", len(starter.specs))
 	}
 	spec := starter.specs[0]
-	wantArgs := []string{"--repo", repoDir, "--socket", socketPath, "--lock", launcher.LockPath}
+	wantArgs := []string{"--scope-root", repoDir, "--socket", socketPath, "--lock", launcher.LockPath}
 	if spec.command.executable != launcher.BinPath || !reflect.DeepEqual(spec.args, wantArgs) || spec.command.dir != "" {
 		t.Fatalf("daemon start spec = command %+v args %v, want executable %q args %v", spec.command, spec.args, launcher.BinPath, wantArgs)
 	}
@@ -3427,17 +3427,17 @@ func TestLauncherVerifyCanonicalDaemonArgumentsModelsEffectiveFlagSemantics(t *t
 		arguments []string
 		wantErr   string
 	}{
-		{name: "separate values", arguments: []string{"azd", "--repo", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}},
-		{name: "equals values", arguments: []string{"azd", "--repo=/project", "--socket=/runtime/daemon.sock", "--lock=/runtime/daemon.lock"}},
-		{name: "single hyphen like Go flag", arguments: []string{"azd", "-repo=/project", "-socket", "/runtime/daemon.sock", "-lock=/runtime/daemon.lock"}},
-		{name: "triple hyphen is unknown", arguments: []string{"azd", "---repo=/project", "--socket=/runtime/daemon.sock", "--lock=/runtime/daemon.lock"}, wantErr: "unexpected flag"},
-		{name: "wrong value", arguments: []string{"azd", "--repo", "/other", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}, wantErr: "canonical repo"},
-		{name: "missing value", arguments: []string{"azd", "--repo"}, wantErr: "omit canonical repo value"},
-		{name: "duplicate same", arguments: []string{"azd", "--repo", "/project", "--repo", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}, wantErr: "ambiguous duplicate --repo"},
-		{name: "mixed override bypass", arguments: []string{"azd", "--repo=/other", "--repo", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}, wantErr: "ambiguous duplicate --repo"},
-		{name: "ignored after positional", arguments: []string{"azd", "positional", "--repo", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}, wantErr: "positional or trailing"},
-		{name: "trailing positional", arguments: []string{"azd", "--repo", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock", "trailing"}, wantErr: "positional or trailing"},
-		{name: "terminator before flags", arguments: []string{"azd", "--", "--repo", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}, wantErr: "positional or trailing"},
+		{name: "separate values", arguments: []string{"azd", "--scope-root", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}},
+		{name: "equals values", arguments: []string{"azd", "--scope-root=/project", "--socket=/runtime/daemon.sock", "--lock=/runtime/daemon.lock"}},
+		{name: "single hyphen like Go flag", arguments: []string{"azd", "-scope-root=/project", "-socket", "/runtime/daemon.sock", "-lock=/runtime/daemon.lock"}},
+		{name: "triple hyphen is unknown", arguments: []string{"azd", "---scope-root=/project", "--socket=/runtime/daemon.sock", "--lock=/runtime/daemon.lock"}, wantErr: "unexpected flag"},
+		{name: "wrong value", arguments: []string{"azd", "--scope-root", "/other", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}, wantErr: "canonical scope-root"},
+		{name: "missing value", arguments: []string{"azd", "--scope-root"}, wantErr: "omit canonical scope-root value"},
+		{name: "duplicate same", arguments: []string{"azd", "--scope-root", "/project", "--scope-root", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}, wantErr: "ambiguous duplicate --scope-root"},
+		{name: "mixed override bypass", arguments: []string{"azd", "--scope-root=/other", "--scope-root", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}, wantErr: "ambiguous duplicate --scope-root"},
+		{name: "ignored after positional", arguments: []string{"azd", "positional", "--scope-root", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}, wantErr: "positional or trailing"},
+		{name: "trailing positional", arguments: []string{"azd", "--scope-root", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock", "trailing"}, wantErr: "positional or trailing"},
+		{name: "terminator before flags", arguments: []string{"azd", "--", "--scope-root", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}, wantErr: "positional or trailing"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			err := launcher.verifyCanonicalDaemonArguments(processIdentity{arguments: testCase.arguments}, "candidate")
@@ -3448,6 +3448,24 @@ func TestLauncherVerifyCanonicalDaemonArgumentsModelsEffectiveFlagSemantics(t *t
 				t.Fatalf("verifyCanonicalDaemonArguments(%v) error = %v, want %q", testCase.arguments, err, testCase.wantErr)
 			}
 		})
+	}
+}
+
+func TestLauncherVerifyCanonicalGlobalDaemonArgumentsTreatsLegacyRepositoryAsNonAuthority(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher("/consumer-a", config.GlobalDaemonSocketPath())
+
+	valid := processIdentity{arguments: []string{"azd", "--socket", launcher.SocketPath, "--lock", launcher.LockPath}}
+	if err := launcher.verifyCanonicalDaemonArguments(valid, "predecessor"); err != nil {
+		t.Fatalf("project-neutral global arguments rejected: %v", err)
+	}
+	withRepo := processIdentity{arguments: []string{"azd", "--repo", "/consumer-b", "--socket", launcher.SocketPath, "--lock", launcher.LockPath}}
+	if err := launcher.verifyCanonicalDaemonArguments(withRepo, "predecessor"); err != nil {
+		t.Fatalf("legacy predecessor repository metadata became authority: %v", err)
+	}
+	if err := launcher.verifyCanonicalDaemonArguments(withRepo, "replacement socket lock owner"); err == nil || !strings.Contains(err.Error(), "unexpected flag") {
+		t.Fatalf("repository-bearing successor error = %v, want project-neutral rejection", err)
 	}
 }
 
@@ -4125,7 +4143,7 @@ func TestRealProcessProfileLauncherReadinessFailureCleansExactLaunch(t *testing.
 		t.Fatalf("Start() error = %v, want observable spawned-process cleanup", err)
 	}
 	identity := readOwnedExecutableIdentity(t, identityPath)
-	wantArgs := []string{"--repo", repoDir, "--socket", launcher.SocketPath, "--lock", launcher.LockPath}
+	wantArgs := []string{"--scope-root", repoDir, "--socket", launcher.SocketPath, "--lock", launcher.LockPath}
 	if len(identity.arguments) < len(wantArgs) || !slices.Equal(identity.arguments[len(identity.arguments)-len(wantArgs):], wantArgs) {
 		t.Fatalf("spawned args = %q, want canonical suffix %q", identity.arguments, wantArgs)
 	}

@@ -28,13 +28,13 @@ var daemonExecutable = os.Executable
 func main() {
 	var socketPath string
 	var lockPath string
-	var repoDir string
+	var scopeRoot string
 	var showVersion bool
 	var showPreflight bool
 
 	flag.StringVar(&socketPath, "socket", "", "unix socket path")
 	flag.StringVar(&lockPath, "lock", "", "lock file path")
-	flag.StringVar(&repoDir, "repo", "", "repository root")
+	flag.StringVar(&scopeRoot, "scope-root", "", "explicit development runtime scope root")
 	flag.BoolVar(&showVersion, "version", false, "print version")
 	flag.BoolVar(&showVersion, "v", false, "print version")
 	flag.BoolVar(&showPreflight, "preflight", false, "print daemon compatibility report")
@@ -52,33 +52,35 @@ func main() {
 		return
 	}
 
-	if repoDir == "" {
-		cwd, err := os.Getwd()
+	// azd is intentionally user-global and project-neutral at process boot.
+	// Project configuration is loaded only after a typed request resolves a
+	// registered project identity inside the daemon.
+	scopedRuntime := config.UseScopedDaemonRuntimeFor(scopeRoot)
+	if strings.TrimSpace(scopeRoot) != "" && !scopedRuntime {
+		fmt.Fprintln(os.Stderr, "--scope-root requires AZEDARACH_DAEMON_SCOPE=worktree and an Azedarach development worktree")
+		os.Exit(1)
+	}
+	cfg := config.DefaultConfig()
+	if scopedRuntime {
+		var err error
+		cfg, err = config.LoadConfig(scopeRoot)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to resolve cwd: %v\n", err)
+			fmt.Fprintf(os.Stderr, "failed to load scoped config: %v\n", err)
 			os.Exit(1)
 		}
-		repoDir = cwd
-	}
-
-	cfg, err := config.LoadConfig(repoDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
-		os.Exit(1)
 	}
 	latencytrace.SetConfigEnabled(cfg.Diagnostics.LatencyTrace)
 
 	if socketPath == "" {
-		socketPath = config.DaemonSocketPathFor(repoDir)
+		socketPath = config.GlobalDaemonSocketPath()
 	}
 	if lockPath == "" {
-		lockPath = config.DaemonLockPathFor(repoDir)
+		lockPath = config.GlobalDaemonLockPath()
 	}
 	if err := validateDaemonLaunchFence(socketPath); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
-	scopedRuntime := config.UseScopedDaemonRuntimeFor(repoDir)
 	managedGenerationBinDir, err := managedDaemonGenerationBinDir(scopedRuntime)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -87,10 +89,14 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	if scopeWatchPath := resolveScopedWorktreeWatchPath(repoDir); scopeWatchPath != "" {
+	runtimeRoot := config.GlobalDaemonRuntimeDir()
+	if scopedRuntime {
+		runtimeRoot = scopeRoot
+	}
+	if scopeWatchPath := resolveScopedWorktreeWatchPath(scopeRoot); scopeWatchPath != "" {
 		startWorktreeExistenceWatch(ctx, cancel, scopeWatchPath, 2*time.Second)
 	}
-	outputRedirect, err := redirectDaemonProcessOutput(repoDir, cfg)
+	outputRedirect, err := redirectDaemonProcessOutput(runtimeRoot, cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to configure daemon log rotation: %v\n", err)
 	} else {
@@ -102,7 +108,7 @@ func main() {
 	defer shutdownObservability()
 
 	d := daemon.New(daemon.Config{
-		RepoDir:                    repoDir,
+		RepoDir:                    scopeRoot,
 		SocketPath:                 socketPath,
 		LockPath:                   lockPath,
 		ScopedRuntime:              scopedRuntime,
