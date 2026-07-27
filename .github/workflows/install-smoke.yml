@@ -30,6 +30,7 @@ jobs:
       - name: Build + install standalone binaries without launching TUI
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
           AZ_INSTALL_DIR="$RUNNER_TEMP/bin" ./scripts/build-install-run.sh --no-run
           test -x "$RUNNER_TEMP/bin/az"
           test -x "$RUNNER_TEMP/bin/azd"

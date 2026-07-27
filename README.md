@@ -317,6 +317,19 @@ flowchart TD
 
 This list is intentionally non-exhaustive. Run `just --list` for all available tasks.
 
+Run `direnv allow` after cloning. Personal provider credentials are committed
+only as SOPS ciphertext in `config/env/development.env` and decrypted directly
+into the shell:
+
+```bash
+sops config/env/development.env
+direnv reload
+```
+
+Use `.envrc.local` only for unshared machine-specific overrides. Do not create a
+shared plaintext `.env.local`. Change recipients in `.sops.yaml`, then run
+`sops updatekeys config/env/development.env`.
+
 ```bash
 just build         # build isolated .tmp/az-test/az + azd validation binaries
 just run           # restart daemon + run az

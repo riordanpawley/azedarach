@@ -1,0 +1,5 @@
+creation_rules:
+  - path_regex: config/env/development\.env$
+    age:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJlfcHbJ7VlOJc9xQV323qhHcxy3Z26WyX/Uwqh7iIyL
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUl4QlRdr55h/Y+iNvIbC3j1960GY3lq7pNtRS38/9G
