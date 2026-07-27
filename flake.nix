@@ -29,6 +29,8 @@
               with pkgs;
               [
                 gh
+                age
+                sops
                 coreutils # GNU timeout bounds the full merge/rebase gate process tree.
                 viu # Terminal image viewer with Kitty graphics protocol support
                 go
